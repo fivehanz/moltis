@@ -8,10 +8,13 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use moltis_gateway::auth;
+use moltis_gateway::chat::{LiveChatService, LiveModelService};
 use moltis_gateway::methods::MethodRegistry;
 use moltis_gateway::server::build_gateway_app;
 use moltis_gateway::services::GatewayServices;
 use moltis_gateway::state::GatewayState;
+
+use moltis_agents::providers::ProviderRegistry;
 
 /// Spin up a test gateway on an ephemeral port, return the bound address.
 async fn start_test_server() -> SocketAddr {
@@ -197,4 +200,54 @@ async fn ws_system_presence_shows_connected_client() {
     assert_eq!(us["platform"], "test");
 
     ws.close(None).await.ok();
+}
+
+/// Reproduce the full `start_gateway` init sequence (with provider wiring)
+/// inside an async runtime. This catches panics like "Cannot block the current
+/// thread from within a runtime" that only surface at run time.
+#[tokio::test]
+async fn gateway_startup_with_llm_wiring_does_not_block() {
+    let resolved_auth = auth::resolve_auth(None, None);
+    let registry = Arc::new(ProviderRegistry::from_env());
+
+    let mut services = GatewayServices::noop();
+    if !registry.is_empty() {
+        services = services.with_model(Arc::new(LiveModelService::new(Arc::clone(&registry))));
+    }
+
+    let state = GatewayState::new(resolved_auth, services);
+
+    // This is the call that used to panic with blocking_write inside async.
+    if !registry.is_empty() {
+        state
+            .set_chat(Arc::new(LiveChatService::new(
+                Arc::clone(&registry),
+                Arc::clone(&state),
+            )))
+            .await;
+    }
+
+    // Even without real API keys the override path must work.
+    // Force it with an empty registry to exercise set_chat unconditionally.
+    let resolved_auth2 = auth::resolve_auth(None, None);
+    let registry2 = Arc::new(ProviderRegistry::from_env());
+    let state2 = GatewayState::new(resolved_auth2, GatewayServices::noop());
+    state2
+        .set_chat(Arc::new(LiveChatService::new(
+            Arc::clone(&registry2),
+            Arc::clone(&state2),
+        )))
+        .await;
+
+    // Verify chat override is active — chat.send should return an error about
+    // missing providers rather than "chat not configured" (the noop response).
+    let chat = state2.chat().await;
+    let result = chat.send(serde_json::json!({ "text": "hello" })).await;
+    match result {
+        Err(e) => assert!(
+            e.contains("no LLM providers configured"),
+            "expected provider error, got: {e}"
+        ),
+        Ok(_) => panic!("expected error from LiveChatService without providers"),
+    }
 }

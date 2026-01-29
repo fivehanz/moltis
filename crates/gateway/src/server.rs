@@ -12,8 +12,11 @@ use tracing::info;
 
 use moltis_protocol::TICK_INTERVAL_MS;
 
+use moltis_agents::providers::ProviderRegistry;
+
 use crate::auth;
 use crate::broadcast::broadcast_tick;
+use crate::chat::{LiveChatService, LiveModelService};
 use crate::methods::MethodRegistry;
 use crate::services::GatewayServices;
 use crate::state::GatewayState;
@@ -59,8 +62,26 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
     let password = std::env::var("MOLTIS_PASSWORD").ok();
     let resolved_auth = auth::resolve_auth(token, password);
 
-    let services = GatewayServices::noop();
+    // Discover LLM providers from env.
+    let registry = Arc::new(ProviderRegistry::from_env());
+    let provider_summary = registry.provider_summary();
+
+    let mut services = GatewayServices::noop();
+    if !registry.is_empty() {
+        services = services.with_model(Arc::new(LiveModelService::new(Arc::clone(&registry))));
+    }
+
     let state = GatewayState::new(resolved_auth, services);
+
+    // Wire live chat service (needs state reference, so done after state creation).
+    if !registry.is_empty() {
+        let live_chat = Arc::new(LiveChatService::new(
+            Arc::clone(&registry),
+            Arc::clone(&state),
+        ));
+        state.set_chat(live_chat).await;
+    }
+
     let methods = Arc::new(MethodRegistry::new());
 
     let app = build_gateway_app(Arc::clone(&state), Arc::clone(&methods));
@@ -77,6 +98,7 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
             addr
         ),
         format!("{} methods registered", methods.method_names().len()),
+        format!("llm: {}", provider_summary),
     ];
     let width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 4;
     info!("┌{}┐", "─".repeat(width));

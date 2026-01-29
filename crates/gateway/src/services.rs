@@ -378,6 +378,16 @@ pub struct GatewayServices {
 }
 
 impl GatewayServices {
+    pub fn with_chat(mut self, chat: Arc<dyn ChatService>) -> Self {
+        self.chat = chat;
+        self
+    }
+
+    pub fn with_model(mut self, model: Arc<dyn ModelService>) -> Self {
+        self.model = model;
+        self
+    }
+
     /// Create a service bundle with all noop implementations.
     pub fn noop() -> Self {
         Self {

@@ -55,6 +55,11 @@ uuid = { version = "1", features = ["v4"] }
 # Async streams
 futures = "0.3"
 tokio-tungstenite = "0.26"
+tokio-stream = "0.1"
+dotenvy = "0.15"
+# LLM provider crates (optional, behind feature flags)
+genai = "0.5"
+async-openai = { version = "0.32", features = ["chat-completion"] }
 
 # Workspace crates
 moltis-common = { path = "crates/common" }

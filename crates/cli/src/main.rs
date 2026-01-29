@@ -105,6 +105,7 @@ fn init_telemetry(cli: &Cli) {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
     let cli = Cli::parse();
     init_telemetry(&cli);
 

@@ -3,6 +3,11 @@ name = "moltis-agents"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["provider-genai", "provider-async-openai"]
+provider-genai = ["dep:genai"]
+provider-async-openai = ["dep:async-openai"]
+
 [dependencies]
 moltis-common = { workspace = true }
 moltis-sessions = { workspace = true }
@@ -14,3 +19,9 @@ tokio = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
 tracing = { workspace = true }
+tokio-stream = { workspace = true }
+async-stream = "0.3"
+
+# Optional LLM provider crates
+genai = { workspace = true, optional = true }
+async-openai = { workspace = true, optional = true }

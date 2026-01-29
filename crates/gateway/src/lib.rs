@@ -11,6 +11,7 @@
 //! invoked through method handlers registered in `methods.rs`.
 
 pub mod auth;
+pub mod chat;
 pub mod broadcast;
 pub mod methods;
 pub mod nodes;

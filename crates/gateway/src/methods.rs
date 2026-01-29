@@ -663,21 +663,21 @@ impl MethodRegistry {
                 .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
         })));
 
-        // Chat
+        // Chat (uses chat_override if set, otherwise falls back to services.chat)
         self.register("chat.send", Box::new(|ctx| Box::pin(async move {
-            ctx.state.services.chat.send(ctx.params.clone()).await
+            ctx.state.chat().await.send(ctx.params.clone()).await
                 .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
         })));
         self.register("chat.abort", Box::new(|ctx| Box::pin(async move {
-            ctx.state.services.chat.abort(ctx.params.clone()).await
+            ctx.state.chat().await.abort(ctx.params.clone()).await
                 .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
         })));
         self.register("chat.history", Box::new(|ctx| Box::pin(async move {
-            ctx.state.services.chat.history(ctx.params.clone()).await
+            ctx.state.chat().await.history(ctx.params.clone()).await
                 .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
         })));
         self.register("chat.inject", Box::new(|ctx| Box::pin(async move {
-            ctx.state.services.chat.inject(ctx.params.clone()).await
+            ctx.state.chat().await.inject(ctx.params.clone()).await
                 .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
         })));
 

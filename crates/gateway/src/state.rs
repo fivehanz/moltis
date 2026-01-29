@@ -146,6 +146,8 @@ pub struct GatewayState {
     pub pending_invokes: RwLock<HashMap<String, PendingInvoke>>,
     /// Domain services.
     pub services: GatewayServices,
+    /// Late-bound chat service override (for circular init).
+    pub chat_override: RwLock<Option<Arc<dyn crate::services::ChatService>>>,
 }
 
 impl GatewayState {
@@ -166,7 +168,21 @@ impl GatewayState {
             pairing: RwLock::new(PairingState::new()),
             pending_invokes: RwLock::new(HashMap::new()),
             services,
+            chat_override: RwLock::new(None),
         })
+    }
+
+    /// Set a late-bound chat service (for circular init).
+    pub async fn set_chat(&self, chat: Arc<dyn crate::services::ChatService>) {
+        *self.chat_override.write().await = Some(chat);
+    }
+
+    /// Get the active chat service (override or default).
+    pub async fn chat(&self) -> Arc<dyn crate::services::ChatService> {
+        if let Some(c) = self.chat_override.read().await.as_ref() {
+            return Arc::clone(c);
+        }
+        Arc::clone(&self.services.chat)
     }
 
     pub fn next_seq(&self) -> u64 {
