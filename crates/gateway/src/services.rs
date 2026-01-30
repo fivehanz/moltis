@@ -505,6 +505,37 @@ impl LogsService for NoopLogsService {
     }
 }
 
+// ── Provider Setup ──────────────────────────────────────────────────────────
+
+#[async_trait]
+pub trait ProviderSetupService: Send + Sync {
+    async fn available(&self) -> ServiceResult;
+    async fn save_key(&self, params: Value) -> ServiceResult;
+    async fn oauth_start(&self, params: Value) -> ServiceResult;
+    async fn oauth_status(&self, params: Value) -> ServiceResult;
+}
+
+pub struct NoopProviderSetupService;
+
+#[async_trait]
+impl ProviderSetupService for NoopProviderSetupService {
+    async fn available(&self) -> ServiceResult {
+        Ok(serde_json::json!([]))
+    }
+
+    async fn save_key(&self, _p: Value) -> ServiceResult {
+        Err("provider setup not configured".into())
+    }
+
+    async fn oauth_start(&self, _p: Value) -> ServiceResult {
+        Err("provider setup not configured".into())
+    }
+
+    async fn oauth_status(&self, _p: Value) -> ServiceResult {
+        Err("provider setup not configured".into())
+    }
+}
+
 // ── Bundled services ────────────────────────────────────────────────────────
 
 /// All domain services the gateway delegates to.
@@ -526,6 +557,7 @@ pub struct GatewayServices {
     pub web_login: Arc<dyn WebLoginService>,
     pub voicewake: Arc<dyn VoicewakeService>,
     pub logs: Arc<dyn LogsService>,
+    pub provider_setup: Arc<dyn ProviderSetupService>,
 }
 
 impl GatewayServices {
@@ -536,6 +568,11 @@ impl GatewayServices {
 
     pub fn with_model(mut self, model: Arc<dyn ModelService>) -> Self {
         self.model = model;
+        self
+    }
+
+    pub fn with_provider_setup(mut self, ps: Arc<dyn ProviderSetupService>) -> Self {
+        self.provider_setup = ps;
         self
     }
 
@@ -559,6 +596,7 @@ impl GatewayServices {
             web_login: Arc::new(NoopWebLoginService),
             voicewake: Arc::new(NoopVoicewakeService),
             logs: Arc::new(NoopLogsService),
+            provider_setup: Arc::new(NoopProviderSetupService),
         }
     }
 }

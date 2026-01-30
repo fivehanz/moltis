@@ -16,6 +16,7 @@ moltis-plugins = { workspace = true }
 moltis-cron = { workspace = true }
 moltis-media = { workspace = true }
 moltis-canvas = { workspace = true }
+moltis-oauth = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }

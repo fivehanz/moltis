@@ -18,6 +18,7 @@ pub mod chat_error;
 pub mod methods;
 pub mod nodes;
 pub mod pairing;
+pub mod provider_setup;
 pub mod server;
 pub mod services;
 pub mod state;

@@ -26,11 +26,11 @@ use crate::{
 // ── LiveModelService ────────────────────────────────────────────────────────
 
 pub struct LiveModelService {
-    providers: Arc<ProviderRegistry>,
+    providers: Arc<RwLock<ProviderRegistry>>,
 }
 
 impl LiveModelService {
-    pub fn new(providers: Arc<ProviderRegistry>) -> Self {
+    pub fn new(providers: Arc<RwLock<ProviderRegistry>>) -> Self {
         Self { providers }
     }
 }
@@ -38,8 +38,8 @@ impl LiveModelService {
 #[async_trait]
 impl ModelService for LiveModelService {
     async fn list(&self) -> ServiceResult {
-        let models: Vec<_> = self
-            .providers
+        let reg = self.providers.read().await;
+        let models: Vec<_> = reg
             .list_models()
             .iter()
             .map(|m| {
@@ -57,14 +57,14 @@ impl ModelService for LiveModelService {
 // ── LiveChatService ─────────────────────────────────────────────────────────
 
 pub struct LiveChatService {
-    providers: Arc<ProviderRegistry>,
+    providers: Arc<RwLock<ProviderRegistry>>,
     state: Arc<GatewayState>,
     active_runs: Arc<RwLock<HashMap<String, AbortHandle>>>,
     tool_registry: Arc<ToolRegistry>,
 }
 
 impl LiveChatService {
-    pub fn new(providers: Arc<ProviderRegistry>, state: Arc<GatewayState>) -> Self {
+    pub fn new(providers: Arc<RwLock<ProviderRegistry>>, state: Arc<GatewayState>) -> Self {
         Self {
             providers,
             state,
@@ -100,25 +100,21 @@ impl ChatService for LiveChatService {
             .unwrap_or(false)
             || !self.has_tools();
 
-        let provider = if let Some(id) = model_id {
-            self.providers.get(id).ok_or_else(|| {
-                let available: Vec<_> = self
-                    .providers
-                    .list_models()
-                    .iter()
-                    .map(|m| m.id.clone())
-                    .collect();
-                format!("model '{}' not found. available: {:?}", id, available)
-            })?
-        } else if !stream_only {
-            // Prefer a tool-capable provider when we have tools registered.
-            self.providers
-                .first_with_tools()
-                .ok_or_else(|| "no LLM providers configured".to_string())?
-        } else {
-            self.providers
-                .first()
-                .ok_or_else(|| "no LLM providers configured".to_string())?
+        let provider = {
+            let reg = self.providers.read().await;
+            if let Some(id) = model_id {
+                reg.get(id).ok_or_else(|| {
+                    let available: Vec<_> =
+                        reg.list_models().iter().map(|m| m.id.clone()).collect();
+                    format!("model '{}' not found. available: {:?}", id, available)
+                })?
+            } else if !stream_only {
+                reg.first_with_tools()
+                    .ok_or_else(|| "no LLM providers configured".to_string())?
+            } else {
+                reg.first()
+                    .ok_or_else(|| "no LLM providers configured".to_string())?
+            }
         };
 
         let run_id = uuid::Uuid::new_v4().to_string();
@@ -224,14 +220,24 @@ async fn run_with_tools(
                     "runId": run_id,
                     "state": "thinking_done",
                 }),
-                RunnerEvent::ToolCallStart { id, name, arguments } => serde_json::json!({
+                RunnerEvent::ToolCallStart {
+                    id,
+                    name,
+                    arguments,
+                } => serde_json::json!({
                     "runId": run_id,
                     "state": "tool_call_start",
                     "toolCallId": id,
                     "toolName": name,
                     "arguments": arguments,
                 }),
-                RunnerEvent::ToolCallEnd { id, name, success, error, result } => {
+                RunnerEvent::ToolCallEnd {
+                    id,
+                    name,
+                    success,
+                    error,
+                    result,
+                } => {
                     let mut payload = serde_json::json!({
                         "runId": run_id,
                         "state": "tool_call_end",
@@ -240,9 +246,7 @@ async fn run_with_tools(
                         "success": success,
                     });
                     if let Some(err) = error {
-                        payload["error"] = serde_json::json!(
-                            parse_chat_error(err, None)
-                        );
+                        payload["error"] = serde_json::json!(parse_chat_error(err, None));
                     }
                     if let Some(res) = result {
                         // Cap output sent to the UI to avoid huge WS frames.

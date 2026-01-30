@@ -636,6 +636,215 @@
     });
   }
 
+  // ── Provider modal ─────────────────────────────────────────────
+
+  var providerModal = $("providerModal");
+  var providerModalBody = $("providerModalBody");
+  var providerModalTitle = $("providerModalTitle");
+  var addProviderBtn = $("addProviderBtn");
+  var providerModalClose = $("providerModalClose");
+
+  function openProviderModal() {
+    providerModal.classList.remove("hidden");
+    providerModalTitle.textContent = "Add Provider";
+    providerModalBody.textContent = "Loading...";
+    sendRpc("providers.available", {}).then(function (res) {
+      if (!res || !res.ok) {
+        providerModalBody.textContent = "Failed to load providers.";
+        return;
+      }
+      var providers = res.payload || [];
+      providerModalBody.textContent = "";
+      providers.forEach(function (p) {
+        var item = document.createElement("div");
+        item.className = "provider-item" + (p.configured ? " configured" : "");
+        var name = document.createElement("span");
+        name.className = "provider-item-name";
+        name.textContent = p.displayName;
+        item.appendChild(name);
+
+        var badges = document.createElement("div");
+        badges.style.display = "flex";
+        badges.style.gap = "6px";
+        badges.style.alignItems = "center";
+
+        if (p.configured) {
+          var check = document.createElement("span");
+          check.className = "provider-item-badge configured";
+          check.textContent = "configured";
+          badges.appendChild(check);
+        }
+
+        var badge = document.createElement("span");
+        badge.className = "provider-item-badge " + p.authType;
+        badge.textContent = p.authType === "oauth" ? "OAuth" : "API Key";
+        badges.appendChild(badge);
+        item.appendChild(badges);
+
+        item.addEventListener("click", function () {
+          if (p.authType === "api-key") {
+            showApiKeyForm(p);
+          } else if (p.authType === "oauth") {
+            showOAuthFlow(p);
+          }
+        });
+        providerModalBody.appendChild(item);
+      });
+    });
+  }
+
+  function closeProviderModal() {
+    providerModal.classList.add("hidden");
+  }
+
+  function showApiKeyForm(provider) {
+    providerModalTitle.textContent = provider.displayName;
+    providerModalBody.textContent = "";
+
+    var form = document.createElement("div");
+    form.className = "provider-key-form";
+
+    var label = document.createElement("label");
+    label.className = "text-xs text-[var(--muted)]";
+    label.textContent = "API Key";
+    form.appendChild(label);
+
+    var input = document.createElement("input");
+    input.className = "provider-key-input";
+    input.type = "password";
+    input.placeholder = "sk-...";
+    form.appendChild(input);
+
+    var btns = document.createElement("div");
+    btns.style.display = "flex";
+    btns.style.gap = "8px";
+
+    var backBtn = document.createElement("button");
+    backBtn.className = "provider-btn provider-btn-secondary";
+    backBtn.textContent = "Back";
+    backBtn.addEventListener("click", openProviderModal);
+    btns.appendChild(backBtn);
+
+    var saveBtn = document.createElement("button");
+    saveBtn.className = "provider-btn";
+    saveBtn.textContent = "Save";
+    saveBtn.addEventListener("click", function () {
+      var key = input.value.trim();
+      if (!key) return;
+      saveBtn.disabled = true;
+      saveBtn.textContent = "Saving...";
+      sendRpc("providers.save_key", { provider: provider.name, apiKey: key }).then(function (res) {
+        if (res && res.ok) {
+          providerModalBody.textContent = "";
+          var status = document.createElement("div");
+          status.className = "provider-status";
+          status.textContent = provider.displayName + " configured successfully!";
+          providerModalBody.appendChild(status);
+          fetchModels();
+          setTimeout(closeProviderModal, 1500);
+        } else {
+          saveBtn.disabled = false;
+          saveBtn.textContent = "Save";
+          var err = (res && res.error && res.error.message) || "Failed to save";
+          input.style.borderColor = "var(--error)";
+          label.textContent = err;
+          label.style.color = "var(--error)";
+        }
+      });
+    });
+    btns.appendChild(saveBtn);
+    form.appendChild(btns);
+
+    providerModalBody.appendChild(form);
+    input.focus();
+  }
+
+  function showOAuthFlow(provider) {
+    providerModalTitle.textContent = provider.displayName;
+    providerModalBody.textContent = "";
+
+    var wrapper = document.createElement("div");
+    wrapper.className = "provider-key-form";
+
+    var desc = document.createElement("div");
+    desc.className = "text-xs text-[var(--muted)]";
+    desc.textContent = "Click below to authenticate with " + provider.displayName + " via OAuth.";
+    wrapper.appendChild(desc);
+
+    var btns = document.createElement("div");
+    btns.style.display = "flex";
+    btns.style.gap = "8px";
+
+    var backBtn = document.createElement("button");
+    backBtn.className = "provider-btn provider-btn-secondary";
+    backBtn.textContent = "Back";
+    backBtn.addEventListener("click", openProviderModal);
+    btns.appendChild(backBtn);
+
+    var connectBtn = document.createElement("button");
+    connectBtn.className = "provider-btn";
+    connectBtn.textContent = "Connect";
+    connectBtn.addEventListener("click", function () {
+      connectBtn.disabled = true;
+      connectBtn.textContent = "Starting...";
+      sendRpc("providers.oauth.start", { provider: provider.name }).then(function (res) {
+        if (res && res.ok && res.payload && res.payload.authUrl) {
+          window.open(res.payload.authUrl, "_blank");
+          connectBtn.textContent = "Waiting for auth...";
+          pollOAuthStatus(provider);
+        } else {
+          connectBtn.disabled = false;
+          connectBtn.textContent = "Connect";
+          desc.textContent = (res && res.error && res.error.message) || "Failed to start OAuth";
+          desc.style.color = "var(--error)";
+        }
+      });
+    });
+    btns.appendChild(connectBtn);
+    wrapper.appendChild(btns);
+
+    providerModalBody.appendChild(wrapper);
+  }
+
+  function pollOAuthStatus(provider) {
+    var attempts = 0;
+    var maxAttempts = 60; // 60 * 2s = 120s
+    var timer = setInterval(function () {
+      attempts++;
+      if (attempts > maxAttempts) {
+        clearInterval(timer);
+        providerModalBody.textContent = "";
+        var timeout = document.createElement("div");
+        timeout.className = "text-xs text-[var(--error)]";
+        timeout.textContent = "OAuth timed out. Please try again.";
+        providerModalBody.appendChild(timeout);
+        return;
+      }
+      sendRpc("providers.oauth.status", { provider: provider.name }).then(function (res) {
+        if (res && res.ok && res.payload && res.payload.authenticated) {
+          clearInterval(timer);
+          providerModalBody.textContent = "";
+          var status = document.createElement("div");
+          status.className = "provider-status";
+          status.textContent = provider.displayName + " connected successfully!";
+          providerModalBody.appendChild(status);
+          fetchModels();
+          setTimeout(closeProviderModal, 1500);
+        }
+      });
+    }, 2000);
+  }
+
+  addProviderBtn.addEventListener("click", function () {
+    if (connected) openProviderModal();
+  });
+
+  providerModalClose.addEventListener("click", closeProviderModal);
+
+  providerModal.addEventListener("click", function (e) {
+    if (e.target === providerModal) closeProviderModal();
+  });
+
   connect();
   input.focus();
 })();

@@ -24,6 +24,29 @@ pub struct ModelInfo {
     pub display_name: String,
 }
 
+/// Known Anthropic Claude models (model_id, display_name).
+/// Current models listed first, then legacy models.
+const ANTHROPIC_MODELS: &[(&str, &str)] = &[
+    ("claude-opus-4-5-20251101", "Claude Opus 4.5"),
+    ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5"),
+    ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
+    ("claude-opus-4-1-20250805", "Claude Opus 4.1"),
+    ("claude-sonnet-4-20250514", "Claude Sonnet 4"),
+    ("claude-opus-4-20250514", "Claude Opus 4"),
+    ("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet"),
+    ("claude-3-haiku-20240307", "Claude 3 Haiku"),
+];
+
+/// Known OpenAI models (model_id, display_name).
+const OPENAI_MODELS: &[(&str, &str)] = &[
+    ("gpt-4o", "GPT-4o"),
+    ("gpt-4o-mini", "GPT-4o Mini"),
+    ("gpt-4-turbo", "GPT-4 Turbo"),
+    ("o3", "o3"),
+    ("o3-mini", "o3-mini"),
+    ("o4-mini", "o4-mini"),
+];
+
 /// Registry of available LLM providers, keyed by model ID.
 pub struct ProviderRegistry {
     providers: HashMap<String, Arc<dyn LlmProvider>>,
@@ -226,18 +249,14 @@ impl ProviderRegistry {
         ];
 
         // If user configured a specific model, register only that one.
-        if let Some(model_id) = config
-            .get("openai-codex")
-            .and_then(|e| e.model.as_deref())
-        {
+        if let Some(model_id) = config.get("openai-codex").and_then(|e| e.model.as_deref()) {
             if !self.providers.contains_key(model_id) {
                 let display_name = codex_models
                     .iter()
                     .find(|(id, _)| *id == model_id)
                     .map(|(_, name)| format!("{name} (Codex/OAuth)"))
                     .unwrap_or_else(|| format!("{model_id} (Codex/OAuth)"));
-                let provider =
-                    Arc::new(openai_codex::OpenAiCodexProvider::new(model_id.into()));
+                let provider = Arc::new(openai_codex::OpenAiCodexProvider::new(model_id.into()));
                 self.register(
                     ModelInfo {
                         id: model_id.into(),
@@ -255,8 +274,7 @@ impl ProviderRegistry {
             if self.providers.contains_key(model_id) {
                 continue;
             }
-            let provider =
-                Arc::new(openai_codex::OpenAiCodexProvider::new(model_id.into()));
+            let provider = Arc::new(openai_codex::OpenAiCodexProvider::new(model_id.into()));
             self.register(
                 ModelInfo {
                     id: model_id.into(),
@@ -269,7 +287,7 @@ impl ProviderRegistry {
     }
 
     fn register_builtin_providers(&mut self, config: &ProvidersConfig) {
-        // Anthropic
+        // Anthropic — register all known Claude models when API key is available.
         if config.is_enabled("anthropic") {
             let key = config
                 .get("anthropic")
@@ -277,36 +295,59 @@ impl ProviderRegistry {
                 .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
 
             if let Some(key) = key.filter(|k| !k.is_empty()) {
-                let model_id = config
+                let base_url = config
                     .get("anthropic")
-                    .and_then(|e| e.model.as_deref())
-                    .unwrap_or("claude-sonnet-4-20250514");
+                    .and_then(|e| e.base_url.clone())
+                    .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
+                    .unwrap_or_else(|| "https://api.anthropic.com".into());
 
-                if !self.providers.contains_key(model_id) {
-                    let base_url = config
-                        .get("anthropic")
-                        .and_then(|e| e.base_url.clone())
-                        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
-                        .unwrap_or_else(|| "https://api.anthropic.com".into());
-
-                    let provider = Arc::new(anthropic::AnthropicProvider::new(
-                        key,
-                        model_id.into(),
-                        base_url,
-                    ));
-                    self.register(
-                        ModelInfo {
-                            id: model_id.into(),
-                            provider: "anthropic".into(),
-                            display_name: "Claude Sonnet 4".into(),
-                        },
-                        provider,
-                    );
+                // If user configured a specific model, register only that one.
+                if let Some(model_id) = config.get("anthropic").and_then(|e| e.model.as_deref()) {
+                    if !self.providers.contains_key(model_id) {
+                        let display = ANTHROPIC_MODELS
+                            .iter()
+                            .find(|(id, _)| *id == model_id)
+                            .map(|(_, name)| name.to_string())
+                            .unwrap_or_else(|| model_id.to_string());
+                        let provider = Arc::new(anthropic::AnthropicProvider::new(
+                            key.clone(),
+                            model_id.into(),
+                            base_url.clone(),
+                        ));
+                        self.register(
+                            ModelInfo {
+                                id: model_id.into(),
+                                provider: "anthropic".into(),
+                                display_name: display,
+                            },
+                            provider,
+                        );
+                    }
+                } else {
+                    // No specific model — register all known Anthropic models.
+                    for &(model_id, display_name) in ANTHROPIC_MODELS {
+                        if self.providers.contains_key(model_id) {
+                            continue;
+                        }
+                        let provider = Arc::new(anthropic::AnthropicProvider::new(
+                            key.clone(),
+                            model_id.into(),
+                            base_url.clone(),
+                        ));
+                        self.register(
+                            ModelInfo {
+                                id: model_id.into(),
+                                provider: "anthropic".into(),
+                                display_name: display_name.into(),
+                            },
+                            provider,
+                        );
+                    }
                 }
             }
         }
 
-        // OpenAI
+        // OpenAI — register all known OpenAI models when API key is available.
         if config.is_enabled("openai") {
             let key = config
                 .get("openai")
@@ -314,28 +355,52 @@ impl ProviderRegistry {
                 .or_else(|| std::env::var("OPENAI_API_KEY").ok());
 
             if let Some(key) = key.filter(|k| !k.is_empty()) {
-                let model_id = config
+                let base_url = config
                     .get("openai")
-                    .and_then(|e| e.model.as_deref())
-                    .unwrap_or("gpt-4o");
+                    .and_then(|e| e.base_url.clone())
+                    .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+                    .unwrap_or_else(|| "https://api.openai.com/v1".into());
 
-                if !self.providers.contains_key(model_id) {
-                    let base_url = config
-                        .get("openai")
-                        .and_then(|e| e.base_url.clone())
-                        .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
-                        .unwrap_or_else(|| "https://api.openai.com/v1".into());
-
-                    let provider =
-                        Arc::new(openai::OpenAiProvider::new(key, model_id.into(), base_url));
-                    self.register(
-                        ModelInfo {
-                            id: model_id.into(),
-                            provider: "openai".into(),
-                            display_name: "GPT-4o".into(),
-                        },
-                        provider,
-                    );
+                if let Some(model_id) = config.get("openai").and_then(|e| e.model.as_deref()) {
+                    if !self.providers.contains_key(model_id) {
+                        let display = OPENAI_MODELS
+                            .iter()
+                            .find(|(id, _)| *id == model_id)
+                            .map(|(_, name)| name.to_string())
+                            .unwrap_or_else(|| model_id.to_string());
+                        let provider = Arc::new(openai::OpenAiProvider::new(
+                            key.clone(),
+                            model_id.into(),
+                            base_url.clone(),
+                        ));
+                        self.register(
+                            ModelInfo {
+                                id: model_id.into(),
+                                provider: "openai".into(),
+                                display_name: display,
+                            },
+                            provider,
+                        );
+                    }
+                } else {
+                    for &(model_id, display_name) in OPENAI_MODELS {
+                        if self.providers.contains_key(model_id) {
+                            continue;
+                        }
+                        let provider = Arc::new(openai::OpenAiProvider::new(
+                            key.clone(),
+                            model_id.into(),
+                            base_url.clone(),
+                        ));
+                        self.register(
+                            ModelInfo {
+                                id: model_id.into(),
+                                provider: "openai".into(),
+                                display_name: display_name.into(),
+                            },
+                            provider,
+                        );
+                    }
                 }
             }
         }

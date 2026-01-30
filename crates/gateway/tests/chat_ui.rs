@@ -216,10 +216,10 @@ async fn ws_system_presence_shows_connected_client() {
 #[tokio::test]
 async fn gateway_startup_with_llm_wiring_does_not_block() {
     let resolved_auth = auth::resolve_auth(None, None);
-    let registry = Arc::new(ProviderRegistry::from_env());
+    let registry = Arc::new(tokio::sync::RwLock::new(ProviderRegistry::from_env()));
 
     let mut services = GatewayServices::noop();
-    if !registry.is_empty() {
+    if !registry.read().await.is_empty() {
         services = services.with_model(Arc::new(LiveModelService::new(Arc::clone(&registry))));
     }
 
@@ -230,7 +230,7 @@ async fn gateway_startup_with_llm_wiring_does_not_block() {
     );
 
     // This is the call that used to panic with blocking_write inside async.
-    if !registry.is_empty() {
+    if !registry.read().await.is_empty() {
         state
             .set_chat(Arc::new(LiveChatService::new(
                 Arc::clone(&registry),
@@ -242,7 +242,7 @@ async fn gateway_startup_with_llm_wiring_does_not_block() {
     // Even without real API keys the override path must work.
     // Force it with an empty registry to exercise set_chat unconditionally.
     let resolved_auth2 = auth::resolve_auth(None, None);
-    let registry2 = Arc::new(ProviderRegistry::from_env());
+    let registry2 = Arc::new(tokio::sync::RwLock::new(ProviderRegistry::from_env()));
     let state2 = GatewayState::new(
         resolved_auth2,
         GatewayServices::noop(),
@@ -255,15 +255,16 @@ async fn gateway_startup_with_llm_wiring_does_not_block() {
         )))
         .await;
 
-    // Verify chat override is active — chat.send should return an error about
-    // missing providers rather than "chat not configured" (the noop response).
+    // Verify chat override is active — chat.send should use the LiveChatService,
+    // not the noop. If no providers are configured it errors; if Codex tokens
+    // exist on this machine it may succeed (returns a runId).
     let chat = state2.chat().await;
     let result = chat.send(serde_json::json!({ "text": "hello" })).await;
     match result {
         Err(e) => assert!(
-            e.contains("no LLM providers configured"),
-            "expected provider error, got: {e}"
+            !e.contains("chat not configured"),
+            "expected LiveChatService (not noop), got: {e}"
         ),
-        Ok(_) => panic!("expected error from LiveChatService without providers"),
+        Ok(_) => { /* providers found (e.g. Codex tokens on this machine) — OK */ },
     }
 }

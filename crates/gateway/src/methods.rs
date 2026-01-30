@@ -57,6 +57,8 @@ const READ_METHODS: &[&str] = &[
     "node.list",
     "node.describe",
     "chat.history",
+    "providers.available",
+    "providers.oauth.status",
 ];
 
 const WRITE_METHODS: &[&str] = &[
@@ -74,6 +76,8 @@ const WRITE_METHODS: &[&str] = &[
     "chat.send",
     "chat.abort",
     "browser.request",
+    "providers.save_key",
+    "providers.oauth.start",
 ];
 
 const APPROVAL_METHODS: &[&str] = &["exec.approval.request", "exec.approval.resolve"];
@@ -1581,6 +1585,60 @@ impl MethodRegistry {
                         .services
                         .model
                         .list()
+                        .await
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
+                })
+            }),
+        );
+
+        // Provider setup
+        self.register(
+            "providers.available",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    ctx.state
+                        .services
+                        .provider_setup
+                        .available()
+                        .await
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
+                })
+            }),
+        );
+        self.register(
+            "providers.save_key",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    ctx.state
+                        .services
+                        .provider_setup
+                        .save_key(ctx.params.clone())
+                        .await
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
+                })
+            }),
+        );
+        self.register(
+            "providers.oauth.start",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    ctx.state
+                        .services
+                        .provider_setup
+                        .oauth_start(ctx.params.clone())
+                        .await
+                        .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
+                })
+            }),
+        );
+        self.register(
+            "providers.oauth.status",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    ctx.state
+                        .services
+                        .provider_setup
+                        .oauth_status(ctx.params.clone())
                         .await
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
                 })

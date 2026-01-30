@@ -25,6 +25,7 @@ use crate::{
     broadcast::broadcast_tick,
     chat::{LiveChatService, LiveModelService},
     methods::MethodRegistry,
+    provider_setup::LiveProviderSetupService,
     services::GatewayServices,
     state::GatewayState,
     ws::handle_connection,
@@ -76,22 +77,28 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
     let config = moltis_config::discover_and_load();
 
     // Discover LLM providers from env + config.
-    let registry = Arc::new(ProviderRegistry::from_env_with_config(&config.providers));
-    let provider_summary = registry.provider_summary();
+    let registry = Arc::new(tokio::sync::RwLock::new(
+        ProviderRegistry::from_env_with_config(&config.providers),
+    ));
+    let provider_summary = registry.read().await.provider_summary();
 
     // Create shared approval manager.
     let approval_manager = Arc::new(ApprovalManager::default());
 
     let mut services = GatewayServices::noop();
     services.exec_approval = Arc::new(LiveExecApprovalService::new(Arc::clone(&approval_manager)));
-    if !registry.is_empty() {
+    services.provider_setup = Arc::new(LiveProviderSetupService::new(
+        Arc::clone(&registry),
+        config.providers.clone(),
+    ));
+    if !registry.read().await.is_empty() {
         services = services.with_model(Arc::new(LiveModelService::new(Arc::clone(&registry))));
     }
 
     let state = GatewayState::new(resolved_auth, services, Arc::clone(&approval_manager));
 
     // Wire live chat service (needs state reference, so done after state creation).
-    if !registry.is_empty() {
+    if !registry.read().await.is_empty() {
         let broadcaster = Arc::new(GatewayApprovalBroadcaster::new(Arc::clone(&state)));
         let exec_tool = moltis_tools::exec::ExecTool::default()
             .with_approval(Arc::clone(&approval_manager), broadcaster);
