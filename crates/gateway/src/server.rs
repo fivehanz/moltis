@@ -19,6 +19,8 @@ use moltis_agents::providers::ProviderRegistry;
 
 use moltis_tools::approval::ApprovalManager;
 
+use moltis_sessions::{metadata::SessionMetadata, store::SessionStore};
+
 use crate::{
     approval::{GatewayApprovalBroadcaster, LiveExecApprovalService},
     auth,
@@ -27,6 +29,7 @@ use crate::{
     methods::MethodRegistry,
     provider_setup::LiveProviderSetupService,
     services::GatewayServices,
+    session::LiveSessionService,
     state::GatewayState,
     ws::handle_connection,
 };
@@ -76,9 +79,15 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
     // Load config file (moltis.toml / .yaml / .json) if present.
     let config = moltis_config::discover_and_load();
 
-    // Discover LLM providers from env + config.
+    // Merge any previously saved API keys into the provider config so they
+    // survive gateway restarts without requiring env vars.
+    let key_store = crate::provider_setup::KeyStore::new();
+    let effective_providers =
+        crate::provider_setup::config_with_saved_keys(&config.providers, &key_store);
+
+    // Discover LLM providers from env + config + saved keys.
     let registry = Arc::new(tokio::sync::RwLock::new(
-        ProviderRegistry::from_env_with_config(&config.providers),
+        ProviderRegistry::from_env_with_config(&effective_providers),
     ));
     let provider_summary = registry.read().await.provider_summary();
 
@@ -95,6 +104,27 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
         services = services.with_model(Arc::new(LiveModelService::new(Arc::clone(&registry))));
     }
 
+    // Initialize session storage.
+    let sessions_dir = directories::ProjectDirs::from("", "", "moltis")
+        .map(|d| d.data_dir().join("sessions"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".moltis/sessions"));
+    let session_store = Arc::new(SessionStore::new(sessions_dir.clone()));
+    let metadata_path = sessions_dir.join("metadata.json");
+    let session_metadata = Arc::new(tokio::sync::RwLock::new(
+        SessionMetadata::load(metadata_path).unwrap_or_else(|e| {
+            tracing::warn!("failed to load session metadata: {e}, starting fresh");
+            // Create empty metadata — load won't fail on a non-existent file,
+            // so this error means the file was corrupt. Start fresh.
+            SessionMetadata::load(sessions_dir.join("metadata_fallback.json")).unwrap()
+        }),
+    ));
+
+    // Wire live session service.
+    services.session = Arc::new(LiveSessionService::new(
+        Arc::clone(&session_store),
+        Arc::clone(&session_metadata),
+    ));
+
     let state = GatewayState::new(resolved_auth, services, Arc::clone(&approval_manager));
 
     // Wire live chat service (needs state reference, so done after state creation).
@@ -106,8 +136,13 @@ pub async fn start_gateway(bind: &str, port: u16) -> anyhow::Result<()> {
         let mut tool_registry = moltis_agents::tool_registry::ToolRegistry::new();
         tool_registry.register(Box::new(exec_tool));
         let live_chat = Arc::new(
-            LiveChatService::new(Arc::clone(&registry), Arc::clone(&state))
-                .with_tools(tool_registry),
+            LiveChatService::new(
+                Arc::clone(&registry),
+                Arc::clone(&state),
+                Arc::clone(&session_store),
+                Arc::clone(&session_metadata),
+            )
+            .with_tools(tool_registry),
         );
         state.set_chat(live_chat).await;
     }

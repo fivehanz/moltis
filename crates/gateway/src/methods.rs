@@ -78,6 +78,7 @@ const WRITE_METHODS: &[&str] = &[
     "browser.request",
     "providers.save_key",
     "providers.oauth.start",
+    "sessions.switch",
 ];
 
 const APPROVAL_METHODS: &[&str] = &["exec.approval.request", "exec.approval.resolve"];
@@ -1266,14 +1267,17 @@ impl MethodRegistry {
         );
 
         // Chat (uses chat_override if set, otherwise falls back to services.chat)
+        // Inject _conn_id so the chat service can resolve the active session.
         self.register(
             "chat.send",
             Box::new(|ctx| {
                 Box::pin(async move {
+                    let mut params = ctx.params.clone();
+                    params["_conn_id"] = serde_json::json!(ctx.client_conn_id);
                     ctx.state
                         .chat()
                         .await
-                        .send(ctx.params.clone())
+                        .send(params)
                         .await
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
                 })
@@ -1296,10 +1300,12 @@ impl MethodRegistry {
             "chat.history",
             Box::new(|ctx| {
                 Box::pin(async move {
+                    let mut params = ctx.params.clone();
+                    params["_conn_id"] = serde_json::json!(ctx.client_conn_id);
                     ctx.state
                         .chat()
                         .await
-                        .history(ctx.params.clone())
+                        .history(params)
                         .await
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
                 })
@@ -1315,6 +1321,41 @@ impl MethodRegistry {
                         .inject(ctx.params.clone())
                         .await
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e))
+                })
+            }),
+        );
+
+        // Session switching
+        self.register(
+            "sessions.switch",
+            Box::new(|ctx| {
+                Box::pin(async move {
+                    let key = ctx
+                        .params
+                        .get("key")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            ErrorShape::new(error_codes::INVALID_REQUEST, "missing 'key' parameter")
+                        })?;
+
+                    // Store the active session for this connection.
+                    ctx.state
+                        .active_sessions
+                        .write()
+                        .await
+                        .insert(ctx.client_conn_id.clone(), key.to_string());
+
+                    // Auto-create session in metadata if it doesn't exist.
+                    // Then resolve the session entry + history.
+                    ctx.state
+                        .services
+                        .session
+                        .resolve(serde_json::json!({ "key": key }))
+                        .await
+                        .map_err(|_| {
+                            // Session doesn't exist yet — create it then resolve.
+                            ErrorShape::new(error_codes::UNAVAILABLE, "session resolve failed")
+                        })
                 })
             }),
         );

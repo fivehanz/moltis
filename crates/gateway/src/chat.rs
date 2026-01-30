@@ -15,6 +15,7 @@ use moltis_agents::{
     runner::{RunnerEvent, run_agent_loop},
     tool_registry::ToolRegistry,
 };
+use moltis_sessions::{metadata::SessionMetadata, store::SessionStore};
 
 use crate::{
     broadcast::{BroadcastOpts, broadcast},
@@ -61,15 +62,24 @@ pub struct LiveChatService {
     state: Arc<GatewayState>,
     active_runs: Arc<RwLock<HashMap<String, AbortHandle>>>,
     tool_registry: Arc<ToolRegistry>,
+    session_store: Arc<SessionStore>,
+    session_metadata: Arc<RwLock<SessionMetadata>>,
 }
 
 impl LiveChatService {
-    pub fn new(providers: Arc<RwLock<ProviderRegistry>>, state: Arc<GatewayState>) -> Self {
+    pub fn new(
+        providers: Arc<RwLock<ProviderRegistry>>,
+        state: Arc<GatewayState>,
+        session_store: Arc<SessionStore>,
+        session_metadata: Arc<RwLock<SessionMetadata>>,
+    ) -> Self {
         Self {
             providers,
             state,
             active_runs: Arc::new(RwLock::new(HashMap::new())),
             tool_registry: Arc::new(ToolRegistry::new()),
+            session_store,
+            session_metadata,
         }
     }
 
@@ -80,6 +90,17 @@ impl LiveChatService {
 
     fn has_tools(&self) -> bool {
         !self.tool_registry.list_schemas().is_empty()
+    }
+
+    /// Resolve the active session key for a connection.
+    async fn session_key_for(&self, conn_id: Option<&str>) -> String {
+        if let Some(cid) = conn_id {
+            let sessions = self.state.active_sessions.read().await;
+            if let Some(key) = sessions.get(cid) {
+                return key.clone();
+            }
+        }
+        "main".to_string()
     }
 }
 
@@ -92,6 +113,7 @@ impl ChatService for LiveChatService {
             .ok_or_else(|| "missing 'text' parameter".to_string())?
             .to_string();
 
+        let conn_id = params.get("_conn_id").and_then(|v| v.as_str()).map(String::from);
         let model_id = params.get("model").and_then(|v| v.as_str());
         // Use streaming-only mode if explicitly requested or if no tools are registered.
         let stream_only = params
@@ -117,6 +139,35 @@ impl ChatService for LiveChatService {
             }
         };
 
+        // Resolve session key and load history.
+        let session_key = self.session_key_for(conn_id.as_deref()).await;
+
+        // Persist the user message.
+        let user_msg = serde_json::json!({"role": "user", "content": &text});
+        if let Err(e) = self.session_store.append(&session_key, &user_msg).await {
+            warn!("failed to persist user message: {e}");
+        }
+
+        // Load conversation history excluding the user message we just appended
+        // (both run_streaming and run_agent_loop add the current user message themselves).
+        let mut history = self
+            .session_store
+            .read(&session_key)
+            .await
+            .unwrap_or_default();
+        // Pop the last message (the one we just appended).
+        if !history.is_empty() {
+            history.pop();
+        }
+
+        // Update metadata.
+        {
+            let mut meta = self.session_metadata.write().await;
+            meta.upsert(&session_key, None);
+            meta.touch(&session_key, history.len() as u32);
+            let _ = meta.save();
+        }
+
         let run_id = uuid::Uuid::new_v4().to_string();
         let state = Arc::clone(&self.state);
         let active_runs = Arc::clone(&self.active_runs);
@@ -138,16 +189,19 @@ impl ChatService for LiveChatService {
             user_message = %text,
             model = provider.id(),
             stream_only,
+            session = %session_key,
             "chat.send"
         );
 
         let provider_name = provider.name().to_string();
+        let session_store = Arc::clone(&self.session_store);
+        let session_metadata = Arc::clone(&self.session_metadata);
+        let session_key_clone = session_key.clone();
         let handle = tokio::spawn(async move {
-            if stream_only {
-                // Streaming mode (no tools) — plain LLM text generation.
-                run_streaming(&state, &run_id_clone, provider, &text, &provider_name).await;
+            let assistant_text = if stream_only {
+                run_streaming(&state, &run_id_clone, provider, &text, &provider_name, &history)
+                    .await
             } else {
-                // Agent loop mode: LLM + tool call execution loop.
                 run_with_tools(
                     &state,
                     &run_id_clone,
@@ -155,8 +209,24 @@ impl ChatService for LiveChatService {
                     &tool_registry,
                     &text,
                     &provider_name,
+                    &history,
                 )
-                .await;
+                .await
+            };
+
+            // Persist assistant response.
+            if let Some(response_text) = assistant_text {
+                let assistant_msg =
+                    serde_json::json!({"role": "assistant", "content": response_text});
+                if let Err(e) = session_store.append(&session_key_clone, &assistant_msg).await {
+                    warn!("failed to persist assistant message: {e}");
+                }
+                // Update metadata counts.
+                if let Ok(count) = session_store.count(&session_key_clone).await {
+                    let mut meta = session_metadata.write().await;
+                    meta.touch(&session_key_clone, count);
+                    let _ = meta.save();
+                }
             }
 
             active_runs.write().await.remove(&run_id_clone);
@@ -182,8 +252,15 @@ impl ChatService for LiveChatService {
         Ok(serde_json::json!({}))
     }
 
-    async fn history(&self, _params: Value) -> ServiceResult {
-        Ok(serde_json::json!([]))
+    async fn history(&self, params: Value) -> ServiceResult {
+        let conn_id = params.get("_conn_id").and_then(|v| v.as_str()).map(String::from);
+        let session_key = self.session_key_for(conn_id.as_deref()).await;
+        let messages = self
+            .session_store
+            .read(&session_key)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!(messages))
     }
 
     async fn inject(&self, _params: Value) -> ServiceResult {
@@ -200,7 +277,8 @@ async fn run_with_tools(
     tool_registry: &Arc<ToolRegistry>,
     text: &str,
     provider_name: &str,
-) {
+    history: &[serde_json::Value],
+) -> Option<String> {
     let native_tools = provider.supports_tools();
     let system_prompt = build_system_prompt(tool_registry, native_tools);
 
@@ -282,12 +360,20 @@ async fn run_with_tools(
         });
     });
 
+    // Pass history (excluding the current user message, which run_agent_loop adds).
+    let hist = if history.is_empty() {
+        None
+    } else {
+        Some(history.to_vec())
+    };
+
     match run_agent_loop(
         provider,
         tool_registry,
         &system_prompt,
         text,
         Some(&on_event),
+        hist,
     )
     .await
     {
@@ -311,6 +397,7 @@ async fn run_with_tools(
                 BroadcastOpts::default(),
             )
             .await;
+            Some(result.text)
         },
         Err(e) => {
             warn!(run_id, error = %e, "agent run error");
@@ -326,6 +413,7 @@ async fn run_with_tools(
                 BroadcastOpts::default(),
             )
             .await;
+            None
         },
     }
 }
@@ -338,11 +426,13 @@ async fn run_streaming(
     provider: Arc<dyn moltis_agents::model::LlmProvider>,
     text: &str,
     provider_name: &str,
-) {
-    let messages = vec![serde_json::json!({
+    history: &[serde_json::Value],
+) -> Option<String> {
+    let mut messages: Vec<serde_json::Value> = history.to_vec();
+    messages.push(serde_json::json!({
         "role": "user",
         "content": text,
-    })];
+    }));
 
     let mut stream = provider.stream(messages);
     let mut accumulated = String::new();
@@ -381,7 +471,7 @@ async fn run_streaming(
                     BroadcastOpts::default(),
                 )
                 .await;
-                break;
+                return Some(accumulated);
             },
             StreamEvent::Error(msg) => {
                 warn!(run_id, error = %msg, "chat stream error");
@@ -397,8 +487,9 @@ async fn run_streaming(
                     BroadcastOpts::default(),
                 )
                 .await;
-                break;
+                return None;
             },
         }
     }
+    None
 }

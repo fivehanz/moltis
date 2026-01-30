@@ -230,11 +230,18 @@ async fn gateway_startup_with_llm_wiring_does_not_block() {
     );
 
     // This is the call that used to panic with blocking_write inside async.
+    let tmp1 = tempfile::tempdir().unwrap();
+    let session_store1 = Arc::new(moltis_sessions::store::SessionStore::new(tmp1.path().to_path_buf()));
+    let session_metadata1 = Arc::new(tokio::sync::RwLock::new(
+        moltis_sessions::metadata::SessionMetadata::load(tmp1.path().join("metadata.json")).unwrap(),
+    ));
     if !registry.read().await.is_empty() {
         state
             .set_chat(Arc::new(LiveChatService::new(
                 Arc::clone(&registry),
                 Arc::clone(&state),
+                Arc::clone(&session_store1),
+                Arc::clone(&session_metadata1),
             )))
             .await;
     }
@@ -248,10 +255,17 @@ async fn gateway_startup_with_llm_wiring_does_not_block() {
         GatewayServices::noop(),
         Arc::new(moltis_tools::approval::ApprovalManager::default()),
     );
+    let tmp2 = tempfile::tempdir().unwrap();
+    let session_store2 = Arc::new(moltis_sessions::store::SessionStore::new(tmp2.path().to_path_buf()));
+    let session_metadata2 = Arc::new(tokio::sync::RwLock::new(
+        moltis_sessions::metadata::SessionMetadata::load(tmp2.path().join("metadata.json")).unwrap(),
+    ));
     state2
         .set_chat(Arc::new(LiveChatService::new(
             Arc::clone(&registry2),
             Arc::clone(&state2),
+            Arc::clone(&session_store2),
+            Arc::clone(&session_metadata2),
         )))
         .await;
 

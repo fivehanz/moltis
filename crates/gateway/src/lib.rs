@@ -21,5 +21,6 @@ pub mod pairing;
 pub mod provider_setup;
 pub mod server;
 pub mod services;
+pub mod session;
 pub mod state;
 pub mod ws;

@@ -1,14 +1,92 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use {async_trait::async_trait, serde_json::Value, tokio::sync::RwLock, tracing::info};
 
 use {
     moltis_agents::providers::ProviderRegistry,
-    moltis_config::schema::ProvidersConfig,
+    moltis_config::schema::{ProviderEntry, ProvidersConfig},
     moltis_oauth::{CallbackServer, OAuthFlow, TokenStore, callback_port, load_oauth_config},
 };
 
 use crate::services::{ProviderSetupService, ServiceResult};
+
+// ── Key store ──────────────────────────────────────────────────────────────
+
+/// File-based API key storage at `~/.config/moltis/provider_keys.json`.
+/// Stores `{ "anthropic": "sk-...", "openai": "sk-..." }`.
+#[derive(Debug, Clone)]
+pub(crate) struct KeyStore {
+    path: PathBuf,
+}
+
+impl KeyStore {
+    pub(crate) fn new() -> Self {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".into());
+        let path = PathBuf::from(home)
+            .join(".config")
+            .join("moltis")
+            .join("provider_keys.json");
+        Self { path }
+    }
+
+    #[cfg(test)]
+    fn with_path(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn load_all(&self) -> HashMap<String, String> {
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|d| serde_json::from_str(&d).ok())
+            .unwrap_or_default()
+    }
+
+    fn load(&self, provider: &str) -> Option<String> {
+        self.load_all().get(provider).cloned()
+    }
+
+    fn save(&self, provider: &str, api_key: &str) -> Result<(), String> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut map = self.load_all();
+        map.insert(provider.to_string(), api_key.to_string());
+        let data = serde_json::to_string_pretty(&map).map_err(|e| e.to_string())?;
+        std::fs::write(&self.path, &data).map_err(|e| e.to_string())?;
+        // Set file permissions to 0600 on Unix (keys are secrets)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/// Merge persisted API keys into a ProvidersConfig so the registry rebuild
+/// picks them up without needing env vars.
+pub(crate) fn config_with_saved_keys(base: &ProvidersConfig, key_store: &KeyStore) -> ProvidersConfig {
+    let mut config = base.clone();
+    for (name, key) in key_store.load_all() {
+        let entry = config
+            .providers
+            .entry(name)
+            .or_insert_with(ProviderEntry::default);
+        // Only override if config doesn't already have a key.
+        if entry.api_key.as_ref().is_none_or(|k| k.is_empty()) {
+            entry.api_key = Some(key);
+        }
+    }
+    config
+}
 
 /// Known provider definitions used to populate the "available providers" list.
 struct KnownProvider {
@@ -67,6 +145,7 @@ pub struct LiveProviderSetupService {
     registry: Arc<RwLock<ProviderRegistry>>,
     config: ProvidersConfig,
     token_store: TokenStore,
+    key_store: KeyStore,
 }
 
 impl LiveProviderSetupService {
@@ -75,19 +154,25 @@ impl LiveProviderSetupService {
             registry,
             config,
             token_store: TokenStore::new(),
+            key_store: KeyStore::new(),
         }
     }
 
     fn is_provider_configured(&self, provider: &KnownProvider) -> bool {
-        // Check if the provider has an API key set via config or env
+        // Check if the provider has an API key set via env
         if let Some(env_key) = provider.env_key
             && std::env::var(env_key).is_ok()
         {
             return true;
         }
+        // Check config file
         if let Some(entry) = self.config.get(provider.name)
             && entry.api_key.as_ref().is_some_and(|k| !k.is_empty())
         {
+            return true;
+        }
+        // Check persisted key store
+        if self.key_store.load(provider.name).is_some() {
             return true;
         }
         // For OAuth providers, check token store
@@ -95,6 +180,11 @@ impl LiveProviderSetupService {
             return self.token_store.load(provider.name).is_some();
         }
         false
+    }
+
+    /// Build a ProvidersConfig that includes saved keys for registry rebuild.
+    fn effective_config(&self) -> ProvidersConfig {
+        config_with_saved_keys(&self.config, &self.key_store)
     }
 }
 
@@ -131,21 +221,26 @@ impl ProviderSetupService for LiveProviderSetupService {
             .find(|p| p.name == provider_name && p.auth_type == "api-key")
             .ok_or_else(|| format!("unknown api-key provider: {provider_name}"))?;
 
-        // Set the environment variable so the provider registry picks it up
+        // Persist to disk so the key survives restarts.
+        self.key_store.save(provider_name, api_key)?;
+
+        // Also set the environment variable so the provider registry picks it
+        // up during rebuild (it reads env vars for key discovery).
         if let Some(env_key) = known.env_key {
             // Safety: called from a single async context; env var mutation is
             // unavoidable here since providers read from env at registration time.
             unsafe { std::env::set_var(env_key, api_key) };
         }
 
-        // Rebuild the provider registry with the new key
-        let new_registry = ProviderRegistry::from_env_with_config(&self.config);
+        // Rebuild the provider registry with saved keys merged into config.
+        let effective = self.effective_config();
+        let new_registry = ProviderRegistry::from_env_with_config(&effective);
         let mut reg = self.registry.write().await;
         *reg = new_registry;
 
         info!(
             provider = provider_name,
-            "saved API key and rebuilt provider registry"
+            "saved API key to disk and rebuilt provider registry"
         );
 
         Ok(serde_json::json!({ "ok": true }))
@@ -172,7 +267,7 @@ impl ProviderSetupService for LiveProviderSetupService {
         // Spawn background task to wait for the callback and exchange the code
         let token_store = self.token_store.clone();
         let registry = Arc::clone(&self.registry);
-        let config = self.config.clone();
+        let config = self.effective_config();
         tokio::spawn(async move {
             match CallbackServer::wait_for_code(port, expected_state).await {
                 Ok(code) => {
@@ -281,6 +376,56 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), KNOWN_PROVIDERS.len());
+    }
+
+    #[test]
+    fn key_store_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KeyStore::with_path(dir.path().join("keys.json"));
+        assert!(store.load("anthropic").is_none());
+        store.save("anthropic", "sk-test-123").unwrap();
+        assert_eq!(store.load("anthropic").unwrap(), "sk-test-123");
+        // Overwrite
+        store.save("anthropic", "sk-new").unwrap();
+        assert_eq!(store.load("anthropic").unwrap(), "sk-new");
+        // Multiple providers
+        store.save("openai", "sk-openai").unwrap();
+        assert_eq!(store.load("openai").unwrap(), "sk-openai");
+        assert_eq!(store.load("anthropic").unwrap(), "sk-new");
+        let all = store.load_all();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn config_with_saved_keys_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KeyStore::with_path(dir.path().join("keys.json"));
+        store.save("anthropic", "sk-saved").unwrap();
+
+        let base = ProvidersConfig::default();
+        let merged = config_with_saved_keys(&base, &store);
+        let entry = merged.get("anthropic").unwrap();
+        assert_eq!(entry.api_key.as_deref(), Some("sk-saved"));
+    }
+
+    #[test]
+    fn config_with_saved_keys_does_not_override_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = KeyStore::with_path(dir.path().join("keys.json"));
+        store.save("anthropic", "sk-saved").unwrap();
+
+        let mut base = ProvidersConfig::default();
+        base.providers.insert(
+            "anthropic".into(),
+            ProviderEntry {
+                api_key: Some("sk-config".into()),
+                ..Default::default()
+            },
+        );
+        let merged = config_with_saved_keys(&base, &store);
+        let entry = merged.get("anthropic").unwrap();
+        // Config key takes precedence over saved key.
+        assert_eq!(entry.api_key.as_deref(), Some("sk-config"));
     }
 
     #[tokio::test]

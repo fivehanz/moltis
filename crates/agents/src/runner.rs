@@ -102,12 +102,16 @@ fn parse_tool_call_from_text(text: &str) -> Option<(ToolCall, Option<String>)> {
 }
 
 /// Run the agent loop: send messages to the LLM, execute tool calls, repeat.
+///
+/// If `history` is provided, those messages are inserted between the system
+/// prompt and the current user message, giving the LLM conversational context.
 pub async fn run_agent_loop(
     provider: Arc<dyn LlmProvider>,
     tools: &ToolRegistry,
     system_prompt: &str,
     user_message: &str,
     on_event: Option<&OnEvent>,
+    history: Option<Vec<serde_json::Value>>,
 ) -> Result<AgentRunResult> {
     let native_tools = provider.supports_tools();
     let tool_schemas = tools.list_schemas();
@@ -120,16 +124,20 @@ pub async fn run_agent_loop(
         "starting agent loop"
     );
 
-    let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({
-            "role": "system",
-            "content": system_prompt,
-        }),
-        serde_json::json!({
-            "role": "user",
-            "content": user_message,
-        }),
-    ];
+    let mut messages: Vec<serde_json::Value> = vec![serde_json::json!({
+        "role": "system",
+        "content": system_prompt,
+    })];
+
+    // Insert conversation history before the current user message.
+    if let Some(hist) = history {
+        messages.extend(hist);
+    }
+
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": user_message,
+    }));
 
     // Only send tool schemas to providers that support them natively.
     let schemas_for_api = if native_tools {
@@ -607,7 +615,7 @@ mod tests {
             response_text: "Hello!".into(),
         });
         let tools = ToolRegistry::new();
-        let result = run_agent_loop(provider, &tools, "You are a test bot.", "Hi", None)
+        let result = run_agent_loop(provider, &tools, "You are a test bot.", "Hi", None, None)
             .await
             .unwrap();
         assert_eq!(result.text, "Hello!");
@@ -628,6 +636,7 @@ mod tests {
             &tools,
             "You are a test bot.",
             "Use the tool",
+            None,
             None,
         )
         .await
@@ -725,6 +734,7 @@ mod tests {
             "You are a test bot.",
             "Run echo hello",
             Some(&on_event),
+            None,
         )
         .await
         .unwrap();
@@ -779,6 +789,7 @@ mod tests {
             "You are a test bot.",
             "Run echo hello",
             Some(&on_event),
+            None,
         )
         .await
         .unwrap();

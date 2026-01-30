@@ -6,6 +6,7 @@
 
 pub mod compaction;
 pub mod key;
+pub mod metadata;
 pub mod store;
 
 pub use key::SessionKey;

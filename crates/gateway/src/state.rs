@@ -152,6 +152,8 @@ pub struct GatewayState {
     pub approval_manager: Arc<ApprovalManager>,
     /// Late-bound chat service override (for circular init).
     pub chat_override: RwLock<Option<Arc<dyn crate::services::ChatService>>>,
+    /// Active session key per connection (conn_id → session key).
+    pub active_sessions: RwLock<HashMap<String, String>>,
 }
 
 impl GatewayState {
@@ -178,6 +180,7 @@ impl GatewayState {
             services,
             approval_manager,
             chat_override: RwLock::new(None),
+            active_sessions: RwLock::new(HashMap::new()),
         })
     }
 
