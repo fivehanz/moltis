@@ -23,6 +23,9 @@
   var chatHistoryIdx = -1; // -1 = not browsing history
   var chatHistoryDraft = "";
 
+  // Session token usage tracking (cumulative for the current session)
+  var sessionTokens = { input: 0, output: 0 };
+
   // ── Theme ────────────────────────────────────────────────────
   function getSystemTheme() {
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
@@ -1184,6 +1187,8 @@
     if (chatMsgBox) chatMsgBox.textContent = "";
     streamEl = null;
     streamText = "";
+    sessionTokens = { input: 0, output: 0 };
+    updateTokenBar();
 
     var items = sessionList.querySelectorAll(".session-item");
     items.forEach(function (el) {
@@ -1350,10 +1355,31 @@
     chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + "px";
   }
 
+  function formatTokens(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+    if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+    return String(n);
+  }
+
+  function updateTokenBar() {
+    var bar = $("tokenBar");
+    if (!bar) return;
+    var total = sessionTokens.input + sessionTokens.output;
+    if (total === 0) {
+      bar.textContent = "";
+      return;
+    }
+    bar.textContent =
+      formatTokens(sessionTokens.input) + " in / " +
+      formatTokens(sessionTokens.output) + " out \u00b7 " +
+      formatTokens(total) + " tokens";
+  }
+
   // Safe: static hardcoded HTML template, no user input.
   var chatPageHTML =
     '<div class="flex-1 flex flex-col min-w-0">' +
       '<div class="flex-1 overflow-y-auto p-4 flex flex-col gap-2" id="messages"></div>' +
+      '<div id="tokenBar" class="token-bar"></div>' +
       '<div class="px-4 py-3 border-t border-[var(--border)] bg-[var(--surface)] flex gap-2 items-end">' +
         '<textarea id="chatInput" placeholder="Type a message..." rows="1" ' +
           'class="flex-1 bg-[var(--surface2)] border border-[var(--border)] text-[var(--text)] px-3 py-2 rounded-lg text-sm resize-none min-h-[40px] max-h-[120px] leading-relaxed focus:outline-none focus:border-[var(--border-strong)] focus:ring-1 focus:ring-[var(--accent-subtle)] transition-colors font-[var(--font-body)]"></textarea>' +
@@ -2392,8 +2418,18 @@
               if (msgEl && p.model) {
                 var footer = document.createElement("div");
                 footer.className = "msg-model-footer";
-                footer.textContent = p.provider ? p.provider + " / " + p.model : p.model;
+                var footerText = p.provider ? p.provider + " / " + p.model : p.model;
+                if (p.inputTokens || p.outputTokens) {
+                  footerText += " \u00b7 " + formatTokens(p.inputTokens || 0) + " in / " + formatTokens(p.outputTokens || 0) + " out";
+                }
+                footer.textContent = footerText;
                 msgEl.appendChild(footer);
+              }
+              // Accumulate session token totals.
+              if (p.inputTokens || p.outputTokens) {
+                sessionTokens.input += (p.inputTokens || 0);
+                sessionTokens.output += (p.outputTokens || 0);
+                updateTokenBar();
               }
               streamEl = null;
               streamText = "";

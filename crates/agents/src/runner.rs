@@ -6,7 +6,7 @@ use {
 };
 
 use crate::{
-    model::{CompletionResponse, LlmProvider, ToolCall},
+    model::{CompletionResponse, LlmProvider, ToolCall, Usage},
     tool_registry::ToolRegistry,
 };
 
@@ -19,6 +19,7 @@ pub struct AgentRunResult {
     pub text: String,
     pub iterations: usize,
     pub tool_calls_made: usize,
+    pub usage: Usage,
 }
 
 /// Callback for streaming events out of the runner.
@@ -148,6 +149,8 @@ pub async fn run_agent_loop(
 
     let mut iterations = 0;
     let mut total_tool_calls = 0;
+    let mut total_input_tokens: u32 = 0;
+    let mut total_output_tokens: u32 = 0;
 
     loop {
         iterations += 1;
@@ -183,6 +186,9 @@ pub async fn run_agent_loop(
                 cb(RunnerEvent::ThinkingDone);
             }
         }
+
+        total_input_tokens = total_input_tokens.saturating_add(response.usage.input_tokens);
+        total_output_tokens = total_output_tokens.saturating_add(response.usage.output_tokens);
 
         info!(
             iteration = iterations,
@@ -232,6 +238,10 @@ pub async fn run_agent_loop(
                 text,
                 iterations,
                 tool_calls_made: total_tool_calls,
+                usage: Usage {
+                    input_tokens: total_input_tokens,
+                    output_tokens: total_output_tokens,
+                },
             });
         }
 

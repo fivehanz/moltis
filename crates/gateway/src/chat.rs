@@ -486,6 +486,8 @@ async fn run_with_tools(
                     "toolCallsMade": result.tool_calls_made,
                     "model": provider_ref.id(),
                     "provider": provider_name,
+                    "inputTokens": result.usage.input_tokens,
+                    "outputTokens": result.usage.output_tokens,
                 }),
                 BroadcastOpts::default(),
             )
@@ -575,6 +577,8 @@ async fn run_streaming(
                         "text": accumulated,
                         "model": provider.id(),
                         "provider": provider_name,
+                        "inputTokens": usage.input_tokens,
+                        "outputTokens": usage.output_tokens,
                     }),
                     BroadcastOpts::default(),
                 )
