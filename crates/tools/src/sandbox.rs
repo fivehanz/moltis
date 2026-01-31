@@ -78,6 +78,9 @@ pub struct SandboxId {
 /// Trait for sandbox implementations (Docker, cgroups, Apple Container, etc.).
 #[async_trait]
 pub trait Sandbox: Send + Sync {
+    /// Human-readable backend name (e.g. "docker", "apple-container", "cgroup", "none").
+    fn backend_name(&self) -> &'static str;
+
     /// Ensure the sandbox environment is ready (e.g., container started).
     async fn ensure_ready(&self, id: &SandboxId) -> Result<()>;
 
@@ -144,6 +147,10 @@ impl DockerSandbox {
 
 #[async_trait]
 impl Sandbox for DockerSandbox {
+    fn backend_name(&self) -> &'static str {
+        "docker"
+    }
+
     async fn ensure_ready(&self, id: &SandboxId) -> Result<()> {
         let name = self.container_name(id);
 
@@ -256,6 +263,10 @@ pub struct NoSandbox;
 
 #[async_trait]
 impl Sandbox for NoSandbox {
+    fn backend_name(&self) -> &'static str {
+        "none"
+    }
+
     async fn ensure_ready(&self, _id: &SandboxId) -> Result<()> {
         Ok(())
     }
@@ -310,6 +321,10 @@ impl CgroupSandbox {
 #[cfg(target_os = "linux")]
 #[async_trait]
 impl Sandbox for CgroupSandbox {
+    fn backend_name(&self) -> &'static str {
+        "cgroup"
+    }
+
     async fn ensure_ready(&self, _id: &SandboxId) -> Result<()> {
         let output = tokio::process::Command::new("systemd-run")
             .arg("--version")
@@ -430,6 +445,10 @@ impl AppleContainerSandbox {
 #[cfg(target_os = "macos")]
 #[async_trait]
 impl Sandbox for AppleContainerSandbox {
+    fn backend_name(&self) -> &'static str {
+        "apple-container"
+    }
+
     async fn ensure_ready(&self, id: &SandboxId) -> Result<()> {
         let name = self.container_name(id);
 
@@ -636,6 +655,16 @@ impl SandboxRouter {
     pub fn mode(&self) -> &SandboxMode {
         &self.config.mode
     }
+
+    /// Access the global sandbox config.
+    pub fn config(&self) -> &SandboxConfig {
+        &self.config
+    }
+
+    /// Human-readable name of the sandbox backend (e.g. "docker", "apple-container").
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.backend_name()
+    }
 }
 
 #[cfg(test)]
@@ -834,6 +863,39 @@ mod tests {
         // Override to disable sandbox for main
         router.set_override("main", false).await;
         assert!(!router.is_sandboxed("main").await);
+    }
+
+    #[test]
+    fn test_backend_name_docker() {
+        let sandbox = DockerSandbox::new(SandboxConfig::default());
+        assert_eq!(sandbox.backend_name(), "docker");
+    }
+
+    #[test]
+    fn test_backend_name_none() {
+        let sandbox = NoSandbox;
+        assert_eq!(sandbox.backend_name(), "none");
+    }
+
+    #[test]
+    fn test_sandbox_router_backend_name() {
+        let config = SandboxConfig::default();
+        let router = SandboxRouter::new(config);
+        assert_eq!(router.backend_name(), "docker");
+    }
+
+    #[test]
+    fn test_sandbox_router_config_accessor() {
+        let config = SandboxConfig {
+            mode: SandboxMode::NonMain,
+            scope: SandboxScope::Agent,
+            image: Some("alpine:latest".into()),
+            ..Default::default()
+        };
+        let router = SandboxRouter::new(config);
+        assert_eq!(*router.mode(), SandboxMode::NonMain);
+        assert_eq!(router.config().scope, SandboxScope::Agent);
+        assert_eq!(router.config().image.as_deref(), Some("alpine:latest"));
     }
 
     #[test]

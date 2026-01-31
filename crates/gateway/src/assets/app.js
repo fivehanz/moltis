@@ -1321,6 +1321,19 @@
     }
     card.appendChild(toolsSection);
 
+    // Sandbox section
+    var sb = data.sandbox || {};
+    var sandboxSection = ctxSection("Sandbox");
+    sandboxSection.appendChild(ctxRow("Enabled", sb.enabled ? "yes" : "no", true));
+    if (sb.backend) {
+      sandboxSection.appendChild(ctxRow("Backend", sb.backend));
+      if (sb.mode) sandboxSection.appendChild(ctxRow("Mode", sb.mode));
+      if (sb.scope) sandboxSection.appendChild(ctxRow("Scope", sb.scope));
+      if (sb.workspaceMount) sandboxSection.appendChild(ctxRow("Workspace Mount", sb.workspaceMount));
+      if (sb.image) sandboxSection.appendChild(ctxRow("Image", sb.image, true));
+    }
+    card.appendChild(sandboxSection);
+
     // Token Usage section
     var tu = data.tokenUsage || {};
     var tokenSection = ctxSection("Token Usage (estimated)");

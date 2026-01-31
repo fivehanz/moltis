@@ -590,10 +590,30 @@ impl ChatService for LiveChatService {
         let total_estimated_tokens =
             conversation_tokens + context_file_tokens + system_prompt_tokens;
 
+        // Sandbox info
+        let sandbox_info = if let Some(ref router) = self.state.sandbox_router {
+            let is_sandboxed = router.is_sandboxed(&session_key).await;
+            let config = router.config();
+            serde_json::json!({
+                "enabled": is_sandboxed,
+                "backend": router.backend_name(),
+                "mode": config.mode,
+                "scope": config.scope,
+                "workspaceMount": config.workspace_mount,
+                "image": config.image,
+            })
+        } else {
+            serde_json::json!({
+                "enabled": false,
+                "backend": null,
+            })
+        };
+
         Ok(serde_json::json!({
             "session": session_info,
             "project": project_info,
             "tools": tools,
+            "sandbox": sandbox_info,
             "tokenUsage": {
                 "conversationTokens": conversation_tokens,
                 "contextFileTokens": context_file_tokens,
