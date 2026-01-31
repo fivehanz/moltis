@@ -744,14 +744,31 @@ impl ProviderRegistry {
     }
 
     pub fn provider_summary(&self) -> String {
-        if self.models.is_empty() {
+        if self.providers.is_empty() {
             return "no LLM providers configured".into();
         }
-        self.models
+        let provider_count = self
+            .models
             .iter()
-            .map(|m| format!("{}: {}", m.provider, m.id))
-            .collect::<Vec<_>>()
-            .join(", ")
+            .map(|m| m.provider.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let model_count = self.models.len();
+        format!(
+            "{} provider{}, {} model{}",
+            provider_count,
+            if provider_count == 1 {
+                ""
+            } else {
+                "s"
+            },
+            model_count,
+            if model_count == 1 {
+                ""
+            } else {
+                "s"
+            },
+        )
     }
 }
 

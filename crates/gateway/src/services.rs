@@ -544,6 +544,9 @@ impl VoicewakeService for NoopVoicewakeService {
 #[async_trait]
 pub trait LogsService: Send + Sync {
     async fn tail(&self, params: Value) -> ServiceResult;
+    async fn list(&self, params: Value) -> ServiceResult;
+    async fn status(&self) -> ServiceResult;
+    async fn ack(&self) -> ServiceResult;
 }
 
 pub struct NoopLogsService;
@@ -552,6 +555,18 @@ pub struct NoopLogsService;
 impl LogsService for NoopLogsService {
     async fn tail(&self, _p: Value) -> ServiceResult {
         Ok(serde_json::json!({ "subscribed": true }))
+    }
+
+    async fn list(&self, _p: Value) -> ServiceResult {
+        Ok(serde_json::json!({ "entries": [] }))
+    }
+
+    async fn status(&self) -> ServiceResult {
+        Ok(serde_json::json!({ "unseen_warns": 0, "unseen_errors": 0 }))
+    }
+
+    async fn ack(&self) -> ServiceResult {
+        Ok(serde_json::json!({}))
     }
 }
 

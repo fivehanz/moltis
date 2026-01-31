@@ -19,6 +19,7 @@ pub mod channel_store;
 pub mod chat;
 pub mod chat_error;
 pub mod cron;
+pub mod logs;
 pub mod message_log_store;
 pub mod methods;
 pub mod nodes;

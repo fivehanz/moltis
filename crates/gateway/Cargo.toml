@@ -35,6 +35,7 @@ tokio-tungstenite     = { workspace = true }
 toml                  = { workspace = true }
 tower-http            = { features = ["cors"], version = "0.6" }
 tracing               = { workspace = true }
+tracing-subscriber    = { workspace = true }
 uuid                  = { workspace = true }
 
 [features]

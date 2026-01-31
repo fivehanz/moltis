@@ -2,6 +2,7 @@ mod auth_commands;
 
 use {
     clap::{Parser, Subcommand},
+    moltis_gateway::logs::{LogBroadcastLayer, LogBuffer},
     tracing::info,
     tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt},
 };
@@ -93,24 +94,31 @@ enum ConfigAction {
     Edit,
 }
 
-fn init_telemetry(cli: &Cli) {
+/// Initialise tracing and optionally attach a [`LogBroadcastLayer`] that
+/// captures events into an in-memory ring buffer for the web UI.
+fn init_telemetry(cli: &Cli, log_buffer: Option<LogBuffer>) {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
 
+    let registry = tracing_subscriber::registry().with(filter);
+
+    // Optionally attach the in-memory capture layer.
+    let log_layer = log_buffer.map(LogBroadcastLayer::new);
+
     if cli.json_logs {
-        tracing_subscriber::registry()
-            .with(filter)
+        registry
             .with(fmt::layer().json().with_target(true).with_thread_ids(false))
+            .with(log_layer)
             .init();
     } else {
-        tracing_subscriber::registry()
-            .with(filter)
+        registry
             .with(
                 fmt::layer()
                     .with_target(false)
                     .with_thread_ids(false)
                     .with_ansi(true),
             )
+            .with(log_layer)
             .init();
     }
 }
@@ -119,13 +127,22 @@ fn init_telemetry(cli: &Cli) {
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
-    init_telemetry(&cli);
+
+    // Create the log buffer only for the gateway command so the web UI can
+    // display captured log entries.
+    let log_buffer = if matches!(cli.command, Commands::Gateway { .. }) {
+        Some(LogBuffer::default())
+    } else {
+        None
+    };
+
+    init_telemetry(&cli, log_buffer.clone());
 
     info!(version = env!("CARGO_PKG_VERSION"), "moltis starting");
 
     match cli.command {
         Commands::Gateway { bind, port } => {
-            moltis_gateway::server::start_gateway(&bind, port).await
+            moltis_gateway::server::start_gateway(&bind, port, log_buffer).await
         },
         Commands::Agent { message, .. } => {
             let result = moltis_agents::runner::run_agent("default", "main", &message).await?;
