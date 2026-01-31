@@ -1817,6 +1817,7 @@ dependencies = [
  "moltis-oauth",
  "moltis-onboarding",
  "open",
+ "reqwest 0.12.28",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1955,6 +1956,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

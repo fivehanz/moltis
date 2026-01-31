@@ -201,6 +201,12 @@ const KNOWN_PROVIDERS: &[KnownProvider] = &[
         auth_type: "oauth",
         env_key: None,
     },
+    KnownProvider {
+        name: "kimi-code",
+        display_name: "Kimi Code",
+        auth_type: "oauth",
+        env_key: None,
+    },
 ];
 
 pub struct LiveProviderSetupService {

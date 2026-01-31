@@ -17,6 +17,15 @@ fn builtin_defaults() -> HashMap<String, OAuthConfig> {
         extra_auth_params: vec![],
         device_flow: true,
     });
+    m.insert("kimi-code".into(), OAuthConfig {
+        client_id: "17e5f671-d194-4dfb-9706-5516cb48c098".into(),
+        auth_url: "https://auth.kimi.com/api/oauth/device_authorization".into(),
+        token_url: "https://auth.kimi.com/api/oauth/token".into(),
+        redirect_uri: String::new(),
+        scopes: vec![],
+        extra_auth_params: vec![],
+        device_flow: true,
+    });
     m.insert("openai-codex".into(), OAuthConfig {
         client_id: "app_EMoamEEZ73f0CkXaXp7hrann".into(),
         auth_url: "https://auth.openai.com/oauth/authorize".into(),
@@ -111,6 +120,19 @@ mod tests {
         let config = load_oauth_config("openai-codex").expect("should have openai-codex");
         assert!(!config.device_flow);
         assert!(!config.redirect_uri.is_empty());
+    }
+
+    #[test]
+    fn load_kimi_code_config() {
+        let config = load_oauth_config("kimi-code").expect("should have kimi-code");
+        assert_eq!(config.client_id, "17e5f671-d194-4dfb-9706-5516cb48c098");
+        assert!(config.device_flow);
+        assert!(config.redirect_uri.is_empty());
+        assert_eq!(
+            config.auth_url,
+            "https://auth.kimi.com/api/oauth/device_authorization"
+        );
+        assert_eq!(config.token_url, "https://auth.kimi.com/api/oauth/token");
     }
 
     #[test]

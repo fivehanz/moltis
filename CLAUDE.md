@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## General
 
-This is doing a Rust version of moltbot. Moltbot documentation is available at
-https://docs.molt.bot/ and a local repository is in `../clawdbot/`
+This is doing a Rust version of openclaw. Openclaw documentation is available at
+https://docs.openclaw.ai and its code is at https://github.com/openclaw/openclaw
 
 Dig this repo and documentation to figure out how moltbot is working and how
 many features it has. `../clawdbot/HOWITWORKS.md` has explaination of how it
@@ -14,7 +14,9 @@ it more Rustacean.
 
 Always use traits if possible, to allow other implementations.
 
-Always prefer streaming over non-streaming API calls when possible. Streaming provides a better, friendlier user experience by showing responses as they arrive.
+Always prefer streaming over non-streaming API calls when possible. Streaming
+provides a better, friendlier user experience by showing responses as they
+arrive.
 
 All code you write must have test with a high coverage.
 

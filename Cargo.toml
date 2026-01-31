@@ -71,7 +71,7 @@ open         = "5.3"
 sha2         = "0.10"
 
 # Workspace crates
-moltis-agents     = { features = ["provider-github-copilot", "provider-openai-codex"], path = "crates/agents" }
+moltis-agents     = { features = ["provider-github-copilot", "provider-kimi-code", "provider-openai-codex"], path = "crates/agents" }
 moltis-auto-reply = { path = "crates/auto-reply" }
 moltis-browser    = { path = "crates/browser" }
 moltis-canvas     = { path = "crates/canvas" }

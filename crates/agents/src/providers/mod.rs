@@ -13,6 +13,9 @@ pub mod openai_codex;
 #[cfg(feature = "provider-github-copilot")]
 pub mod github_copilot;
 
+#[cfg(feature = "provider-kimi-code")]
+pub mod kimi_code;
+
 use std::{collections::HashMap, sync::Arc};
 
 use moltis_config::schema::ProvidersConfig;
@@ -184,6 +187,11 @@ impl ProviderRegistry {
         #[cfg(feature = "provider-github-copilot")]
         {
             reg.register_github_copilot_providers(config);
+        }
+
+        #[cfg(feature = "provider-kimi-code")]
+        {
+            reg.register_kimi_code_providers(config);
         }
 
         reg
@@ -415,6 +423,52 @@ impl ProviderRegistry {
                 ModelInfo {
                     id: model_id.into(),
                     provider: "github-copilot".into(),
+                    display_name: display_name.into(),
+                },
+                provider,
+            );
+        }
+    }
+
+    #[cfg(feature = "provider-kimi-code")]
+    fn register_kimi_code_providers(&mut self, config: &ProvidersConfig) {
+        if !config.is_enabled("kimi-code") {
+            return;
+        }
+
+        if !kimi_code::has_stored_tokens() {
+            return;
+        }
+
+        if let Some(model_id) = config.get("kimi-code").and_then(|e| e.model.as_deref()) {
+            if !self.providers.contains_key(model_id) {
+                let display = kimi_code::KIMI_CODE_MODELS
+                    .iter()
+                    .find(|(id, _)| *id == model_id)
+                    .map(|(_, name)| name.to_string())
+                    .unwrap_or_else(|| format!("{model_id} (Kimi Code/OAuth)"));
+                let provider = Arc::new(kimi_code::KimiCodeProvider::new(model_id.into()));
+                self.register(
+                    ModelInfo {
+                        id: model_id.into(),
+                        provider: "kimi-code".into(),
+                        display_name: display,
+                    },
+                    provider,
+                );
+            }
+            return;
+        }
+
+        for &(model_id, display_name) in kimi_code::KIMI_CODE_MODELS {
+            if self.providers.contains_key(model_id) {
+                continue;
+            }
+            let provider = Arc::new(kimi_code::KimiCodeProvider::new(model_id.into()));
+            self.register(
+                ModelInfo {
+                    id: model_id.into(),
+                    provider: "kimi-code".into(),
                     display_name: display_name.into(),
                 },
                 provider,
