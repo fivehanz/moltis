@@ -76,12 +76,9 @@
   function setSessionModel(sessionKey, modelId) {
     sendRpc("sessions.patch", { key: sessionKey, model: modelId });
   }
-  var sessionsToggle = $("sessionsToggle");
   var sessionsPanel = $("sessionsPanel");
   var sessionList = $("sessionList");
   var newSessionBtn = $("newSessionBtn");
-  var navAddProviderBtn = $("navAddProviderBtn");
-  var navProviderList = $("navProviderList");
 
   function setStatus(state, text) {
     dot.className = "status-dot " + state;
@@ -283,6 +280,13 @@
       a.classList.toggle("active", a.getAttribute("href") === currentPage);
     });
 
+    // Show sessions panel only on the chat page
+    if (currentPage === "/") {
+      sessionsPanel.classList.remove("hidden");
+    } else {
+      sessionsPanel.classList.add("hidden");
+    }
+
     if (page) page.init(pageContent);
   }
 
@@ -303,11 +307,6 @@
     if (!link) return;
     e.preventDefault();
     navigate(link.getAttribute("href"));
-  });
-
-  // ── Sessions sidebar ────────────────────────────────────────
-  sessionsToggle.addEventListener("click", function () {
-    sessionsPanel.classList.toggle("hidden");
   });
 
   function fetchSessions() {
@@ -881,7 +880,7 @@
           status.textContent = provider.displayName + " configured successfully!";
           providerModalBody.appendChild(status);
           fetchModels();
-          fetchNavProviders();
+          if (refreshProvidersPage) refreshProvidersPage();
           setTimeout(closeProviderModal, 1500);
         } else {
           saveBtn.disabled = false;
@@ -984,68 +983,19 @@
           status.textContent = provider.displayName + " connected successfully!";
           providerModalBody.appendChild(status);
           fetchModels();
-          fetchNavProviders();
+          if (refreshProvidersPage) refreshProvidersPage();
           setTimeout(closeProviderModal, 1500);
         }
       });
     }, 2000);
   }
 
-  navAddProviderBtn.addEventListener("click", function () {
-    if (connected) openProviderModal();
-  });
   providerModalClose.addEventListener("click", closeProviderModal);
   providerModal.addEventListener("click", function (e) {
     if (e.target === providerModal) closeProviderModal();
   });
 
-  // ── Nav provider list ──────────────────────────────────────
-  function fetchNavProviders() {
-    sendRpc("providers.available", {}).then(function (res) {
-      if (!res || !res.ok) return;
-      renderNavProviders(res.payload || []);
-    });
-  }
-
-  function renderNavProviders(providers) {
-    while (navProviderList.firstChild) navProviderList.removeChild(navProviderList.firstChild);
-    var configured = providers.filter(function (p) { return p.configured; });
-    if (configured.length === 0) {
-      var empty = document.createElement("div");
-      empty.className = "text-xs text-[var(--muted)]";
-      empty.style.padding = "2px 0";
-      empty.textContent = "No providers configured";
-      navProviderList.appendChild(empty);
-      return;
-    }
-    configured.forEach(function (p) {
-      var row = document.createElement("div");
-      row.className = "flex items-center justify-between py-0.5";
-
-      var name = document.createElement("span");
-      name.className = "text-xs text-[var(--text)]";
-      name.textContent = p.displayName;
-      row.appendChild(name);
-
-      var logoutBtn = document.createElement("button");
-      logoutBtn.className = "text-[10px] text-[var(--muted)] hover:text-[var(--error)] cursor-pointer bg-transparent border-none transition-colors";
-      logoutBtn.textContent = "remove";
-      logoutBtn.title = "Remove " + p.displayName;
-      logoutBtn.addEventListener("click", function (e) {
-        e.stopPropagation();
-        if (!confirm("Remove credentials for " + p.displayName + "?")) return;
-        sendRpc("providers.remove_key", { provider: p.name }).then(function (res) {
-          if (res && res.ok) {
-            fetchModels();
-            fetchNavProviders();
-          }
-        });
-      });
-      row.appendChild(logoutBtn);
-
-      navProviderList.appendChild(row);
-    });
-  }
+  var refreshProvidersPage = null;
 
   // ── Error helpers ───────────────────────────────────────────
   function parseErrorMessage(message) {
@@ -1254,9 +1204,7 @@
       if (isTarget) el.classList.remove("unread");
     });
 
-    var switchParams = { key: key };
-    if (activeProjectId) switchParams.project_id = activeProjectId;
-    sendRpc("sessions.switch", switchParams).then(function (res) {
+    sendRpc("sessions.switch", { key: key }).then(function (res) {
       if (res && res.ok && res.payload) {
         var entry = res.payload.entry || {};
         // Restore the session's project binding.
@@ -1264,7 +1212,7 @@
           activeProjectId = entry.projectId;
           localStorage.setItem("moltis-project", activeProjectId);
           projectSelect.value = activeProjectId;
-        } else if (!switchParams.project_id) {
+        } else {
           // Session has no project — clear selection.
           activeProjectId = "";
           localStorage.setItem("moltis-project", "");
@@ -1462,7 +1410,10 @@
       }
     }
 
-    if (connected) chatSendBtn.disabled = false;
+    if (connected) {
+      chatSendBtn.disabled = false;
+      switchSession(activeSessionKey);
+    }
 
     chatInput.addEventListener("input", chatAutoResize);
     chatInput.addEventListener("keydown", function (e) {
@@ -2329,6 +2280,109 @@
     renderList();
   });
 
+  // ════════════════════════════════════════════════════════════
+  // Providers page
+  // ════════════════════════════════════════════════════════════
+  // Safe: static hardcoded HTML template, no user input.
+  var providersPageHTML =
+    '<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">' +
+      '<div class="flex items-center gap-3">' +
+        '<h2 class="text-lg font-medium text-[var(--text-strong)]">Providers</h2>' +
+        '<button id="provAddBtn" class="bg-[var(--accent-dim)] text-white border-none px-3 py-1.5 rounded text-xs cursor-pointer hover:bg-[var(--accent)] transition-colors">+ Add Provider</button>' +
+      '</div>' +
+      '<div id="providerPageList"></div>' +
+    '</div>';
+
+  registerPage("/providers", function initProviders(container) {
+    container.innerHTML = providersPageHTML;
+
+    var addBtn = $("provAddBtn");
+    var listEl = $("providerPageList");
+
+    addBtn.addEventListener("click", function () {
+      if (connected) openProviderModal();
+    });
+
+    function renderProviderList() {
+      sendRpc("providers.available", {}).then(function (res) {
+        if (!res || !res.ok) return;
+        var providers = res.payload || [];
+        while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+
+        if (providers.length === 0) {
+          listEl.appendChild(createEl("div", {
+            className: "text-sm text-[var(--muted)]",
+            textContent: "No providers available."
+          }));
+          return;
+        }
+
+        providers.forEach(function (p) {
+          var card = createEl("div", {
+            style: "display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;" +
+              (p.configured ? "" : "opacity:0.5;")
+          });
+
+          var left = createEl("div", { style: "display:flex;align-items:center;gap:8px;" });
+          left.appendChild(createEl("span", {
+            className: "text-sm text-[var(--text-strong)]",
+            textContent: p.displayName
+          }));
+
+          var badge = createEl("span", {
+            className: "provider-item-badge " + p.authType,
+            textContent: p.authType === "oauth" ? "OAuth" : "API Key"
+          });
+          left.appendChild(badge);
+
+          if (p.configured) {
+            left.appendChild(createEl("span", {
+              className: "provider-item-badge configured",
+              textContent: "configured"
+            }));
+          }
+
+          card.appendChild(left);
+
+          if (p.configured) {
+            var removeBtn = createEl("button", {
+              className: "session-action-btn session-delete",
+              textContent: "Remove",
+              title: "Remove " + p.displayName
+            });
+            removeBtn.addEventListener("click", function () {
+              if (!confirm("Remove credentials for " + p.displayName + "?")) return;
+              sendRpc("providers.remove_key", { provider: p.name }).then(function (res) {
+                if (res && res.ok) {
+                  fetchModels();
+                  renderProviderList();
+                }
+              });
+            });
+            card.appendChild(removeBtn);
+          } else {
+            var connectBtn = createEl("button", {
+              className: "bg-[var(--accent-dim)] text-white border-none px-2.5 py-1 rounded text-xs cursor-pointer hover:bg-[var(--accent)] transition-colors",
+              textContent: "Connect"
+            });
+            connectBtn.addEventListener("click", function () {
+              if (p.authType === "api-key") showApiKeyForm(p);
+              else if (p.authType === "oauth") showOAuthFlow(p);
+            });
+            card.appendChild(connectBtn);
+          }
+
+          listEl.appendChild(card);
+        });
+      });
+    }
+
+    refreshProvidersPage = renderProviderList;
+    renderProviderList();
+  }, function teardownProviders() {
+    refreshProvidersPage = null;
+  });
+
   // ── WebSocket ─────────────────────────────────────────────
   function connect() {
     setStatus("connecting", "connecting...");
@@ -2354,10 +2408,10 @@
           var ts = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
           chatAddMsg("system", "Connected to moltis gateway v" + hello.server.version + " at " + ts);
           fetchModels();
-          fetchNavProviders();
           fetchSessions();
           fetchProjects();
-          if (currentPage === "/") switchSession(activeSessionKey);
+          // Re-mount the current page so it can fetch data now that we're connected
+          mount(currentPage);
         } else {
           setStatus("", "handshake failed");
           var reason = (frame.error && frame.error.message) || "unknown error";
