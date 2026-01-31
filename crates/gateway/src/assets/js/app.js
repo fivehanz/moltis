@@ -22,5 +22,5 @@ import "./session-search.js";
 initTheme();
 injectMarkdownStyles();
 onEvent("session", function () { fetchSessions(); });
-mount();
+mount(location.pathname);
 connect();

@@ -2,7 +2,7 @@
 import * as S from "./state.js";
 import { sendRpc, createEl } from "./helpers.js";
 import { registerPage } from "./router.js";
-import { openProviderModal, showApiKeyForm, showOAuthFlow } from "./providers.js";
+import { openProviderModal } from "./providers.js";
 import { fetchModels } from "./models.js";
 
 // Safe: static hardcoded HTML template string — no user input is interpolated.
@@ -28,23 +28,27 @@ registerPage("/providers", function initProviders(container) {
   function renderProviderList() {
     sendRpc("providers.available", {}).then(function (res) {
       if (!res || !res.ok) return;
-      var providers = res.payload || [];
+      var providers = (res.payload || []).filter(function (p) {
+        return p.configured;
+      }).sort(function (a, b) {
+        return a.displayName.localeCompare(b.displayName);
+      });
       while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
 
       if (providers.length === 0) {
         listEl.appendChild(createEl("div", {
           className: "text-sm text-[var(--muted)]",
-          textContent: "No providers available."
+          textContent: "No providers connected yet."
         }));
         return;
       }
 
       providers.forEach(function (p) {
         var card = createEl("div", {
-          className: "provider-item mb-sm" + (p.configured ? "" : " configured")
+          style: "display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;"
         });
 
-        var left = createEl("div", { className: "flex items-center gap-2" });
+        var left = createEl("div", { style: "display:flex;align-items:center;gap:8px;" });
         left.appendChild(createEl("span", {
           className: "text-sm text-[var(--text-strong)]",
           textContent: p.displayName
@@ -56,42 +60,23 @@ registerPage("/providers", function initProviders(container) {
         });
         left.appendChild(badge);
 
-        if (p.configured) {
-          left.appendChild(createEl("span", {
-            className: "provider-item-badge configured",
-            textContent: "configured"
-          }));
-        }
-
         card.appendChild(left);
 
-        if (p.configured) {
-          var removeBtn = createEl("button", {
-            className: "session-action-btn session-delete",
-            textContent: "Remove",
-            title: "Remove " + p.displayName
+        var removeBtn = createEl("button", {
+          className: "session-action-btn session-delete",
+          textContent: "Remove",
+          title: "Remove " + p.displayName
+        });
+        removeBtn.addEventListener("click", function () {
+          if (!confirm("Remove credentials for " + p.displayName + "?")) return;
+          sendRpc("providers.remove_key", { provider: p.name }).then(function (res) {
+            if (res && res.ok) {
+              fetchModels();
+              renderProviderList();
+            }
           });
-          removeBtn.addEventListener("click", function () {
-            if (!confirm("Remove credentials for " + p.displayName + "?")) return;
-            sendRpc("providers.remove_key", { provider: p.name }).then(function (res) {
-              if (res && res.ok) {
-                fetchModels();
-                renderProviderList();
-              }
-            });
-          });
-          card.appendChild(removeBtn);
-        } else {
-          var connectBtn = createEl("button", {
-            className: "bg-[var(--accent-dim)] text-white border-none px-2.5 py-1 rounded text-xs cursor-pointer hover:bg-[var(--accent)] transition-colors",
-            textContent: "Connect"
-          });
-          connectBtn.addEventListener("click", function () {
-            if (p.authType === "api-key") showApiKeyForm(p);
-            else if (p.authType === "oauth") showOAuthFlow(p);
-          });
-          card.appendChild(connectBtn);
-        }
+        });
+        card.appendChild(removeBtn);
 
         listEl.appendChild(card);
       });
