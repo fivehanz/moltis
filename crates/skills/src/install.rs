@@ -11,6 +11,9 @@ use crate::{
 /// Clones the entire repo to `install_dir/<repo>/` (kept intact), scans for
 /// `SKILL.md` files, and records the repo + skills in the manifest with all
 /// skills enabled by default.
+///
+/// Only handles native `SKILL.md` format repos. For multi-format plugin repos,
+/// use `moltis_plugins::install::install_plugin` instead.
 pub async fn install_skill(source: &str, install_dir: &Path) -> anyhow::Result<Vec<SkillMetadata>> {
     let (owner, repo) = parse_source(source)?;
     let dir_name = format!("{owner}-{repo}");
@@ -41,7 +44,7 @@ pub async fn install_skill(source: &str, install_dir: &Path) -> anyhow::Result<V
         },
     }
 
-    // Scan for SKILL.md files and build manifest entry.
+    // Scan for SKILL.md files only.
     let (skills_meta, skill_states) = scan_repo_skills(&target, install_dir).await?;
 
     if skills_meta.is_empty() {
@@ -66,6 +69,7 @@ pub async fn install_skill(source: &str, install_dir: &Path) -> anyhow::Result<V
         source: format!("{owner}/{repo}"),
         repo_name: dir_name,
         installed_at_ms: now,
+        format: Default::default(),
         skills: skill_states,
     });
     store.save(&manifest)?;

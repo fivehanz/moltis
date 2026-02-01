@@ -237,8 +237,7 @@ pub async fn handle_message_direct(
             username: username.clone(),
             model: config.model.clone(),
         };
-        sink.dispatch_to_chat(&body, reply_target, meta)
-            .await;
+        sink.dispatch_to_chat(&body, reply_target, meta).await;
     }
 
     Ok(())

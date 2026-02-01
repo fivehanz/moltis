@@ -6,17 +6,28 @@ pub fn generate_skills_prompt(skills: &[SkillMetadata]) -> String {
         return String::new();
     }
 
+    use crate::types::SkillSource;
+
     let mut out = String::from("## Available Skills\n\n<available_skills>\n");
     for skill in skills {
+        let is_plugin = skill.source.as_ref() == Some(&SkillSource::Plugin);
+        let path_display = if is_plugin {
+            skill.path.display().to_string()
+        } else {
+            skill.path.join("SKILL.md").display().to_string()
+        };
         out.push_str(&format!(
-            "<skill name=\"{}\" path=\"{}\">\n{}\n</skill>\n",
+            "<skill name=\"{}\" source=\"{}\" path=\"{}\">\n{}\n</skill>\n",
             skill.name,
-            skill.path.join("SKILL.md").display(),
+            if is_plugin { "plugin" } else { "skill" },
+            path_display,
             skill.description,
         ));
     }
     out.push_str("</available_skills>\n\n");
-    out.push_str("To activate a skill, read its SKILL.md file for full instructions.\n\n");
+    out.push_str(
+        "To activate a skill, read its SKILL.md file (or the plugin's .md file at the given path) for full instructions.\n\n",
+    );
     out
 }
 

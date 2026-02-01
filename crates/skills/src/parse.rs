@@ -13,10 +13,13 @@ pub fn validate_name(name: &str) -> bool {
         && name.len() <= 64
         && name
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == ':')
         && !name.starts_with('-')
         && !name.ends_with('-')
+        && !name.starts_with(':')
+        && !name.ends_with(':')
         && !name.contains("--")
+        && !name.contains("::")
 }
 
 /// Parse a SKILL.md file into metadata only (frontmatter).
@@ -252,6 +255,12 @@ mod tests {
         assert!(!validate_name("has space"));
         assert!(!validate_name("has--double"));
         assert!(!validate_name(&"a".repeat(65)));
+        // Colons allowed for namespaced plugin names
+        assert!(validate_name("plugin:skill"));
+        assert!(validate_name("pr-review-toolkit:code-reviewer"));
+        assert!(!validate_name(":bad"));
+        assert!(!validate_name("bad:"));
+        assert!(!validate_name("bad::double"));
     }
 
     #[test]

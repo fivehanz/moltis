@@ -16,6 +16,7 @@ import "./page-projects.js";
 import "./page-providers.js";
 import "./page-channels.js";
 import "./page-logs.js";
+import "./page-plugins.js";
 import "./page-skills.js";
 
 // Import side-effect modules

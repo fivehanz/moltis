@@ -1,4 +1,5 @@
-// ── Skills page (Preact + HTM + Signals proof of concept) ───
+// ── Plugins page (Preact + HTM + Signals) ───
+// Shows plugin-format repos (Claude Code, Codex, etc.) — distinct from native SKILL.md skills.
 // eslint-disable-next-line -- body_html is server-rendered trusted content
 
 import { computed, signal, useSignal } from "@preact/signals";
@@ -9,14 +10,13 @@ import { sendRpc } from "./helpers.js";
 import { registerPage } from "./router.js";
 import * as S from "./state.js";
 
-// ── Signals (reactive state) ─────────────────────────────────
-var repos = signal([]); // lightweight summaries: { source, skill_count, enabled_count }
-var enabledSkills = signal([]); // only enabled skills (from skills.list)
+// ── Signals ─────────────────────────────────────────────────
+var repos = signal([]);
+var enabledSkills = signal([]);
 var loading = signal(false);
 var toasts = signal([]);
 var toastId = 0;
 
-// Lazy prefetch: starts on first navigation to /skills, not at module load
 var prefetchPromise = null;
 function ensurePrefetch() {
 	if (!prefetchPromise) {
@@ -32,16 +32,18 @@ function ensurePrefetch() {
 	return prefetchPromise;
 }
 
-// Map enabled skill name → repo source (derived from enabled skills data)
-var skillRepoMap = computed(() => {
-	var map = {};
-	enabledSkills.value.forEach((s) => {
-		if (s.source) map[s.name] = s.source;
-	});
-	return map;
+// Filter to only plugin-format repos (non-skill)
+var pluginRepos = computed(() => {
+	return repos.value.filter((r) => r.format && r.format !== "skill");
 });
 
-// ── Helpers ──────────────────────────────────────────────────
+// Enabled plugins only (from plugin-format repos)
+var enabledPlugins = computed(() => {
+	var pluginSources = new Set(pluginRepos.value.map((r) => r.source));
+	return enabledSkills.value.filter((s) => pluginSources.has(s.source));
+});
+
+// ── Helpers ─────────────────────────────────────────────────
 function showToast(message, type) {
 	var id = ++toastId;
 	toasts.value = toasts.value.concat([{ id: id, message: message, type: type }]);
@@ -69,7 +71,7 @@ function doInstall(source) {
 		if (!S.connected) showToast("Not connected to gateway.", "error");
 		return Promise.resolve();
 	}
-	return sendRpc("skills.install", { source: source }).then((res) => {
+	return sendRpc("plugins.install", { source: source }).then((res) => {
 		if (res?.ok) {
 			var p = res.payload || {};
 			var count = (p.installed || []).length;
@@ -81,14 +83,13 @@ function doInstall(source) {
 	});
 }
 
-// Debounced server-side search for skills within a repo
 function searchSkills(source, query) {
 	return fetch(`/api/skills/search?source=${encodeURIComponent(source)}&q=${encodeURIComponent(query)}`)
 		.then((r) => r.json())
 		.then((data) => data.skills || []);
 }
 
-// ── Components ───────────────────────────────────────────────
+// ── Components ──────────────────────────────────────────────
 
 function Toasts() {
 	return html`<div class="skills-toast-container">
@@ -109,31 +110,6 @@ function Toasts() {
   </div>`;
 }
 
-function SecurityWarning() {
-	var dismissed = useSignal(!!localStorage.getItem("moltis-skills-warning-dismissed"));
-	if (dismissed.value) return null;
-	var threats = [
-		"Execute arbitrary shell commands on your machine (install malware, cryptominers, backdoors)",
-		"Read and exfiltrate sensitive data \u2014 SSH keys, API tokens, browser cookies, credentials, env variables",
-		"Modify or delete files across your filesystem, including other projects",
-		"Send your data to remote servers via curl/wget without your knowledge",
-	];
-	function dismiss() {
-		localStorage.setItem("moltis-skills-warning-dismissed", "1");
-		dismissed.value = true;
-	}
-	return html`<div class="skills-warn">
-    <div class="skills-warn-title">Security Warning: Review skills before installing</div>
-    <div>Skills are community-authored instructions that the AI agent follows. A malicious skill can instruct the agent to:</div>
-    <ul style="margin:6px 0 6px 18px;padding:0">
-      ${threats.map((t) => html`<li>${t}</li>`)}
-    </ul>
-    <div style="margin-top:4px">Only install skills from authors and repositories you trust. Always read the full SKILL.md before enabling a skill \u2014 the instructions in the body are what the agent will execute.</div>
-    <div style="margin-top:6px;color:var(--success, #4a4)">With sandbox mode enabled (Docker, Apple Container, or cgroup), command execution is isolated and the damage a malicious skill can do is significantly limited.</div>
-    <button onClick=${dismiss} style="margin-top:8px;background:none;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:.72rem;padding:3px 10px;cursor:pointer;color:var(--muted)">Dismiss</button>
-  </div>`;
-}
-
 function InstallBox() {
 	var inputRef = useRef(null);
 	var installing = useSignal(false);
@@ -150,22 +126,22 @@ function InstallBox() {
 		if (e.key === "Enter") onInstall();
 	}
 	return html`<div class="skills-install-box">
-    <input ref=${inputRef} type="text" placeholder="owner/repo or full URL (e.g. anthropics/skills)" class="skills-install-input" onKeyDown=${onKey} />
+    <input ref=${inputRef} type="text" placeholder="owner/repo or full URL (e.g. anthropics/claude-plugins-official)" class="skills-install-input" onKeyDown=${onKey} />
     <button class="skills-install-btn" onClick=${onInstall} disabled=${installing.value}>
       ${installing.value ? "Installing\u2026" : "Install"}
     </button>
   </div>`;
 }
 
-var featuredSkills = [
-	{ repo: "openclaw/skills", desc: "Community skills from ClawdHub" },
-	{ repo: "anthropics/skills", desc: "Official Anthropic agent skills" },
-	{ repo: "vercel-labs/agent-skills", desc: "Vercel agent skills collection" },
-	{ repo: "vercel-labs/skills", desc: "Vercel skills toolkit" },
+var featuredPlugins = [
+	{
+		repo: "anthropics/claude-plugins-official",
+		desc: "Official Anthropic plugin directory (code-review, pr-review-toolkit, commit-commands, LSP servers, and more)",
+	},
 ];
 
 function FeaturedCard(props) {
-	var f = props.skill;
+	var f = props.plugin;
 	var installing = useSignal(false);
 	var href = /^https?:\/\//.test(f.repo) ? f.repo : `https://github.com/${f.repo}`;
 	function onInstall() {
@@ -188,52 +164,23 @@ function FeaturedCard(props) {
 }
 
 function FeaturedSection() {
+	if (featuredPlugins.length === 0) return null;
 	return html`<div class="skills-section">
-    <h3 class="skills-section-title">Featured Skills</h3>
+    <h3 class="skills-section-title">Featured Plugins</h3>
     <div class="skills-featured-grid">
-      ${featuredSkills.map((f) => html`<${FeaturedCard} key=${f.repo} skill=${f} />`)}
+      ${featuredPlugins.map((f) => html`<${FeaturedCard} key=${f.repo} plugin=${f} />`)}
     </div>
   </div>`;
 }
 
-// ── Skill detail sub-components ──────────────────────────────
-
-function eligibilityBadge(d) {
-	var hasReqs = d.requires && (d.requires.bins?.length || d.requires.any_bins?.length);
-	if (d.eligible === false)
-		return html`<span style="font-size:.65rem;padding:1px 5px;border-radius:9999px;background:var(--error, #e55);color:#fff;font-weight:500">blocked</span>`;
-	if (hasReqs)
-		return html`<span style="font-size:.65rem;padding:1px 5px;border-radius:9999px;background:var(--success, #4a4);color:#fff;font-weight:500">eligible</span>`;
-	return html`<span style="font-size:.65rem;padding:1px 5px;border-radius:9999px;background:var(--surface2);color:var(--muted);font-weight:500">no deps declared</span>`;
-}
-
-function SkillMetadata(props) {
+// ── Plugin metadata row ──────────────────────────────────────
+function PluginMetadata(props) {
 	var d = props.detail;
-	if (!(d.author || d.version || d.homepage || d.source_url)) return null;
+	if (!(d.author || d.homepage || d.source_url)) return null;
 	return html`<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;font-size:.75rem;color:var(--muted);flex-wrap:wrap">
     ${d.author && html`<span>Author: ${d.author}</span>`}
-    ${d.version && html`<span>v${d.version}</span>`}
     ${d.homepage && html`<a href=${d.homepage} target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;font-size:.75rem">${d.homepage.replace(/^https?:\/\//, "")}</a>`}
     ${d.source_url && html`<a href=${d.source_url} target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;font-size:.75rem">View source</a>`}
-  </div>`;
-}
-
-function MissingDepsSection(props) {
-	var d = props.detail;
-	if (!(d.eligible === false && d.missing_bins && d.missing_bins.length > 0)) return null;
-	return html`<div style="margin-bottom:8px;font-size:.78rem">
-    <span style="color:var(--error, #e55);font-weight:500">Missing: ${d.missing_bins.map((b) => `bin:${b}`).join(", ")}</span>
-    ${(d.install_options || []).map(
-			(opt, idx) =>
-				html`<button onClick=${() => {
-					sendRpc("skills.install_dep", { skill: d.name, index: idx }).then((r) => {
-						if (r?.ok) {
-							showToast(`Installed dependency for ${d.name}`, "success");
-							props.onReload?.();
-						} else showToast(`Install failed: ${r?.error || "unknown"}`, "error");
-					});
-				}} style="margin-left:6px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);font-size:.7rem;padding:2px 8px;cursor:pointer">${opt.label || `Install via ${opt.kind}`}</button>`,
-		)}
   </div>`;
 }
 
@@ -242,14 +189,14 @@ function SkillDetail(props) {
 	var d = props.detail;
 	var onClose = props.onClose;
 
+	// Safe: body_html is server-rendered trusted HTML from the Rust gateway markdown renderer
 	var bodyRef = useRef(null);
+	var toggling = useSignal(false);
 	useEffect(() => {
 		if (bodyRef.current && d?.body_html) {
-			// Safe: body_html is rendered server-side by the Rust gateway from SKILL.md
 			bodyRef.current.textContent = "";
 			var tpl = document.createElement("template");
-			// eslint-disable-next-line no-unsanitized/property -- server-rendered trusted HTML from Rust gateway
-			tpl.innerHTML = d.body_html;
+			tpl.innerHTML = d.body_html; // eslint-disable-line no-unsanitized/property -- server-rendered
 			bodyRef.current.appendChild(tpl.content);
 			bodyRef.current.querySelectorAll("a").forEach((a) => {
 				a.setAttribute("target", "_blank");
@@ -262,84 +209,135 @@ function SkillDetail(props) {
 
 	function onToggle() {
 		if (!S.connected) return;
-		var method = d.enabled ? "skills.skill.disable" : "skills.skill.enable";
+		toggling.value = true;
+		var method = d.enabled ? "plugins.skill.disable" : "plugins.skill.enable";
 		sendRpc(method, { source: props.repoSource, skill: d.name }).then((r) => {
+			toggling.value = false;
 			if (r?.ok) fetchAll();
 		});
 	}
 
-	return html`<div class="skills-detail-panel" style="display:block">
+	return html`<div class="skills-detail-panel" style="display:block;margin-top:8px">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div style="display:flex;align-items:center;gap:8px">
         <span style="font-family:var(--font-mono);font-size:.9rem;font-weight:600;color:var(--text-strong)">${d.display_name || d.name}</span>
         ${d.display_name && html`<span style="font-family:var(--font-mono);font-size:.72rem;color:var(--muted)">${d.name}</span>`}
         ${d.license && html`<span style="font-size:.65rem;padding:1px 6px;border-radius:9999px;background:var(--surface2);color:var(--muted)">${d.license}</span>`}
-        ${eligibilityBadge(d)}
       </div>
       <div style="display:flex;align-items:center;gap:6px">
-        <button onClick=${onToggle} style=${{
+        <button onClick=${onToggle} disabled=${toggling.value} style=${{
 					background: d.enabled ? "none" : "var(--accent)",
 					border: "1px solid var(--border)",
 					borderRadius: "var(--radius-sm)",
 					fontSize: ".72rem",
 					padding: "3px 10px",
-					cursor: "pointer",
+					cursor: toggling.value ? "wait" : "pointer",
 					color: d.enabled ? "var(--muted)" : "#fff",
 					fontWeight: 500,
-				}}>${d.enabled ? "Disable" : "Enable"}</button>
+					opacity: toggling.value ? 0.6 : 1,
+				}}>${toggling.value ? "Loading\u2026" : d.enabled ? "Disable" : "Enable"}</button>
         <button onClick=${onClose} style="background:none;border:none;color:var(--muted);font-size:.9rem;cursor:pointer;padding:2px 4px">\u2715</button>
       </div>
     </div>
-    <${SkillMetadata} detail=${d} />
+    <${PluginMetadata} detail=${d} />
     ${d.description && html`<p style="margin:0 0 8px;font-size:.82rem;color:var(--text)">${d.description}</p>`}
-    <${MissingDepsSection} detail=${d} onReload=${props.onReload} />
-    ${d.compatibility && html`<div style="margin-bottom:8px;font-size:.75rem;color:var(--muted);font-style:italic">${d.compatibility}</div>`}
     ${d.allowed_tools && d.allowed_tools.length > 0 && html`<div style="margin-bottom:8px;font-size:.75rem;color:var(--muted)">Allowed tools: ${d.allowed_tools.join(", ")}</div>`}
     ${d.body_html && html`<div ref=${bodyRef} class="skill-body-md" style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px;max-height:400px;overflow-y:auto;font-size:.8rem;color:var(--text);line-height:1.5" />`}
     ${!d.body_html && d.body && html`<div style="border-top:1px solid var(--border);padding-top:8px;margin-top:8px"><pre style="white-space:pre-wrap;word-break:break-word;font-size:.78rem;color:var(--text);font-family:var(--font-mono);margin:0;max-height:400px;overflow-y:auto">${d.body}</pre></div>`}
   </div>`;
 }
 
-// ── Repo card with server-side search ────────────────────────
+// ── Skill row inside a repo card ─────────────────────────────
+function SkillRow(props) {
+	var skill = props.skill;
+	var repoSource = props.repoSource;
+	var toggling = useSignal(false);
+
+	function onToggle() {
+		if (!S.connected) return;
+		toggling.value = true;
+		var method = skill.enabled ? "plugins.skill.disable" : "plugins.skill.enable";
+		sendRpc(method, { source: repoSource, skill: skill.name }).then((r) => {
+			toggling.value = false;
+			if (r?.ok) {
+				fetchAll();
+				if (props.onToggled) props.onToggled();
+			}
+		});
+	}
+
+	return html`<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)"
+    onMouseEnter=${(e) => {
+			e.currentTarget.style.background = "var(--bg-hover)";
+		}}
+    onMouseLeave=${(e) => {
+			e.currentTarget.style.background = "";
+		}}>
+    <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;overflow:hidden;cursor:pointer" onClick=${() => props.onSelect?.(skill)}>
+      <span style="font-family:var(--font-mono);font-size:.8rem;font-weight:500;color:var(--text-strong);white-space:nowrap">${skill.display_name || skill.name}</span>
+      ${skill.display_name && html`<span style="font-size:.68rem;color:var(--muted);font-family:var(--font-mono);white-space:nowrap">${skill.name}</span>`}
+      ${skill.description && html`<span style="color:var(--muted);font-size:.72rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${skill.description}</span>`}
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;margin-left:8px">
+      ${skill.eligible === false && html`<span style="font-size:.6rem;padding:1px 5px;border-radius:9999px;background:var(--error, #e55);color:#fff;font-weight:500">blocked</span>`}
+      <button onClick=${onToggle} disabled=${toggling.value} style=${{
+				background: skill.enabled ? "none" : "var(--accent)",
+				border: "1px solid var(--border)",
+				borderRadius: "var(--radius-sm)",
+				fontSize: ".7rem",
+				padding: "2px 8px",
+				cursor: toggling.value ? "wait" : "pointer",
+				color: skill.enabled ? "var(--muted)" : "#fff",
+				fontWeight: 500,
+				opacity: toggling.value ? 0.6 : 1,
+			}}>${toggling.value ? "\u2026" : skill.enabled ? "Disable" : "Enable"}</button>
+    </div>
+  </div>`;
+}
+
+// ── Repo card: expand shows all skills, search filters them ──
 function RepoCard(props) {
 	var repo = props.repo;
 	var expanded = useSignal(false);
+	var allSkills = useSignal(null); // null = not loaded, [] = loaded
+	var skillsLoading = useSignal(false);
 	var searchQuery = useSignal("");
-	var searchResults = useSignal([]);
-	var searching = useSignal(false);
 	var activeDetail = useSignal(null);
 	var detailLoading = useSignal(false);
-	var searchTimer = useRef(null);
 
 	var href = /^https?:\/\//.test(repo.source) ? repo.source : `https://github.com/${repo.source}`;
+	var formatLabel =
+		repo.format === "claude_code" ? "Claude Code" : repo.format === "codex" ? "Codex" : repo.format || "Plugin";
 
 	function toggleExpand() {
 		expanded.value = !expanded.value;
+		// Load all skills on first expand
+		if (expanded.value && allSkills.value === null) {
+			skillsLoading.value = true;
+			searchSkills(repo.source, "").then((results) => {
+				allSkills.value = results;
+				skillsLoading.value = false;
+			});
+		}
 	}
 
-	function onSearchInput(e) {
-		var q = e.target.value;
-		searchQuery.value = q;
-		activeDetail.value = null;
-		if (searchTimer.current) clearTimeout(searchTimer.current);
-		if (!q.trim()) {
-			searchResults.value = [];
-			return;
-		}
-		searching.value = true;
-		searchTimer.current = setTimeout(() => {
-			searchSkills(repo.source, q.trim()).then((results) => {
-				searchResults.value = results;
-				searching.value = false;
-			});
-		}, 200);
-	}
+	// Filtered skills based on search query
+	var filteredSkills = computed(() => {
+		var skills = allSkills.value;
+		if (!skills) return [];
+		var q = searchQuery.value.toLowerCase().trim();
+		if (!q) return skills;
+		return skills.filter((s) => {
+			var name = (s.name || "").toLowerCase();
+			var display = (s.display_name || "").toLowerCase();
+			var desc = (s.description || "").toLowerCase();
+			return name.includes(q) || display.includes(q) || desc.includes(q);
+		});
+	});
 
 	function loadDetail(skill) {
-		searchQuery.value = skill.name;
-		searchResults.value = [];
 		detailLoading.value = true;
-		sendRpc("skills.skill.detail", {
+		sendRpc("plugins.skill.detail", {
 			source: repo.source,
 			skill: skill.name,
 		}).then((res) => {
@@ -352,7 +350,7 @@ function RepoCard(props) {
 	function removeRepo(e) {
 		e.stopPropagation();
 		if (!S.connected) return;
-		sendRpc("skills.repos.remove", { source: repo.source }).then((res) => {
+		sendRpc("plugins.repos.remove", { source: repo.source }).then((res) => {
 			if (res?.ok) fetchAll();
 		});
 	}
@@ -365,55 +363,59 @@ function RepoCard(props) {
 					e.stopPropagation();
 				}}
            style="font-family:var(--font-mono);font-size:.82rem;font-weight:500;color:var(--text-strong);text-decoration:none">${repo.source}</a>
+        <span style="font-size:.62rem;padding:1px 6px;border-radius:9999px;background:var(--surface2);color:var(--muted);font-weight:500">${formatLabel}</span>
         <span style="font-size:.72rem;color:var(--muted)">${repo.enabled_count}/${repo.skill_count} enabled</span>
       </div>
       <button onClick=${removeRepo}
-        style="background:none;border:1px solid var(--border);color:var(--error, #e55);border-radius:var(--radius-sm);font-size:.72rem;padding:3px 8px;cursor:pointer">Remove Repo</button>
+        style="background:none;border:1px solid var(--border);color:var(--error, #e55);border-radius:var(--radius-sm);font-size:.72rem;padding:3px 8px;cursor:pointer">Remove</button>
     </div>
     ${
 			expanded.value &&
 			html`<div class="skills-repo-detail" style="display:block">
-      <div style="position:relative;margin-bottom:8px">
-        <input type="text" placeholder=${`Search skills in ${repo.source}\u2026`} value=${searchQuery.value}
-          onInput=${onSearchInput}
-          style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font-size:.8rem;font-family:var(--font-mono);box-sizing:border-box" />
-        ${
-					searchQuery.value &&
-					searchResults.value.length > 0 &&
-					!activeDetail.value &&
-					html`
-          <div class="skills-ac-dropdown" style="display:block">
-            ${searchResults.value.map(
-							(skill) => html`<div key=${skill.name} class="skills-ac-item" onClick=${() => {
-								loadDetail(skill);
-							}}>
-                <div style="display:flex;align-items:center;gap:6px;min-width:0">
-                  <span style="font-family:var(--font-mono);font-weight:500;color:var(--text-strong);white-space:nowrap">${skill.display_name || skill.name}</span>
-                  ${skill.display_name && html`<span style="color:var(--muted);font-size:.68rem;font-family:var(--font-mono);white-space:nowrap">${skill.name}</span>`}
-                  ${skill.description && html`<span style="color:var(--muted);font-size:.72rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${skill.description}</span>`}
-                </div>
-                <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;margin-left:8px">
-                  ${skill.enabled && html`<span style="font-size:.6rem;padding:1px 5px;border-radius:9999px;background:var(--accent);color:#fff;font-weight:500">enabled</span>`}
-                  ${skill.eligible === false && html`<span style="font-size:.6rem;padding:1px 5px;border-radius:9999px;background:var(--error, #e55);color:#fff;font-weight:500">blocked</span>`}
-                </div>
-              </div>`,
-						)}
-          </div>
-        `
-				}
-        ${
-					searchQuery.value &&
-					searchResults.value.length === 0 &&
-					!activeDetail.value &&
-					!searching.value &&
-					html`
-          <div class="skills-ac-dropdown" style="display:block">
-            <div style="padding:8px 10px;color:var(--muted);font-size:.78rem">No matching skills.</div>
-          </div>
-        `
-				}
-      </div>
-      ${detailLoading.value && html`<div style="color:var(--muted);font-size:.8rem">Loading\u2026</div>`}
+      ${
+				allSkills.value &&
+				allSkills.value.length > 8 &&
+				html`
+        <input type="text" placeholder=${`Filter ${allSkills.value.length} plugins\u2026`} value=${searchQuery.value}
+          onInput=${(e) => {
+						searchQuery.value = e.target.value;
+						activeDetail.value = null;
+					}}
+          style="width:100%;padding:6px 10px;margin-bottom:8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font-size:.8rem;font-family:var(--font-mono);box-sizing:border-box" />
+      `
+			}
+      ${skillsLoading.value && html`<div style="color:var(--muted);font-size:.8rem;padding:8px 0">Loading plugins\u2026</div>`}
+      ${allSkills.value && allSkills.value.length === 0 && html`<div style="color:var(--muted);font-size:.8rem;padding:8px 0">No plugins found in this repository.</div>`}
+      ${
+				filteredSkills.value.length > 0 &&
+				html`<div style="max-height:360px;overflow-y:auto">
+        ${filteredSkills.value.map(
+					(skill) => html`<${SkillRow}
+          key=${skill.name}
+          skill=${skill}
+          repoSource=${repo.source}
+          onSelect=${(s) => {
+						loadDetail(s);
+					}}
+          onToggled=${() => {
+						searchSkills(repo.source, "").then((results) => {
+							allSkills.value = results;
+						});
+					}}
+        />`,
+				)}
+      </div>`
+			}
+      ${
+				searchQuery.value &&
+				filteredSkills.value.length === 0 &&
+				allSkills.value &&
+				allSkills.value.length > 0 &&
+				html`
+        <div style="color:var(--muted);font-size:.78rem;padding:8px 0">No plugins matching "${searchQuery.value}".</div>
+      `
+			}
+      ${detailLoading.value && html`<div style="color:var(--muted);font-size:.8rem;padding:4px 0">Loading detail\u2026</div>`}
       ${
 				activeDetail.value &&
 				html`<${SkillDetail}
@@ -421,10 +423,6 @@ function RepoCard(props) {
         repoSource=${repo.source}
         onClose=${() => {
 					activeDetail.value = null;
-					searchQuery.value = "";
-				}}
-        onReload=${() => {
-					loadDetail({ name: activeDetail.value.name });
 				}}
       />`
 			}
@@ -434,37 +432,36 @@ function RepoCard(props) {
 }
 
 function ReposSection() {
-	var r = repos.value;
+	var r = pluginRepos.value;
 	return html`<div class="skills-section">
-    <h3 class="skills-section-title">Installed Repositories</h3>
+    <h3 class="skills-section-title">Installed Plugin Repositories</h3>
     <div class="skills-section">
-      ${(!r || r.length === 0) && html`<div style="padding:12px;color:var(--muted);font-size:.82rem">No repositories installed.</div>`}
+      ${(!r || r.length === 0) && html`<div style="padding:12px;color:var(--muted);font-size:.82rem">No plugin repositories installed. Install one from the featured list or enter a repo above.</div>`}
       ${r.map((repo) => html`<${RepoCard} key=${repo.source} repo=${repo} />`)}
     </div>
   </div>`;
 }
 
-function EnabledSkillsTable() {
-	var s = enabledSkills.value;
-	var map = skillRepoMap.value;
+function EnabledPluginsTable() {
+	var s = enabledPlugins.value;
 	if (!s || s.length === 0) return null;
 
 	function onDisable(skill) {
-		var source = map[skill.name] || skill.source;
+		var source = skill.source;
 		if (!(source && S.connected)) return;
-		sendRpc("skills.skill.disable", { source: source, skill: skill.name }).then((res) => {
+		sendRpc("plugins.skill.disable", { source: source, skill: skill.name }).then((res) => {
 			if (res?.ok) fetchAll();
 		});
 	}
 
 	return html`<div>
-    <h3 class="skills-section-title">Enabled Skills</h3>
+    <h3 class="skills-section-title">Enabled Plugins</h3>
     <div class="skills-table-wrap">
       <table style="width:100%;border-collapse:collapse;font-size:.82rem">
         <thead>
           <tr style="border-bottom:1px solid var(--border);background:var(--surface)">
             <th style="text-align:left;padding:8px 12px;font-weight:500;color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.04em">Name</th>
-            <th style="text-align:left;padding:8px 12px;font-weight:500;color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.04em">Description</th>
+            <th style="text-align:left;padding:8px 12px;font-weight:500;color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.04em">Source</th>
             <th style="text-align:left;padding:8px 12px;font-weight:500;color:var(--muted);font-size:.75rem;text-transform:uppercase;letter-spacing:.04em"></th>
           </tr>
         </thead>
@@ -478,7 +475,7 @@ function EnabledSkillsTable() {
 								e.currentTarget.style.background = "";
 							}}>
               <td style="padding:8px 12px;font-weight:500;color:var(--text-strong);font-family:var(--font-mono)">${skill.name}</td>
-              <td style="padding:8px 12px;color:var(--text)">${skill.description || "\u2014"}</td>
+              <td style="padding:8px 12px;color:var(--muted);font-size:.75rem">${skill.source}</td>
               <td style="padding:8px 12px;text-align:right">
                 <button onClick=${() => {
 									onDisable(skill);
@@ -493,7 +490,7 @@ function EnabledSkillsTable() {
   </div>`;
 }
 
-function SkillsPage() {
+function PluginsPage() {
 	useEffect(() => {
 		ensurePrefetch().then(() => {
 			fetchAll();
@@ -503,16 +500,15 @@ function SkillsPage() {
 	return html`
     <div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
       <div class="flex items-center gap-3">
-        <h2 class="text-lg font-medium text-[var(--text-strong)]">Skills</h2>
+        <h2 class="text-lg font-medium text-[var(--text-strong)]">Plugins</h2>
         <button class="logs-btn" onClick=${fetchAll}>Refresh</button>
       </div>
-      <p class="text-sm text-[var(--muted)]">SKILL.md-based skills discovered from project, personal, and installed paths.</p>
-      <${SecurityWarning} />
+      <p class="text-sm text-[var(--muted)]">Multi-format plugin repositories (Claude Code, Codex, etc.) normalized into the skills system.</p>
       <${InstallBox} />
       <${FeaturedSection} />
       <${ReposSection} />
-      ${loading.value && enabledSkills.value.length === 0 && repos.value.length === 0 && html`<div style="padding:24px;text-align:center;color:var(--muted);font-size:.85rem">Loading skills\u2026</div>`}
-      <${EnabledSkillsTable} />
+      ${loading.value && pluginRepos.value.length === 0 && html`<div style="padding:24px;text-align:center;color:var(--muted);font-size:.85rem">Loading plugins\u2026</div>`}
+      <${EnabledPluginsTable} />
     </div>
     <${Toasts} />
   `;
@@ -520,12 +516,12 @@ function SkillsPage() {
 
 // ── Router integration ───────────────────────────────────────
 registerPage(
-	"/skills",
-	function initSkills(container) {
+	"/plugins",
+	function initPlugins(container) {
 		container.style.cssText = "flex-direction:column;padding:0;overflow:hidden;";
-		render(html`<${SkillsPage} />`, container);
+		render(html`<${PluginsPage} />`, container);
 	},
-	function teardownSkills() {
+	function teardownPlugins() {
 		var container = S.$("pageContent");
 		if (container) render(null, container);
 	},

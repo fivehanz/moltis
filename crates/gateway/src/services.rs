@@ -350,6 +350,21 @@ pub trait SkillsService: Send + Sync {
     async fn install_dep(&self, params: Value) -> ServiceResult;
 }
 
+// ── Plugins ─────────────────────────────────────────────────────────────────
+
+#[async_trait]
+pub trait PluginsService: Send + Sync {
+    async fn install(&self, params: Value) -> ServiceResult;
+    async fn remove(&self, params: Value) -> ServiceResult;
+    async fn repos_list(&self) -> ServiceResult;
+    /// Full repos list with per-skill details (for search). Heavyweight.
+    async fn repos_list_full(&self) -> ServiceResult;
+    async fn repos_remove(&self, params: Value) -> ServiceResult;
+    async fn skill_enable(&self, params: Value) -> ServiceResult;
+    async fn skill_disable(&self, params: Value) -> ServiceResult;
+    async fn skill_detail(&self, params: Value) -> ServiceResult;
+}
+
 pub struct NoopSkillsService;
 
 #[async_trait]
@@ -439,15 +454,26 @@ impl SkillsService for NoopSkillsService {
         let store = moltis_skills::manifest::ManifestStore::new(manifest_path);
         let manifest = store.load().map_err(|e| e.to_string())?;
 
+        let install_dir =
+            moltis_skills::install::default_install_dir().map_err(|e| e.to_string())?;
+
         let repos: Vec<_> = manifest
             .repos
             .iter()
             .map(|repo| {
                 let enabled = repo.skills.iter().filter(|s| s.enabled).count();
+                // Re-detect format for repos that predate the formats module
+                let format = if repo.format == moltis_plugins::formats::PluginFormat::Skill {
+                    let repo_dir = install_dir.join(&repo.repo_name);
+                    moltis_plugins::formats::detect_format(&repo_dir)
+                } else {
+                    repo.format
+                };
                 serde_json::json!({
                     "source": repo.source,
                     "repo_name": repo.repo_name,
                     "installed_at_ms": repo.installed_at_ms,
+                    "format": format,
                     "skill_count": repo.skills.len(),
                     "enabled_count": enabled,
                 })
@@ -516,10 +542,18 @@ impl SkillsService for NoopSkillsService {
                         })
                     })
                     .collect();
+                // Re-detect format for repos that predate the formats module
+                let format = if repo.format == moltis_plugins::formats::PluginFormat::Skill {
+                    let repo_dir = install_dir.join(&repo.repo_name);
+                    moltis_plugins::formats::detect_format(&repo_dir)
+                } else {
+                    repo.format
+                };
                 serde_json::json!({
                     "source": repo.source,
                     "repo_name": repo.repo_name,
                     "installed_at_ms": repo.installed_at_ms,
+                    "format": format,
                     "skills": skills,
                 })
             })
@@ -687,6 +721,241 @@ impl SkillsService for NoopSkillsService {
             ))
         }
     }
+}
+
+pub struct NoopPluginsService;
+
+#[async_trait]
+impl PluginsService for NoopPluginsService {
+    async fn install(&self, params: Value) -> ServiceResult {
+        let source = params
+            .get("source")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'source' parameter (owner/repo format)".to_string())?;
+        let install_dir =
+            moltis_plugins::install::default_plugins_dir().map_err(|e| e.to_string())?;
+        let skills = moltis_plugins::install::install_plugin(source, &install_dir)
+            .await
+            .map_err(|e| e.to_string())?;
+        let installed: Vec<_> = skills
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "name": m.name,
+                    "description": m.description,
+                    "path": m.path.to_string_lossy(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "installed": installed }))
+    }
+
+    async fn remove(&self, params: Value) -> ServiceResult {
+        let source = params
+            .get("source")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'source' parameter".to_string())?;
+        let install_dir =
+            moltis_plugins::install::default_plugins_dir().map_err(|e| e.to_string())?;
+        moltis_plugins::install::remove_plugin(source, &install_dir)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "removed": source }))
+    }
+
+    async fn repos_list(&self) -> ServiceResult {
+        let manifest_path =
+            moltis_plugins::install::default_manifest_path().map_err(|e| e.to_string())?;
+        let store = moltis_skills::manifest::ManifestStore::new(manifest_path);
+        let manifest = store.load().map_err(|e| e.to_string())?;
+
+        let install_dir =
+            moltis_plugins::install::default_plugins_dir().map_err(|e| e.to_string())?;
+
+        let repos: Vec<_> = manifest
+            .repos
+            .iter()
+            .map(|repo| {
+                let enabled = repo.skills.iter().filter(|s| s.enabled).count();
+                let format = {
+                    let repo_dir = install_dir.join(&repo.repo_name);
+                    moltis_plugins::formats::detect_format(&repo_dir)
+                };
+                serde_json::json!({
+                    "source": repo.source,
+                    "repo_name": repo.repo_name,
+                    "installed_at_ms": repo.installed_at_ms,
+                    "format": format,
+                    "skill_count": repo.skills.len(),
+                    "enabled_count": enabled,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!(repos))
+    }
+
+    async fn repos_list_full(&self) -> ServiceResult {
+        let manifest_path =
+            moltis_plugins::install::default_manifest_path().map_err(|e| e.to_string())?;
+        let store = moltis_skills::manifest::ManifestStore::new(manifest_path);
+        let manifest = store.load().map_err(|e| e.to_string())?;
+
+        let install_dir =
+            moltis_plugins::install::default_plugins_dir().map_err(|e| e.to_string())?;
+
+        let repos: Vec<_> = manifest
+            .repos
+            .iter()
+            .map(|repo| {
+                let repo_dir = install_dir.join(&repo.repo_name);
+                let format = moltis_plugins::formats::detect_format(&repo_dir);
+
+                // Scan adapter to get enriched metadata (display_name, description).
+                let entries = moltis_plugins::formats::scan_with_adapter(&repo_dir, format)
+                    .and_then(|r| r.ok())
+                    .unwrap_or_default();
+
+                let skills: Vec<_> = repo
+                    .skills
+                    .iter()
+                    .map(|s| {
+                        // Find the matching adapter entry for extra info.
+                        let entry = entries.iter().find(|e| e.metadata.name == s.name);
+                        serde_json::json!({
+                            "name": s.name,
+                            "description": entry.map(|e| e.metadata.description.as_str()).unwrap_or(""),
+                            "display_name": entry.and_then(|e| e.display_name.as_deref()),
+                            "relative_path": s.relative_path,
+                            "enabled": s.enabled,
+                            "eligible": true,
+                            "missing_bins": [],
+                        })
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "source": repo.source,
+                    "repo_name": repo.repo_name,
+                    "installed_at_ms": repo.installed_at_ms,
+                    "format": format,
+                    "skills": skills,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!(repos))
+    }
+
+    async fn repos_remove(&self, params: Value) -> ServiceResult {
+        self.remove(params).await
+    }
+
+    async fn skill_enable(&self, params: Value) -> ServiceResult {
+        toggle_plugin_skill(&params, true)
+    }
+
+    async fn skill_disable(&self, params: Value) -> ServiceResult {
+        toggle_plugin_skill(&params, false)
+    }
+
+    async fn skill_detail(&self, params: Value) -> ServiceResult {
+        let source = params
+            .get("source")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'source' parameter".to_string())?;
+        let skill_name = params
+            .get("skill")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'skill' parameter".to_string())?;
+
+        let install_dir =
+            moltis_plugins::install::default_plugins_dir().map_err(|e| e.to_string())?;
+        let manifest_path =
+            moltis_plugins::install::default_manifest_path().map_err(|e| e.to_string())?;
+        let store = moltis_skills::manifest::ManifestStore::new(manifest_path);
+        let manifest = store.load().map_err(|e| e.to_string())?;
+
+        let repo = manifest
+            .repos
+            .iter()
+            .find(|r| r.source == source)
+            .ok_or_else(|| format!("plugin repo '{source}' not found"))?;
+        let skill_state = repo
+            .skills
+            .iter()
+            .find(|s| s.name == skill_name)
+            .ok_or_else(|| format!("skill '{skill_name}' not found in plugin repo '{source}'"))?;
+
+        // For plugin skills, re-scan the adapter to get the body + extra info.
+        let repo_dir = install_dir.join(&repo.repo_name);
+        let format = moltis_plugins::formats::detect_format(&repo_dir);
+        let entries = moltis_plugins::formats::scan_with_adapter(&repo_dir, format)
+            .ok_or_else(|| format!("no adapter for format '{format}'"))?
+            .map_err(|e| format!("scan error: {e}"))?;
+
+        let entry = entries
+            .into_iter()
+            .find(|e| e.metadata.name == skill_name)
+            .ok_or_else(|| format!("skill '{skill_name}' not found on disk"))?;
+
+        // Build a direct link to the source file on GitHub.
+        // source_file is already relative to the repo root.
+        let source_url: Option<String> = entry.source_file.as_ref().map(|file| {
+            if source.starts_with("https://") || source.starts_with("http://") {
+                format!("{}/blob/main/{}", source.trim_end_matches('/'), file)
+            } else {
+                format!("https://github.com/{}/blob/main/{}", source, file)
+            }
+        });
+
+        let empty: Vec<String> = Vec::new();
+        Ok(serde_json::json!({
+            "name": entry.metadata.name,
+            "display_name": entry.display_name,
+            "description": entry.metadata.description,
+            "author": entry.author,
+            "homepage": entry.metadata.homepage,
+            "version": null,
+            "license": entry.metadata.license,
+            "compatibility": entry.metadata.compatibility,
+            "allowed_tools": entry.metadata.allowed_tools,
+            "requires": entry.metadata.requires,
+            "eligible": true,
+            "missing_bins": empty,
+            "install_options": empty,
+            "enabled": skill_state.enabled,
+            "source_url": source_url,
+            "body": entry.body,
+            "body_html": markdown_to_html(&entry.body),
+            "source": source,
+        }))
+    }
+}
+
+fn toggle_plugin_skill(params: &Value, enabled: bool) -> ServiceResult {
+    let source = params
+        .get("source")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'source' parameter".to_string())?;
+    let skill_name = params
+        .get("skill")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing 'skill' parameter".to_string())?;
+
+    let manifest_path =
+        moltis_plugins::install::default_manifest_path().map_err(|e| e.to_string())?;
+    let store = moltis_skills::manifest::ManifestStore::new(manifest_path);
+    let mut manifest = store.load().map_err(|e| e.to_string())?;
+
+    if !manifest.set_skill_enabled(source, skill_name, enabled) {
+        return Err(format!(
+            "skill '{skill_name}' not found in plugin repo '{source}'"
+        ));
+    }
+    store.save(&manifest).map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({ "source": source, "skill": skill_name, "enabled": enabled }))
 }
 
 fn toggle_skill(params: &Value, enabled: bool) -> ServiceResult {
@@ -1030,6 +1299,7 @@ pub struct GatewayServices {
     pub chat: Arc<dyn ChatService>,
     pub tts: Arc<dyn TtsService>,
     pub skills: Arc<dyn SkillsService>,
+    pub plugins: Arc<dyn PluginsService>,
     pub browser: Arc<dyn BrowserService>,
     pub usage: Arc<dyn UsageService>,
     pub exec_approval: Arc<dyn ExecApprovalService>,
@@ -1090,6 +1360,7 @@ impl GatewayServices {
             chat: Arc::new(NoopChatService),
             tts: Arc::new(NoopTtsService),
             skills: Arc::new(NoopSkillsService),
+            plugins: Arc::new(NoopPluginsService),
             browser: Arc::new(NoopBrowserService),
             usage: Arc::new(NoopUsageService),
             exec_approval: Arc::new(NoopExecApprovalService),
@@ -1120,10 +1391,7 @@ impl GatewayServices {
         self
     }
 
-    pub fn with_session_store(
-        mut self,
-        store: Arc<moltis_sessions::store::SessionStore>,
-    ) -> Self {
+    pub fn with_session_store(mut self, store: Arc<moltis_sessions::store::SessionStore>) -> Self {
         self.session_store = Some(store);
         self
     }

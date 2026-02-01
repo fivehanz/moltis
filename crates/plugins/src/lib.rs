@@ -1,9 +1,12 @@
-//! Plugin system: discovery, loading, hooks, and API.
+//! Plugin system: format detection, installation, and management.
 //!
-//! Discovery paths: bundled (extensions/), global (~/.clawdbot/plugins/),
-//! workspace (<workspace>/plugins/), config (plugins.external).
+//! Plugins are multi-format repos (Claude Code, Codex, etc.) that are normalized
+//! into the skills system. They install to `~/.moltis/installed-plugins` with
+//! their own manifest at `~/.moltis/plugins-manifest.json`.
 
 pub mod api;
+pub mod formats;
 pub mod hooks;
+pub mod install;
 pub mod loader;
 pub mod provider;

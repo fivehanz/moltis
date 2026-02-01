@@ -704,18 +704,13 @@ async fn spa_fallback(uri: axum::http::Uri) -> impl IntoResponse {
         raw.replace("__BUILD_TS__", "dev")
     } else {
         // Production: inject content-hash versioned URLs for immutable caching
-        static HASH: std::sync::LazyLock<String> =
-            std::sync::LazyLock::new(asset_content_hash);
+        static HASH: std::sync::LazyLock<String> = std::sync::LazyLock::new(asset_content_hash);
         let versioned = format!("/assets/v/{}/", *HASH);
         raw.replace("__BUILD_TS__", &*HASH)
             .replace("/assets/", &versioned)
     };
 
-    (
-        [("cache-control", "no-cache, no-store")],
-        Html(body),
-    )
-        .into_response()
+    ([("cache-control", "no-cache, no-store")], Html(body)).into_response()
 }
 
 #[cfg(feature = "web-ui")]
@@ -737,19 +732,36 @@ async fn api_bootstrap_handler(State(state): State<AppState>) -> impl IntoRespon
 
 /// Lightweight skills overview: repo summaries + enabled skills only.
 /// Full skill lists are loaded on-demand via /api/skills/search.
+/// Merges both skills and plugins manifests for the UI.
 #[cfg(feature = "web-ui")]
 async fn api_skills_handler(State(state): State<AppState>) -> impl IntoResponse {
     let gw = &state.gateway;
-    // repos_list() returns lightweight summaries (no per-skill arrays)
-    let repos = gw.services.skills.repos_list().await;
 
-    let repo_summaries = repos
+    // Skill repos
+    let skill_repos = gw
+        .services
+        .skills
+        .repos_list()
+        .await
         .ok()
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
 
-    // Read manifest directly for enabled skill names (avoids heavy SKILL.md parsing)
-    let enabled_skills: Vec<serde_json::Value> =
+    // Plugin repos
+    let plugin_repos = gw
+        .services
+        .plugins
+        .repos_list()
+        .await
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+
+    let mut all_repos = skill_repos;
+    all_repos.extend(plugin_repos);
+
+    // Enabled skills from skills manifest
+    let mut enabled_skills: Vec<serde_json::Value> =
         if let Ok(path) = moltis_skills::manifest::ManifestStore::default_path() {
             let store = moltis_skills::manifest::ManifestStore::new(path);
             store
@@ -774,33 +786,67 @@ async fn api_skills_handler(State(state): State<AppState>) -> impl IntoResponse 
             Vec::new()
         };
 
+    // Enabled skills from plugins manifest
+    if let Ok(path) = moltis_plugins::install::default_manifest_path() {
+        let store = moltis_skills::manifest::ManifestStore::new(path);
+        if let Ok(m) = store.load() {
+            for repo in &m.repos {
+                let source = repo.source.clone();
+                for s in &repo.skills {
+                    if s.enabled {
+                        enabled_skills.push(serde_json::json!({
+                            "name": s.name,
+                            "source": source,
+                            "enabled": true,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
     Json(serde_json::json!({
         "skills": enabled_skills,
-        "repos": repo_summaries,
+        "repos": all_repos,
     }))
 }
 
 /// Search skills within a specific repo. Query params: source, q (optional).
-/// If q is empty, returns all skills for the repo.
+/// If q is empty, returns all skills for the repo. Searches both skills and plugins.
 #[cfg(feature = "web-ui")]
 async fn api_skills_search_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     let source = params.get("source").cloned().unwrap_or_default();
-    let query = params
-        .get("q")
-        .cloned()
-        .unwrap_or_default()
-        .to_lowercase();
+    let query = params.get("q").cloned().unwrap_or_default().to_lowercase();
 
     let gw = &state.gateway;
-    let repos = gw.services.skills.repos_list_full().await;
 
-    let skills: Vec<serde_json::Value> = repos
+    // Search skills repos first.
+    let skill_repos = gw
+        .services
+        .skills
+        .repos_list_full()
+        .await
         .ok()
         .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    // Search plugins repos.
+    let plugin_repos = gw
+        .services
+        .plugins
+        .repos_list_full()
+        .await
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+
+    let mut all_repos = skill_repos;
+    all_repos.extend(plugin_repos);
+
+    let skills: Vec<serde_json::Value> = all_repos
         .into_iter()
         .find(|repo| {
             repo.get("source")
@@ -881,8 +927,7 @@ fn is_dev_assets() -> bool {
 /// mode (embedded assets) for cache-busting versioned URLs.
 #[cfg(feature = "web-ui")]
 fn asset_content_hash() -> String {
-    use std::collections::BTreeMap;
-    use std::hash::Hasher;
+    use std::{collections::BTreeMap, hash::Hasher};
 
     let mut files = BTreeMap::new();
     let mut stack: Vec<&include_dir::Dir<'_>> = vec![&ASSETS];

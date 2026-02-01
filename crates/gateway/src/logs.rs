@@ -445,11 +445,9 @@ impl LogsService for LiveLogsService {
         // Slow path: fall back to file after restart when memory is empty.
         // Run on a blocking thread so we don't stall the async runtime.
         let buffer = self.buffer.clone();
-        let entries = tokio::task::spawn_blocking(move || {
-            buffer.list_from_file(&filter, limit)
-        })
-        .await
-        .unwrap_or_default();
+        let entries = tokio::task::spawn_blocking(move || buffer.list_from_file(&filter, limit))
+            .await
+            .unwrap_or_default();
         Ok(serde_json::json!({ "entries": entries }))
     }
 

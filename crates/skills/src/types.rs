@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::formats::PluginFormat;
+
 // ── Skills manifest ──────────────────────────────────────────────────────────
 
 /// Top-level manifest tracking installed repos and per-skill enabled state.
@@ -55,6 +57,8 @@ pub struct RepoEntry {
     pub source: String,
     pub repo_name: String,
     pub installed_at_ms: u64,
+    #[serde(default)]
+    pub format: PluginFormat,
     pub skills: Vec<SkillState>,
 }
 

@@ -83,7 +83,7 @@ function slashShowMenu(filter) {
 
 	var inputWrap = S.chatInput.parentElement;
 	if (inputWrap && !slashMenuEl.parentElement) {
-		inputWrap.classList.add("pos-relative");
+		inputWrap.classList.add("relative");
 		inputWrap.appendChild(slashMenuEl);
 	}
 }
@@ -175,6 +175,7 @@ function renderContextSessionSection(card, data) {
 	sessSection.appendChild(ctxRow("Key", sess.key || "unknown", true));
 	sessSection.appendChild(ctxRow("Messages", String(sess.messageCount || 0)));
 	sessSection.appendChild(ctxRow("Model", sess.model || "default", true));
+	if (sess.provider) sessSection.appendChild(ctxRow("Provider", sess.provider, true));
 	if (sess.label) sessSection.appendChild(ctxRow("Label", sess.label));
 	card.appendChild(sessSection);
 }
@@ -225,6 +226,29 @@ function renderContextToolsSection(card, data) {
 	card.appendChild(toolsSection);
 }
 
+function renderContextSkillsSection(card, data) {
+	var skills = data.skills || [];
+	var skillsSection = ctxSection("Skills & Plugins");
+	if (skills.length > 0) {
+		var wrap = ctxEl("div", "");
+		wrap.className = "ctx-tool-wrap";
+		skills.forEach((s) => {
+			var tag = ctxEl("span", "ctx-tag");
+			var dot = ctxEl("span", "ctx-tag-dot");
+			var isPlugin = s.source === "plugin";
+			dot.style.background = isPlugin ? "var(--accent)" : "var(--success, #4a9)";
+			tag.appendChild(dot);
+			tag.appendChild(document.createTextNode(s.name));
+			tag.title = (isPlugin ? "[Plugin] " : "[Skill] ") + (s.description || "");
+			wrap.appendChild(tag);
+		});
+		skillsSection.appendChild(wrap);
+	} else {
+		skillsSection.appendChild(ctxEl("div", "ctx-empty", "No skills or plugins enabled"));
+	}
+	card.appendChild(skillsSection);
+}
+
 function renderContextSandboxSection(card, data) {
 	var sb = data.sandbox || {};
 	var sandboxSection = ctxSection("Sandbox");
@@ -241,15 +265,14 @@ function renderContextSandboxSection(card, data) {
 
 function renderContextTokensSection(card, data) {
 	var tu = data.tokenUsage || {};
-	var tokenSection = ctxSection("Token Usage (estimated)");
-	tokenSection.appendChild(ctxRow("Conversation", formatTokens(tu.conversationTokens || 0)));
-	if (tu.contextFileTokens > 0) {
-		tokenSection.appendChild(ctxRow("Context Files", formatTokens(tu.contextFileTokens)));
+	var tokenSection = ctxSection("Token Usage");
+	tokenSection.appendChild(ctxRow("Input", formatTokens(tu.inputTokens || 0), true));
+	tokenSection.appendChild(ctxRow("Output", formatTokens(tu.outputTokens || 0), true));
+	tokenSection.appendChild(ctxRow("Total", formatTokens(tu.total || 0), true));
+	if (tu.contextWindow > 0) {
+		var pct = Math.max(0, 100 - Math.round(((tu.total || 0) / tu.contextWindow) * 100));
+		tokenSection.appendChild(ctxRow("Context left", `${pct}% of ${formatTokens(tu.contextWindow)}`, true));
 	}
-	if (tu.systemPromptTokens > 0) {
-		tokenSection.appendChild(ctxRow("System Prompt", formatTokens(tu.systemPromptTokens)));
-	}
-	tokenSection.appendChild(ctxRow("Total", formatTokens(tu.estimatedTotal || 0), true));
 	card.appendChild(tokenSection);
 }
 
@@ -286,6 +309,7 @@ function renderContextCard(data) {
 
 	renderContextSessionSection(card, data);
 	renderContextProjectSection(card, data);
+	renderContextSkillsSection(card, data);
 	renderContextToolsSection(card, data);
 	renderContextSandboxSection(card, data);
 	renderContextTokensSection(card, data);

@@ -72,6 +72,7 @@ mod tests {
             source: "owner/repo".into(),
             repo_name: "repo".into(),
             installed_at_ms: 1234567890,
+            format: Default::default(),
             skills: vec![SkillState {
                 name: "my-skill".into(),
                 relative_path: "skills/my-skill".into(),
@@ -94,6 +95,7 @@ mod tests {
             source: "a/b".into(),
             repo_name: "b".into(),
             installed_at_ms: 0,
+            format: Default::default(),
             skills: vec![
                 SkillState {
                     name: "s1".into(),
@@ -125,12 +127,14 @@ mod tests {
             source: "a/b".into(),
             repo_name: "b".into(),
             installed_at_ms: 0,
+            format: Default::default(),
             skills: vec![],
         });
         m.add_repo(RepoEntry {
             source: "c/d".into(),
             repo_name: "d".into(),
             installed_at_ms: 0,
+            format: Default::default(),
             skills: vec![],
         });
 

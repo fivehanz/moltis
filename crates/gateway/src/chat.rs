@@ -17,6 +17,7 @@ use {
         tool_registry::ToolRegistry,
     },
     moltis_sessions::{metadata::SqliteSessionMetadata, store::SessionStore},
+    moltis_skills::discover::SkillDiscoverer,
 };
 
 use crate::{
@@ -309,6 +310,20 @@ impl ChatService for LiveChatService {
             }
         }
 
+        // Discover enabled skills/plugins for prompt injection.
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let search_paths =
+            moltis_skills::discover::FsSkillDiscoverer::default_paths(&cwd);
+        let discoverer =
+            moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
+        let discovered_skills = match discoverer.discover().await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("failed to discover skills: {e}");
+                Vec::new()
+            },
+        };
+
         let run_id = uuid::Uuid::new_v4().to_string();
         let state = Arc::clone(&self.state);
         let active_runs = Arc::clone(&self.active_runs);
@@ -456,6 +471,7 @@ impl ChatService for LiveChatService {
                     ctx_ref,
                     stats_ref,
                     user_message_index,
+                    &discovered_skills,
                 )
                 .await
             } else {
@@ -471,6 +487,7 @@ impl ChatService for LiveChatService {
                     ctx_ref,
                     stats_ref,
                     user_message_index,
+                    &discovered_skills,
                 )
                 .await
             };
@@ -668,7 +685,12 @@ impl ChatService for LiveChatService {
         let session_entry = self.session_metadata.get(&session_key).await;
         let provider_name = {
             let reg = self.providers.read().await;
-            reg.first().map(|p| p.name().to_string())
+            let session_model = session_entry.as_ref().and_then(|e| e.model.as_deref());
+            if let Some(id) = session_model {
+                reg.get(id).map(|p| p.name().to_string())
+            } else {
+                reg.first().map(|p| p.name().to_string())
+            }
         };
         let session_info = serde_json::json!({
             "key": session_key,
@@ -746,49 +768,35 @@ impl ChatService for LiveChatService {
             })
             .collect();
 
-        // Estimate context token usage
+        // Token usage from actual API-reported counts stored in messages.
         let messages = self
             .session_store
             .read(&session_key)
             .await
             .unwrap_or_default();
-        let conversation_tokens: usize = messages
-            .iter()
-            .map(|m| {
-                let content = m.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                content.split_whitespace().count().max(1)
-            })
-            .sum();
+        let mut total_input: u64 = 0;
+        let mut total_output: u64 = 0;
+        for msg in &messages {
+            if let Some(t) = msg.get("inputTokens").and_then(|v| v.as_u64()) {
+                total_input += t;
+            }
+            if let Some(t) = msg.get("outputTokens").and_then(|v| v.as_u64()) {
+                total_output += t;
+            }
+        }
+        let total_tokens = total_input + total_output;
 
-        // Context files token estimate
-        let context_file_tokens: usize = if let Some(files) = project_info.get("contextFiles") {
-            files
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .map(|f| f.get("size").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
-                        .sum::<usize>()
-                        / 4
-                })
-                .unwrap_or(0)
-        } else {
-            0
-        };
-
-        // System prompt token estimate
-        let system_prompt_tokens: usize = project_info
-            .get("systemPrompt")
-            .and_then(|v| v.as_str())
-            .map(|s| s.split_whitespace().count())
-            .unwrap_or(0);
-
-        let total_estimated_tokens =
-            conversation_tokens + context_file_tokens + system_prompt_tokens;
-
-        // Context window from current provider
+        // Context window from the session's provider
         let context_window = {
             let reg = self.providers.read().await;
-            reg.first().map(|p| p.context_window()).unwrap_or(200_000)
+            let session_model = session_entry.as_ref().and_then(|e| e.model.as_deref());
+            if let Some(id) = session_model {
+                reg.get(id)
+                    .map(|p| p.context_window())
+                    .unwrap_or(200_000)
+            } else {
+                reg.first().map(|p| p.context_window()).unwrap_or(200_000)
+            }
         };
 
         // Sandbox info
@@ -810,16 +818,36 @@ impl ChatService for LiveChatService {
             })
         };
 
+        // Discover enabled skills/plugins
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let search_paths =
+            moltis_skills::discover::FsSkillDiscoverer::default_paths(&cwd);
+        let discoverer =
+            moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
+        let skills_list: Vec<_> = match discoverer.discover().await {
+            Ok(s) => s
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "description": s.description,
+                        "source": s.source,
+                    })
+                })
+                .collect(),
+            Err(_) => vec![],
+        };
+
         Ok(serde_json::json!({
             "session": session_info,
             "project": project_info,
             "tools": tools,
+            "skills": skills_list,
             "sandbox": sandbox_info,
             "tokenUsage": {
-                "conversationTokens": conversation_tokens,
-                "contextFileTokens": context_file_tokens,
-                "systemPromptTokens": system_prompt_tokens,
-                "estimatedTotal": total_estimated_tokens,
+                "inputTokens": total_input,
+                "outputTokens": total_output,
+                "total": total_tokens,
                 "contextWindow": context_window,
             },
         }))
@@ -840,6 +868,7 @@ async fn run_with_tools(
     project_context: Option<&str>,
     session_context: Option<&str>,
     user_message_index: usize,
+    skills: &[moltis_skills::types::SkillMetadata],
 ) -> Option<(String, u32, u32)> {
     let native_tools = provider.supports_tools();
     let system_prompt = build_system_prompt_with_session(
@@ -847,7 +876,7 @@ async fn run_with_tools(
         native_tools,
         project_context,
         session_context,
-        &[],
+        skills,
     );
 
     // Broadcast tool events to the UI as they happen.
@@ -1033,6 +1062,7 @@ async fn run_streaming(
     project_context: Option<&str>,
     session_context: Option<&str>,
     user_message_index: usize,
+    skills: &[moltis_skills::types::SkillMetadata],
 ) -> Option<(String, u32, u32)> {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     // Prepend session + project context as system messages.
@@ -1046,6 +1076,14 @@ async fn run_streaming(
         messages.push(serde_json::json!({
             "role": "system",
             "content": ctx,
+        }));
+    }
+    // Inject skills into the system prompt for streaming mode too.
+    if !skills.is_empty() {
+        let skills_block = moltis_skills::prompt_gen::generate_skills_prompt(skills);
+        messages.push(serde_json::json!({
+            "role": "system",
+            "content": skills_block,
         }));
     }
     messages.extend_from_slice(history);

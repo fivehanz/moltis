@@ -33,6 +33,7 @@ impl FsSkillDiscoverer {
         if let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) {
             paths.push((home.join(".moltis/skills"), SkillSource::Personal));
             paths.push((home.join(".moltis/installed-skills"), SkillSource::Registry));
+            paths.push((home.join(".moltis/installed-plugins"), SkillSource::Plugin));
         }
 
         paths
@@ -51,12 +52,16 @@ impl SkillDiscoverer for FsSkillDiscoverer {
 
             match source {
                 // Project/Personal: scan one level deep (always enabled).
-                SkillSource::Project | SkillSource::Personal | SkillSource::Plugin => {
+                SkillSource::Project | SkillSource::Personal => {
                     discover_flat(base_path, source, &mut skills);
                 },
                 // Registry: use manifest to filter by enabled state.
                 SkillSource::Registry => {
                     discover_registry(base_path, &mut skills);
+                },
+                // Plugin: use plugins manifest to filter by enabled state.
+                SkillSource::Plugin => {
+                    discover_plugins(base_path, &mut skills);
                 },
             }
         }
@@ -96,6 +101,45 @@ fn discover_flat(base_path: &Path, source: &SkillSource, skills: &mut Vec<SkillM
             Err(e) => {
                 tracing::warn!(?skill_dir, %e, "failed to parse SKILL.md");
             },
+        }
+    }
+}
+
+/// Discover enabled plugin skills using the plugins manifest.
+/// Plugin skills don't have SKILL.md — they are normalized by format adapters.
+/// This returns lightweight metadata from the manifest for prompt injection.
+fn discover_plugins(install_dir: &Path, skills: &mut Vec<SkillMetadata>) {
+    let home = match directories::BaseDirs::new() {
+        Some(d) => d.home_dir().to_path_buf(),
+        None => return,
+    };
+    let manifest_path = home.join(".moltis/plugins-manifest.json");
+    let store = ManifestStore::new(manifest_path);
+    let manifest = match store.load() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(%e, "failed to load plugins manifest");
+            return;
+        },
+    };
+
+    for repo in &manifest.repos {
+        for skill_state in &repo.skills {
+            if !skill_state.enabled {
+                continue;
+            }
+            let skill_dir = install_dir.join(&skill_state.relative_path);
+            skills.push(SkillMetadata {
+                name: skill_state.name.clone(),
+                description: String::new(),
+                homepage: None,
+                license: None,
+                compatibility: None,
+                allowed_tools: Vec::new(),
+                requires: Default::default(),
+                path: skill_dir,
+                source: Some(SkillSource::Plugin),
+            });
         }
     }
 }
@@ -235,6 +279,7 @@ mod tests {
                 source: "owner/repo".into(),
                 repo_name: "repo".into(),
                 installed_at_ms: 0,
+                format: crate::formats::PluginFormat::Skill,
                 skills: vec![
                     SkillState {
                         name: "a".into(),

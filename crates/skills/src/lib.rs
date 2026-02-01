@@ -4,6 +4,7 @@
 //! and markdown instructions, following the Agent Skills open standard.
 
 pub mod discover;
+pub mod formats;
 pub mod install;
 pub mod manifest;
 pub mod parse;
