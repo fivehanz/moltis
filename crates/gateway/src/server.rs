@@ -410,6 +410,18 @@ pub async fn start_gateway(
             cpu_quota: config.tools.exec.sandbox.resource_limits.cpu_quota,
             pids_max: config.tools.exec.sandbox.resource_limits.pids_max,
         },
+        packages: config
+            .tools
+            .exec
+            .sandbox
+            .packages
+            .clone()
+            .unwrap_or_else(|| {
+                moltis_tools::sandbox::DEFAULT_SANDBOX_PACKAGES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect()
+            }),
     };
     let sandbox_router = Arc::new(moltis_tools::sandbox::SandboxRouter::new(sandbox_config));
 

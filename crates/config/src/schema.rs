@@ -303,6 +303,10 @@ pub struct SandboxConfig {
     /// "auto" prefers Apple Container on macOS when available, falls back to Docker.
     pub backend: String,
     pub resource_limits: ResourceLimitsConfig,
+    /// Packages to install via `apt-get` after container creation.
+    /// Defaults to `["curl", "python3", "nodejs", "npm"]`.
+    /// Set to an empty list to skip provisioning.
+    pub packages: Option<Vec<String>>,
 }
 
 impl Default for SandboxConfig {
@@ -316,6 +320,7 @@ impl Default for SandboxConfig {
             no_network: true,
             backend: "auto".into(),
             resource_limits: ResourceLimitsConfig::default(),
+            packages: None, // None = use default packages from sandbox module
         }
     }
 }

@@ -72,7 +72,13 @@ pub struct SandboxConfig {
     /// `"auto"` prefers Apple Container on macOS when available.
     pub backend: String,
     pub resource_limits: ResourceLimits,
+    /// Packages to install via `apt-get` after container creation.
+    /// Set to an empty list to skip provisioning.
+    pub packages: Vec<String>,
 }
+
+/// Default packages installed in new sandbox containers.
+pub const DEFAULT_SANDBOX_PACKAGES: &[&str] = &["curl", "python3", "nodejs", "npm"];
 
 impl Default for SandboxConfig {
     fn default() -> Self {
@@ -85,6 +91,10 @@ impl Default for SandboxConfig {
             no_network: false,
             backend: "auto".into(),
             resource_limits: ResourceLimits::default(),
+            packages: DEFAULT_SANDBOX_PACKAGES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
         }
     }
 }
@@ -162,6 +172,34 @@ impl DockerSandbox {
         args
     }
 
+    /// Install configured packages inside the container via `apt-get`.
+    async fn provision_packages(&self, container_name: &str) -> Result<()> {
+        if self.config.packages.is_empty() {
+            return Ok(());
+        }
+        let pkg_list = self.config.packages.join(" ");
+        info!(container = container_name, packages = %pkg_list, "provisioning sandbox packages");
+        let output = tokio::process::Command::new("docker")
+            .args([
+                "exec",
+                container_name,
+                "sh",
+                "-c",
+                &format!("apt-get update -qq && apt-get install -y -qq {pkg_list} 2>&1 | tail -5"),
+            ])
+            .output()
+            .await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                container = container_name,
+                %stderr,
+                "package provisioning failed (non-fatal)"
+            );
+        }
+        Ok(())
+    }
+
     fn workspace_args(&self) -> Vec<String> {
         let cwd = match std::env::current_dir() {
             Ok(d) => d,
@@ -226,6 +264,9 @@ impl Sandbox for DockerSandbox {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("docker run failed: {}", stderr.trim());
         }
+
+        // Install packages in the freshly created container.
+        self.provision_packages(&name).await?;
 
         Ok(())
     }
@@ -467,6 +508,34 @@ impl AppleContainerSandbox {
         format!("{}-{}", self.container_prefix(), id.key)
     }
 
+    /// Install configured packages inside the container via `apt-get`.
+    async fn provision_packages(&self, container_name: &str) -> Result<()> {
+        if self.config.packages.is_empty() {
+            return Ok(());
+        }
+        let pkg_list = self.config.packages.join(" ");
+        info!(container = container_name, packages = %pkg_list, "provisioning sandbox packages");
+        let output = tokio::process::Command::new("container")
+            .args([
+                "exec",
+                container_name,
+                "sh",
+                "-c",
+                &format!("apt-get update -qq && apt-get install -y -qq {pkg_list} 2>&1 | tail -5"),
+            ])
+            .output()
+            .await?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                container = container_name,
+                %stderr,
+                "package provisioning failed (non-fatal)"
+            );
+        }
+        Ok(())
+    }
+
     /// Check whether the `container` CLI is available.
     pub async fn is_available() -> bool {
         tokio::process::Command::new("container")
@@ -567,6 +636,10 @@ impl Sandbox for AppleContainerSandbox {
         }
 
         info!(name, image, "apple container created and running");
+
+        // Install packages in the freshly created container.
+        self.provision_packages(&name).await?;
+
         Ok(())
     }
 
