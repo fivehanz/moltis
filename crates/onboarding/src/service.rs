@@ -144,16 +144,32 @@ impl LiveOnboardingService {
         };
 
         if let Some(v) = params.get("name").and_then(|v| v.as_str()) {
-            config.identity.name = if v.is_empty() { None } else { Some(v.to_string()) };
+            config.identity.name = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
         }
         if let Some(v) = params.get("emoji").and_then(|v| v.as_str()) {
-            config.identity.emoji = if v.is_empty() { None } else { Some(v.to_string()) };
+            config.identity.emoji = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
         }
         if let Some(v) = params.get("creature").and_then(|v| v.as_str()) {
-            config.identity.creature = if v.is_empty() { None } else { Some(v.to_string()) };
+            config.identity.creature = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
         }
         if let Some(v) = params.get("vibe").and_then(|v| v.as_str()) {
-            config.identity.vibe = if v.is_empty() { None } else { Some(v.to_string()) };
+            config.identity.vibe = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
         }
         if let Some(v) = params.get("soul") {
             config.identity.soul = if v.is_null() {
@@ -163,7 +179,11 @@ impl LiveOnboardingService {
             };
         }
         if let Some(v) = params.get("user_name").and_then(|v| v.as_str()) {
-            config.user.name = if v.is_empty() { None } else { Some(v.to_string()) };
+            config.user.name = if v.is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            };
         }
 
         self.save(&config)?;

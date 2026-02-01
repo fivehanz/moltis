@@ -40,6 +40,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: biomejs/setup-biome@1cbe33ead22c7a2fded3b52fa2893611c815c9b5 # v2
+        with:
+          version: "2.3.13"
       - run: biome ci crates/gateway/src/assets/js/
 
   fmt:

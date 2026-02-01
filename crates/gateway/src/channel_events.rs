@@ -301,10 +301,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .unwrap_or("default");
 
                 let tokens = res.get("tokenUsage").cloned().unwrap_or_default();
-                let total = tokens
-                    .get("total")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let total = tokens.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
                 let context_window = tokens
                     .get("contextWindow")
                     .and_then(|v| v.as_u64())
@@ -432,7 +429,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .list()
                     .await
                     .map_err(|e| anyhow!("{e}"))?;
-                let models = models_val.as_array().ok_or_else(|| anyhow!("bad model list"))?;
+                let models = models_val
+                    .as_array()
+                    .ok_or_else(|| anyhow!("bad model list"))?;
 
                 let current_model = {
                     let entry = session_metadata.get(&session_key).await;
@@ -443,7 +442,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     // List unique providers.
                     let mut providers: Vec<String> = models
                         .iter()
-                        .filter_map(|m| m.get("provider").and_then(|v| v.as_str()).map(String::from))
+                        .filter_map(|m| {
+                            m.get("provider").and_then(|v| v.as_str()).map(String::from)
+                        })
                         .collect();
                     providers.dedup();
 
@@ -470,23 +471,28 @@ impl ChannelEventSink for GatewayChannelEventSink {
                             .iter()
                             .filter(|m| m.get("provider").and_then(|v| v.as_str()) == Some(p))
                             .count();
-                        let marker = if current_provider.as_deref() == Some(p) { " *" } else { "" };
+                        let marker = if current_provider.as_deref() == Some(p) {
+                            " *"
+                        } else {
+                            ""
+                        };
                         lines.push(format!("{}. {} ({} models){}", i + 1, p, count, marker));
                     }
                     Ok(lines.join("\n"))
                 } else if let Some(provider) = args.strip_prefix("provider:") {
                     // List models for a specific provider.
-                    Ok(format_model_list(models, current_model.as_deref(), Some(provider)))
+                    Ok(format_model_list(
+                        models,
+                        current_model.as_deref(),
+                        Some(provider),
+                    ))
                 } else {
                     // Switch mode — arg is a 1-based global index.
                     let n: usize = args
                         .parse()
                         .map_err(|_| anyhow!("usage: /model [number]"))?;
                     if n == 0 || n > models.len() {
-                        return Err(anyhow!(
-                            "invalid model number. Use 1–{}.",
-                            models.len()
-                        ));
+                        return Err(anyhow!("invalid model number. Use 1–{}.", models.len()));
                     }
                     let chosen = &models[n - 1];
                     let model_id = chosen
@@ -549,22 +555,33 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         }
                     };
 
-                    let status = if is_enabled { "on" } else { "off" };
+                    let status = if is_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    };
 
                     // List available images.
                     let builder = moltis_tools::image_cache::DockerImageBuilder::new();
                     let cached = builder.list_cached().await.unwrap_or_default();
 
-                    let default_img =
-                        moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string();
-                    let mut images: Vec<(String, Option<String>)> = vec![(default_img.clone(), None)];
+                    let default_img = moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string();
+                    let mut images: Vec<(String, Option<String>)> =
+                        vec![(default_img.clone(), None)];
                     for img in &cached {
-                        images.push((img.tag.clone(), Some(format!("{} ({})", img.skill_name, img.size))));
+                        images.push((
+                            img.tag.clone(),
+                            Some(format!("{} ({})", img.skill_name, img.size)),
+                        ));
                     }
 
                     let mut lines = vec![format!("status:{status}")];
                     for (i, (tag, subtitle)) in images.iter().enumerate() {
-                        let marker = if *tag == current_image { " *" } else { "" };
+                        let marker = if *tag == current_image {
+                            " *"
+                        } else {
+                            ""
+                        };
                         let label = if let Some(sub) = subtitle {
                             format!("{}. {} — {}{}", i + 1, tag, sub, marker)
                         } else {
@@ -597,15 +614,18 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         },
                     )
                     .await;
-                    let label = if new_val { "enabled" } else { "disabled" };
+                    let label = if new_val {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
                     Ok(format!("Sandbox {label}."))
                 } else if let Some(rest) = args.strip_prefix("image ") {
                     let n: usize = rest
                         .parse()
                         .map_err(|_| anyhow!("usage: /sandbox image [number]"))?;
 
-                    let default_img =
-                        moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string();
+                    let default_img = moltis_tools::sandbox::DEFAULT_SANDBOX_IMAGE.to_string();
                     let builder = moltis_tools::image_cache::DockerImageBuilder::new();
                     let cached = builder.list_cached().await.unwrap_or_default();
                     let mut images: Vec<String> = vec![default_img];
@@ -614,15 +634,16 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     }
 
                     if n == 0 || n > images.len() {
-                        return Err(anyhow!(
-                            "invalid image number. Use 1–{}.",
-                            images.len()
-                        ));
+                        return Err(anyhow!("invalid image number. Use 1–{}.", images.len()));
                     }
                     let chosen = &images[n - 1];
 
                     // If choosing the default image, clear the session override.
-                    let patch_value = if n == 1 { "" } else { chosen.as_str() };
+                    let patch_value = if n == 1 {
+                        ""
+                    } else {
+                        chosen.as_str()
+                    };
                     state
                         .services
                         .session
@@ -677,7 +698,11 @@ fn format_model_list(
                 continue;
             }
         }
-        let marker = if current_model == Some(id) { " *" } else { "" };
+        let marker = if current_model == Some(id) {
+            " *"
+        } else {
+            ""
+        };
         lines.push(format!("{}. {} [{}]{}", i + 1, display, provider, marker));
     }
     lines.join("\n")

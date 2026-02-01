@@ -243,15 +243,8 @@ mod tests {
             soul: Some("You are a loyal companion who loves fetch.".into()),
             ..Default::default()
         };
-        let prompt = build_system_prompt_with_session(
-            &tools,
-            true,
-            None,
-            None,
-            &[],
-            Some(&identity),
-            None,
-        );
+        let prompt =
+            build_system_prompt_with_session(&tools, true, None, None, &[], Some(&identity), None);
         assert!(prompt.contains("## Soul"));
         assert!(prompt.contains("loyal companion who loves fetch"));
         assert!(!prompt.contains("Be genuinely helpful"));
@@ -260,8 +253,7 @@ mod tests {
     #[test]
     fn test_no_identity_no_extra_lines() {
         let tools = ToolRegistry::new();
-        let prompt =
-            build_system_prompt_with_session(&tools, true, None, None, &[], None, None);
+        let prompt = build_system_prompt_with_session(&tools, true, None, None, &[], None, None);
         assert!(!prompt.contains("Your name is"));
         assert!(!prompt.contains("The user's name is"));
         assert!(!prompt.contains("## Soul"));

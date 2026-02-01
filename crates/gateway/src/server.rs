@@ -601,8 +601,7 @@ pub async fn start_gateway(
     #[cfg(target_os = "macos")]
     if sandbox_router.backend_name() == "docker" {
         lines.push(
-            "hint: install Apple Container for VM-isolated sandboxing (see docs/sandbox.md)"
-                .into(),
+            "hint: install Apple Container for VM-isolated sandboxing (see docs/sandbox.md)".into(),
         );
     }
     // Warn when no sandbox backend is available.
@@ -1019,9 +1018,7 @@ async fn api_prune_cached_images_handler() -> impl IntoResponse {
 /// packages that are already installed. Returns a map of package name to
 /// boolean (true = already present).
 #[cfg(feature = "web-ui")]
-async fn api_check_packages_handler(
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+async fn api_check_packages_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let base = body
         .get("base")
         .and_then(|v| v.as_str())
@@ -1115,9 +1112,7 @@ async fn api_set_default_image_handler(
 
 /// Build a custom image from a base + apt packages.
 #[cfg(feature = "web-ui")]
-async fn api_build_image_handler(
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
+async fn api_build_image_handler(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
     let name = body
         .get("name")
         .and_then(|v| v.as_str())
@@ -1191,9 +1186,7 @@ async fn api_build_image_handler(
     }
 
     let builder = moltis_tools::image_cache::DockerImageBuilder::new();
-    let result = builder
-        .ensure_image(name, &dockerfile_path, &tmp_dir)
-        .await;
+    let result = builder.ensure_image(name, &dockerfile_path, &tmp_dir).await;
     let _ = std::fs::remove_dir_all(&tmp_dir);
     match result {
         Ok(tag) => Json(serde_json::json!({ "tag": tag })).into_response(),
@@ -1204,7 +1197,6 @@ async fn api_build_image_handler(
             .into_response(),
     }
 }
-
 
 #[cfg(feature = "web-ui")]
 static ASSETS: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/src/assets");

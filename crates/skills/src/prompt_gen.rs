@@ -19,7 +19,11 @@ pub fn generate_skills_prompt(skills: &[SkillMetadata]) -> String {
         out.push_str(&format!(
             "<skill name=\"{}\" source=\"{}\" path=\"{}\">\n{}\n</skill>\n",
             skill.name,
-            if is_plugin { "plugin" } else { "skill" },
+            if is_plugin {
+                "plugin"
+            } else {
+                "skill"
+            },
             path_display,
             skill.description,
         ));

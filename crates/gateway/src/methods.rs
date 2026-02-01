@@ -1057,7 +1057,11 @@ impl MethodRegistry {
             "agent.identity.update_soul",
             Box::new(|ctx| {
                 Box::pin(async move {
-                    let soul = ctx.params.get("soul").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let soul = ctx
+                        .params
+                        .get("soul")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                     ctx.state
                         .services
                         .onboarding

@@ -179,14 +179,12 @@ pub async fn handle_message_direct(
             let cmd = cmd_text.split_whitespace().next().unwrap_or("");
             if matches!(
                 cmd,
-                "new" | "clear" | "compact" | "context" | "model" | "sandbox"
-                    | "sessions" | "help"
+                "new" | "clear" | "compact" | "context" | "model" | "sandbox" | "sessions" | "help"
             ) {
                 // For /context, send a formatted card with inline keyboard.
                 if cmd == "context" {
-                    let context_result = sink
-                        .dispatch_command("context", reply_target.clone())
-                        .await;
+                    let context_result =
+                        sink.dispatch_command("context", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap();
                         accts.get(account_id).map(|s| s.bot.clone())
@@ -211,9 +209,7 @@ pub async fn handle_message_direct(
 
                 // For /model without args, send an inline keyboard to pick a model.
                 if cmd == "model" && cmd_text.trim() == "model" {
-                    let list_result = sink
-                        .dispatch_command("model", reply_target.clone())
-                        .await;
+                    let list_result = sink.dispatch_command("model", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap();
                         accts.get(account_id).map(|s| s.bot.clone())
@@ -238,9 +234,7 @@ pub async fn handle_message_direct(
 
                 // For /sandbox without args, send toggle + image keyboard.
                 if cmd == "sandbox" && cmd_text.trim() == "sandbox" {
-                    let list_result = sink
-                        .dispatch_command("sandbox", reply_target.clone())
-                        .await;
+                    let list_result = sink.dispatch_command("sandbox", reply_target.clone()).await;
                     let bot = {
                         let accts = accounts.read().unwrap();
                         accts.get(account_id).map(|s| s.bot.clone())
@@ -488,10 +482,7 @@ async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) {
 
             if is_provider_list {
                 // Extract provider name (before the parenthesized count).
-                let provider_name = clean
-                    .rfind(" (")
-                    .map(|i| &clean[..i])
-                    .unwrap_or(clean);
+                let provider_name = clean.rfind(" (").map(|i| &clean[..i]).unwrap_or(clean);
                 buttons.push(vec![InlineKeyboardButton::callback(
                     display,
                     format!("model_provider:{provider_name}"),
@@ -517,10 +508,7 @@ async fn send_model_keyboard(bot: &Bot, chat_id: &str, text: &str) {
     };
 
     let keyboard = InlineKeyboardMarkup::new(buttons);
-    let _ = bot
-        .send_message(chat, heading)
-        .reply_markup(keyboard)
-        .await;
+    let _ = bot.send_message(chat, heading).reply_markup(keyboard).await;
 }
 
 /// Send sandbox status with toggle button and image picker.
@@ -563,7 +551,11 @@ async fn send_sandbox_keyboard(bot: &Bot, chat_id: &str, text: &str) {
     } else {
         "⚫ Sandbox OFF — tap to enable"
     };
-    let toggle_action = if is_on { "sandbox_toggle:off" } else { "sandbox_toggle:on" };
+    let toggle_action = if is_on {
+        "sandbox_toggle:off"
+    } else {
+        "sandbox_toggle:on"
+    };
 
     let mut buttons = vec![vec![InlineKeyboardButton::callback(
         toggle_label.to_string(),
@@ -659,8 +651,9 @@ pub async fn handle_callback_query(
                     send_model_keyboard(b, &chat_id, &text).await;
                 },
                 Err(e) => {
-                    if let Err(err) =
-                        outbound.send_text(account_id, &chat_id, &format!("Error: {e}")).await
+                    if let Err(err) = outbound
+                        .send_text(account_id, &chat_id, &format!("Error: {e}"))
+                        .await
                     {
                         warn!(account_id, "failed to send callback response: {err}");
                     }
