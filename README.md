@@ -19,8 +19,10 @@ multiple LLM providers and communication channels, inspired by
   management
 - **Memory and knowledge base** — embeddings-powered long-term memory
 - **Skills and plugins** — extensible skill system and plugin architecture
-- **Hook system** — lifecycle hooks for tool calls, sessions, compaction, and
-  more, with both native Rust handlers and shell command handlers
+- **Hook system** — lifecycle hooks with priority ordering, parallel dispatch
+  for read-only events, circuit breaker, dry-run mode, HOOK.md-based discovery,
+  eligibility checks, bundled hooks (boot-md, session-memory, command-logger),
+  and CLI management (`moltis hooks list/info`)
 - **Scheduled tasks** — cron-based task execution
 - **OAuth flows** — built-in OAuth2 for provider authentication
 - **TLS support** — automatic self-signed certificate generation
@@ -58,7 +60,46 @@ or block actions.
 `BeforeToolCall`, `AfterToolCall`, `BeforeAgentStart`, `AgentEnd`,
 `MessageReceived`, `MessageSending`, `MessageSent`, `BeforeCompaction`,
 `AfterCompaction`, `ToolResultPersist`, `SessionStart`, `SessionEnd`,
-`GatewayStart`, `GatewayStop`
+`GatewayStart`, `GatewayStop`, `Command`
+
+### Hook discovery
+
+Hooks are discovered from `HOOK.md` files in these directories (priority order):
+
+1. `<workspace>/.moltis/hooks/<name>/HOOK.md` — project-local
+2. `~/.moltis/hooks/<name>/HOOK.md` — user-global
+
+Each `HOOK.md` uses TOML frontmatter:
+
+```toml
++++
+name = "my-hook"
+description = "What it does"
+events = ["BeforeToolCall"]
+command = "./handler.sh"
+timeout = 5
+
+[requires]
+os = ["darwin", "linux"]
+bins = ["jq"]
+env = ["SLACK_WEBHOOK_URL"]
++++
+```
+
+### CLI
+
+```bash
+moltis hooks list              # List all discovered hooks
+moltis hooks list --eligible   # Show only eligible hooks
+moltis hooks list --json       # JSON output
+moltis hooks info <name>       # Show hook details
+```
+
+### Bundled hooks
+
+- **boot-md** — reads `BOOT.md` from workspace on `GatewayStart`
+- **session-memory** — saves session context on `/new` command
+- **command-logger** — logs all `Command` events to JSONL
 
 ### Shell hook protocol
 

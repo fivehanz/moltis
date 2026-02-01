@@ -5,9 +5,14 @@
 //! their own manifest at `~/.moltis/plugins-manifest.json`.
 
 pub mod api;
+pub mod bundled;
 pub mod formats;
+pub mod hook_discovery;
+pub mod hook_eligibility;
+pub mod hook_metadata;
 pub mod hooks;
 pub mod install;
 pub mod loader;
 pub mod provider;
 pub mod shell_hook;
+pub mod wasm_hook;

@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 // Re-export all core hook types so downstream code can use `moltis_plugins::hooks::*`.
-pub use moltis_common::hooks::{HookAction, HookEvent, HookHandler, HookPayload, HookRegistry};
+pub use moltis_common::hooks::{
+    HookAction, HookEvent, HookHandler, HookPayload, HookRegistry, HookStats,
+};
 
 // ── Hook configuration ──────────────────────────────────────────────────────
 
