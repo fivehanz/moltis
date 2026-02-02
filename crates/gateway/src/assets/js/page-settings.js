@@ -1194,9 +1194,13 @@ function TailscaleSection() {
 			cfgMsg.textContent = `Configuring tailscale ${configuringMode}\u2026 This can take up to 10 seconds.`;
 		}
 		container.appendChild(section);
-		if (!authReady) {
-			var warn = cloneHidden("ts-funnel-auth-warning");
-			if (warn) container.appendChild(warn);
+		var warn = cloneHidden("ts-funnel-security-warning");
+		if (warn) {
+			if (!authReady) {
+				var authSpan = warn.querySelector("[data-ts-auth-required]");
+				if (authSpan) authSpan.style.display = "";
+			}
+			container.appendChild(warn);
 		}
 		return currentMode;
 	}
