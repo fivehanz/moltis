@@ -951,4 +951,49 @@
     flex-shrink: 0;
   }
 
+  /* ── Tailscale status bar ── */
+
+  .ts-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 10px 14px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    font-size: 0.75rem;
+    white-space: nowrap;
+    overflow-x: auto;
+  }
+
+  .ts-status-bar .ts-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .ts-status-bar .ts-label {
+    color: var(--muted);
+  }
+
+  .ts-status-bar .ts-value {
+    color: var(--text);
+  }
+
+  .ts-status-bar .ts-value-strong {
+    color: var(--text-strong);
+    font-weight: 500;
+  }
+
+  .ts-status-bar .ts-value-mono {
+    color: var(--text);
+    font-family: var(--font-mono);
+  }
+
+  .ts-status-bar .ts-version {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+
 }

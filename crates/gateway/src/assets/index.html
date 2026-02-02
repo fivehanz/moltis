@@ -178,40 +178,38 @@
 
 <!-- Tailscale section hidden elements (toggled by page-settings.js) -->
 <div id="ts-installed-bar" style="display:none">
-  <div style="max-width:600px;">
-    <div style="display:flex;flex-wrap:wrap;gap:10px 24px;padding:10px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface2);font-size:.75rem">
-      <div style="display:flex;align-items:center;gap:6px">
-        <span class="status-dot connected"></span>
-        <span style="color:var(--muted)">Installed</span>
-        <span data-ts-version style="font-family:var(--font-mono);font-size:.72rem;color:var(--muted)"></span>
-      </div>
-      <div data-ts-tailnet-wrap style="display:none">
-        <span style="color:var(--muted)">Tailnet:</span>
-        <span data-ts-tailnet style="color:var(--text-strong);font-weight:500"></span>
-      </div>
-      <div data-ts-account-wrap style="display:none">
-        <span style="color:var(--muted)">Account:</span>
-        <span data-ts-account style="color:var(--text)"></span>
-      </div>
-      <div data-ts-ip-wrap style="display:none">
-        <span style="color:var(--muted)">IP:</span>
-        <span data-ts-ip style="color:var(--text);font-family:var(--font-mono)"></span>
-      </div>
-    </div>
+  <div class="ts-status-bar">
+    <span class="ts-field">
+      <span class="status-dot connected"></span>
+      <span class="ts-label">Installed</span>
+      <span data-ts-version class="ts-version"></span>
+    </span>
+    <span data-ts-tailnet-wrap class="ts-field" style="display:none">
+      <span class="ts-label">Tailnet:</span>
+      <span data-ts-tailnet class="ts-value-strong"></span>
+    </span>
+    <span data-ts-account-wrap class="ts-field" style="display:none">
+      <span class="ts-label">Account:</span>
+      <span data-ts-account class="ts-value"></span>
+    </span>
+    <span data-ts-ip-wrap class="ts-field" style="display:none">
+      <span class="ts-label">IP:</span>
+      <span data-ts-ip class="ts-value-mono"></span>
+    </span>
   </div>
 </div>
 
 <div id="ts-not-installed" style="display:none">
-  <div style="max-width:600px;">
-    <div style="padding:16px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface2);text-align:center">
-      <p style="font-size:.875rem;color:var(--text);margin:0 0 12px">
-        The <code style="font-family:var(--font-mono);font-size:.875rem">tailscale</code> CLI was not found on this machine.
-      </p>
+  <div class="ts-status-bar" style="justify-content:center;flex-direction:column;gap:12px;text-align:center">
+    <p style="font-size:.875rem;color:var(--text);margin:0">
+      The <code style="font-family:var(--font-mono);font-size:.875rem">tailscale</code> CLI was not found on this machine.
+    </p>
+    <div>
       <a href="https://tailscale.com/download" target="_blank" rel="noopener"
-        class="provider-btn inline-block no-underline">
+        class="provider-btn" style="display:inline-block;text-decoration:none">
         Install Tailscale
       </a>
-      <button data-ts-recheck class="provider-btn provider-btn-secondary ml-2">
+      <button data-ts-recheck class="provider-btn provider-btn-secondary" style="margin-left:8px">
         Re-check
       </button>
     </div>
