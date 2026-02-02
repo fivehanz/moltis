@@ -84,6 +84,20 @@ pub enum RunnerEvent {
     ThinkingText(String),
     TextDelta(String),
     Iteration(usize),
+    /// A sub-agent has started executing.
+    SubAgentStart {
+        task: String,
+        model: String,
+        depth: u64,
+    },
+    /// A sub-agent has finished executing.
+    SubAgentEnd {
+        task: String,
+        model: String,
+        depth: u64,
+        iterations: usize,
+        tool_calls_made: usize,
+    },
 }
 
 /// Try to parse a tool call from the LLM's text response.

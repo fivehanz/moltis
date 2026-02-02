@@ -12,5 +12,6 @@ pub mod exec;
 pub mod image_cache;
 pub mod policy;
 pub mod sandbox;
+pub mod spawn_agent;
 pub mod web_fetch;
 pub mod web_search;

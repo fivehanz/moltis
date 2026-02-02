@@ -1187,6 +1187,30 @@ async fn run_with_tools(
                     "state": "iteration",
                     "iteration": n,
                 }),
+                RunnerEvent::SubAgentStart { task, model, depth } => serde_json::json!({
+                    "runId": run_id,
+                    "sessionKey": sk,
+                    "state": "sub_agent_start",
+                    "task": task,
+                    "model": model,
+                    "depth": depth,
+                }),
+                RunnerEvent::SubAgentEnd {
+                    task,
+                    model,
+                    depth,
+                    iterations,
+                    tool_calls_made,
+                } => serde_json::json!({
+                    "runId": run_id,
+                    "sessionKey": sk,
+                    "state": "sub_agent_end",
+                    "task": task,
+                    "model": model,
+                    "depth": depth,
+                    "iterations": iterations,
+                    "toolCallsMade": tool_calls_made,
+                }),
             };
             broadcast(&state, "chat", payload, BroadcastOpts::default()).await;
         });

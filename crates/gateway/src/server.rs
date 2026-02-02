@@ -39,7 +39,7 @@ use crate::{
     approval::{GatewayApprovalBroadcaster, LiveExecApprovalService},
     auth,
     auth_routes::{AuthState, auth_router},
-    broadcast::broadcast_tick,
+    broadcast::{BroadcastOpts, broadcast, broadcast_tick},
     chat::{LiveChatService, LiveModelService},
     methods::MethodRegistry,
     provider_setup::LiveProviderSetupService,
@@ -963,6 +963,54 @@ pub async fn start_gateway(
                 Arc::clone(mm),
             )));
         }
+
+        // Register spawn_agent tool for sub-agent support.
+        // The tool gets a snapshot of the current registry (without itself)
+        // so sub-agents have access to all other tools.
+        if let Some(default_provider) = registry.read().await.first_with_tools() {
+            let base_tools = Arc::new(tool_registry.clone_without(&[]));
+            let state_for_spawn = Arc::clone(&state);
+            let on_spawn_event: moltis_tools::spawn_agent::OnSpawnEvent = Arc::new(move |event| {
+                use moltis_agents::runner::RunnerEvent;
+                let state = Arc::clone(&state_for_spawn);
+                let payload = match &event {
+                    RunnerEvent::SubAgentStart { task, model, depth } => {
+                        serde_json::json!({
+                            "state": "sub_agent_start",
+                            "task": task,
+                            "model": model,
+                            "depth": depth,
+                        })
+                    },
+                    RunnerEvent::SubAgentEnd {
+                        task,
+                        model,
+                        depth,
+                        iterations,
+                        tool_calls_made,
+                    } => serde_json::json!({
+                        "state": "sub_agent_end",
+                        "task": task,
+                        "model": model,
+                        "depth": depth,
+                        "iterations": iterations,
+                        "toolCallsMade": tool_calls_made,
+                    }),
+                    _ => return, // Only broadcast sub-agent lifecycle events.
+                };
+                tokio::spawn(async move {
+                    broadcast(&state, "chat", payload, BroadcastOpts::default()).await;
+                });
+            });
+            let spawn_tool = moltis_tools::spawn_agent::SpawnAgentTool::new(
+                Arc::clone(&registry),
+                default_provider,
+                base_tools,
+            )
+            .with_on_event(on_spawn_event);
+            tool_registry.register(Box::new(spawn_tool));
+        }
+
         let mut chat_service = LiveChatService::new(
             Arc::clone(&registry),
             Arc::clone(&state),

@@ -1,4 +1,8 @@
-use {anyhow::Result, async_trait::async_trait, std::collections::HashMap};
+use {
+    anyhow::Result,
+    async_trait::async_trait,
+    std::{collections::HashMap, sync::Arc},
+};
 
 /// Agent-callable tool.
 #[async_trait]
@@ -10,8 +14,11 @@ pub trait AgentTool: Send + Sync {
 }
 
 /// Registry of available tools for an agent run.
+///
+/// Tools are stored as `Arc<dyn AgentTool>` so the registry can be cheaply
+/// cloned (e.g. for sub-agents that need a filtered copy of the parent's tools).
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn AgentTool>>,
+    tools: HashMap<String, Arc<dyn AgentTool>>,
 }
 
 impl Default for ToolRegistry {
@@ -28,7 +35,8 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Box<dyn AgentTool>) {
-        self.tools.insert(tool.name().to_string(), tool);
+        let name = tool.name().to_string();
+        self.tools.insert(name, Arc::from(tool));
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn AgentTool> {
@@ -46,5 +54,16 @@ impl ToolRegistry {
                 })
             })
             .collect()
+    }
+
+    /// Clone the registry, excluding tools whose names are in `exclude`.
+    pub fn clone_without(&self, exclude: &[&str]) -> ToolRegistry {
+        let tools = self
+            .tools
+            .iter()
+            .filter(|(name, _)| !exclude.contains(&name.as_str()))
+            .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+            .collect();
+        ToolRegistry { tools }
     }
 }

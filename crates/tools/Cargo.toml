@@ -20,4 +20,5 @@ url           = "2"
 uuid          = { workspace = true }
 
 [dev-dependencies]
-tokio = { features = ["macros", "rt-multi-thread"], workspace = true }
+tokio        = { features = ["macros", "rt-multi-thread"], workspace = true }
+tokio-stream = { workspace = true }
