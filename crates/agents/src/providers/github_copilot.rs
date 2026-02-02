@@ -12,6 +12,7 @@ use {
     async_trait::async_trait,
     futures::StreamExt,
     moltis_oauth::{OAuthTokens, TokenStore},
+    secrecy::{ExposeSecret, Secret},
     tokio_stream::Stream,
     tracing::{debug, trace, warn},
 };
@@ -149,7 +150,7 @@ impl GitHubCopilotProvider {
                 .unwrap()
                 .as_secs();
             if now + 60 < expires_at {
-                return Ok(copilot_tokens.access_token);
+                return Ok(copilot_tokens.access_token.expose_secret().clone());
             }
         }
 
@@ -157,7 +158,10 @@ impl GitHubCopilotProvider {
         let resp = self
             .client
             .get(COPILOT_TOKEN_URL)
-            .header("Authorization", format!("token {}", tokens.access_token))
+            .header(
+                "Authorization",
+                format!("token {}", tokens.access_token.expose_secret()),
+            )
             .header("Accept", "application/json")
             .header(
                 "User-Agent",
@@ -175,7 +179,7 @@ impl GitHubCopilotProvider {
 
         // Cache the Copilot API token
         let _ = self.token_store.save("github-copilot-api", &OAuthTokens {
-            access_token: copilot_resp.token.clone(),
+            access_token: Secret::new(copilot_resp.token.clone()),
             refresh_token: None,
             expires_at: Some(copilot_resp.expires_at),
         });

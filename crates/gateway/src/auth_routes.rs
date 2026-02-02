@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use secrecy::ExposeSecret;
+
 use axum::{
     Json,
     extract::State,
@@ -126,11 +128,13 @@ async fn setup_handler(
     }
 
     // Validate setup code if one was generated at startup.
-    let expected_code = state.gateway_state.setup_code.read().await.clone();
-    if let Some(ref expected) = expected_code
-        && body.setup_code.as_deref() != Some(expected)
     {
-        return (StatusCode::FORBIDDEN, "invalid or missing setup code").into_response();
+        let expected_code = state.gateway_state.setup_code.read().await;
+        if let Some(ref expected) = *expected_code
+            && body.setup_code.as_deref() != Some(expected.expose_secret().as_str())
+        {
+            return (StatusCode::FORBIDDEN, "invalid or missing setup code").into_response();
+        }
     }
 
     let password = body.password.unwrap_or_default();
@@ -219,7 +223,7 @@ async fn reset_auth_handler(
             // Generate a new setup code so the re-setup flow is protected.
             let code = generate_setup_code();
             tracing::info!("setup code: {code} (enter this in the browser to set your password)");
-            *state.gateway_state.setup_code.write().await = Some(code);
+            *state.gateway_state.setup_code.write().await = Some(secrecy::Secret::new(code));
             clear_session_response()
         },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

@@ -1,4 +1,7 @@
-use moltis_oauth::{OAuthFlow, TokenStore, callback_port, load_oauth_config, pkce::generate_pkce};
+use {
+    moltis_oauth::{OAuthFlow, TokenStore, callback_port, load_oauth_config, pkce::generate_pkce},
+    secrecy::{ExposeSecret, Secret},
+};
 
 #[test]
 fn pkce_generates_valid_challenge() {
@@ -103,8 +106,8 @@ fn token_store_roundtrip() {
 
     let store = TokenStore::with_path(path);
     let tokens = moltis_oauth::OAuthTokens {
-        access_token: "test-access".into(),
-        refresh_token: Some("test-refresh".into()),
+        access_token: Secret::new("test-access".into()),
+        refresh_token: Some(Secret::new("test-refresh".into())),
         expires_at: Some(9999999999),
     };
 
@@ -113,8 +116,14 @@ fn token_store_roundtrip() {
     let loaded = store
         .load("test-provider")
         .expect("should load saved tokens");
-    assert_eq!(loaded.access_token, "test-access");
-    assert_eq!(loaded.refresh_token.as_deref(), Some("test-refresh"));
+    assert_eq!(loaded.access_token.expose_secret(), "test-access");
+    assert_eq!(
+        loaded
+            .refresh_token
+            .as_ref()
+            .map(|s| s.expose_secret().as_str()),
+        Some("test-refresh")
+    );
     assert_eq!(loaded.expires_at, Some(9999999999));
 
     let providers = store.list();

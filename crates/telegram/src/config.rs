@@ -1,5 +1,6 @@
 use {
     moltis_channels::gating::{DmPolicy, GroupPolicy, MentionMode},
+    secrecy::{ExposeSecret, Secret},
     serde::{Deserialize, Serialize},
 };
 
@@ -15,11 +16,12 @@ pub enum StreamMode {
 }
 
 /// Configuration for a single Telegram bot account.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TelegramAccountConfig {
     /// Bot token from @BotFather.
-    pub token: String,
+    #[serde(serialize_with = "serialize_secret")]
+    pub token: Secret<String>,
 
     /// DM access policy.
     pub dm_policy: DmPolicy,
@@ -48,10 +50,27 @@ pub struct TelegramAccountConfig {
     pub model: Option<String>,
 }
 
+impl std::fmt::Debug for TelegramAccountConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramAccountConfig")
+            .field("token", &"[REDACTED]")
+            .field("dm_policy", &self.dm_policy)
+            .field("group_policy", &self.group_policy)
+            .finish_non_exhaustive()
+    }
+}
+
+fn serialize_secret<S: serde::Serializer>(
+    secret: &Secret<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(secret.expose_secret())
+}
+
 impl Default for TelegramAccountConfig {
     fn default() -> Self {
         Self {
-            token: String::new(),
+            token: Secret::new(String::new()),
             dm_policy: DmPolicy::default(),
             group_policy: GroupPolicy::default(),
             mention_mode: MentionMode::default(),
@@ -87,7 +106,7 @@ mod tests {
             "allowlist": ["user1", "user2"]
         }"#;
         let cfg: TelegramAccountConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.token, "123:ABC");
+        assert_eq!(cfg.token.expose_secret(), "123:ABC");
         assert_eq!(cfg.dm_policy, DmPolicy::Allowlist);
         assert_eq!(cfg.stream_mode, StreamMode::Off);
         assert_eq!(cfg.allowlist, vec!["user1", "user2"]);
@@ -98,13 +117,13 @@ mod tests {
     #[test]
     fn serialize_roundtrip() {
         let cfg = TelegramAccountConfig {
-            token: "tok".into(),
+            token: Secret::new("tok".into()),
             dm_policy: DmPolicy::Disabled,
             ..Default::default()
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let cfg2: TelegramAccountConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(cfg2.dm_policy, DmPolicy::Disabled);
-        assert_eq!(cfg2.token, "tok");
+        assert_eq!(cfg2.token.expose_secret(), "tok");
     }
 }

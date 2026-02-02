@@ -7,6 +7,7 @@ use std::{
 use {
     anyhow::Result,
     async_trait::async_trait,
+    secrecy::ExposeSecret,
     teloxide::prelude::Requester,
     tracing::{info, warn},
 };
@@ -99,7 +100,7 @@ impl ChannelPlugin for TelegramPlugin {
     async fn start_account(&mut self, account_id: &str, config: serde_json::Value) -> Result<()> {
         let tg_config: TelegramAccountConfig = serde_json::from_value(config)?;
 
-        if tg_config.token.is_empty() {
+        if tg_config.token.expose_secret().is_empty() {
             return Err(anyhow::anyhow!("telegram bot token is required"));
         }
 

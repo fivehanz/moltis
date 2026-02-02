@@ -532,7 +532,7 @@ pub async fn start_gateway(
     let setup_code_display =
         if !credential_store.is_setup_complete() && !credential_store.is_auth_disabled() {
             let code = crate::auth_routes::generate_setup_code();
-            *state.setup_code.write().await = Some(code.clone());
+            *state.setup_code.write().await = Some(secrecy::Secret::new(code.clone()));
             Some(code)
         } else {
             None

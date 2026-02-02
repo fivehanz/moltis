@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+use {
+    secrecy::{ExposeSecret, Secret},
+    serde::{Deserialize, Serialize},
+};
 
 /// OAuth 2.0 provider configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,12 +21,31 @@ pub struct OAuthConfig {
 }
 
 /// Stored OAuth tokens.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthTokens {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
+    #[serde(serialize_with = "serialize_secret")]
+    pub access_token: Secret<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_option_secret",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub refresh_token: Option<Secret<String>>,
     /// Unix timestamp when the access token expires.
     pub expires_at: Option<u64>,
+}
+
+impl std::fmt::Debug for OAuthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokens")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// PKCE challenge pair.
@@ -31,4 +53,26 @@ pub struct OAuthTokens {
 pub struct PkceChallenge {
     pub verifier: String,
     pub challenge: String,
+}
+
+// ── Serde helpers for Secret<String> ────────────────────────────────────────
+
+/// Serialize a `Secret<String>` by exposing its inner value.
+/// Use only for fields that must round-trip through storage (config files, token JSON).
+pub fn serialize_secret<S: serde::Serializer>(
+    secret: &Secret<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(secret.expose_secret())
+}
+
+/// Serialize an `Option<Secret<String>>` by exposing its inner value.
+pub fn serialize_option_secret<S: serde::Serializer>(
+    secret: &Option<Secret<String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match secret {
+        Some(s) => serializer.serialize_some(s.expose_secret()),
+        None => serializer.serialize_none(),
+    }
 }

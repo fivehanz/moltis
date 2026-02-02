@@ -15,5 +15,5 @@ pub use {
     flow::OAuthFlow,
     kimi::kimi_headers,
     storage::TokenStore,
-    types::{OAuthConfig, OAuthTokens, PkceChallenge},
+    types::{OAuthConfig, OAuthTokens, PkceChallenge, serialize_option_secret, serialize_secret},
 };

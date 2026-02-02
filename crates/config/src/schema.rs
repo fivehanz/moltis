@@ -2,7 +2,10 @@
 /// Corresponds to `src/config/types.ts` and `zod-schema.*.ts` in the TS codebase.
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use {
+    secrecy::{ExposeSecret, Secret},
+    serde::{Deserialize, Serialize},
+};
 
 /// Agent identity (name, emoji, creature, vibe, soul).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -260,20 +263,36 @@ pub struct ProvidersConfig {
 }
 
 /// Configuration for a single LLM provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderEntry {
     /// Whether this provider is enabled. Defaults to true.
     pub enabled: bool,
 
     /// Override the API key (optional; env var still takes precedence if set).
-    pub api_key: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_option_secret",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub api_key: Option<Secret<String>>,
 
     /// Override the base URL.
     pub base_url: Option<String>,
 
     /// Default model ID for this provider.
     pub model: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderEntry")
+            .field("enabled", &self.enabled)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .finish()
+    }
 }
 
 impl Default for ProviderEntry {
@@ -284,6 +303,18 @@ impl Default for ProviderEntry {
             base_url: None,
             model: None,
         }
+    }
+}
+
+// ── Serde helpers for Secret<String> ────────────────────────────────────────
+
+fn serialize_option_secret<S: serde::Serializer>(
+    secret: &Option<Secret<String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match secret {
+        Some(s) => serializer.serialize_some(s.expose_secret()),
+        None => serializer.serialize_none(),
     }
 }
 

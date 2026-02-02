@@ -1,5 +1,7 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
+use secrecy::{ExposeSecret, Secret};
+
 use {async_trait::async_trait, serde_json::Value, tokio::sync::RwLock, tracing::info};
 
 use {
@@ -95,8 +97,12 @@ pub(crate) fn config_with_saved_keys(
     for (name, key) in key_store.load_all() {
         let entry = config.providers.entry(name).or_default();
         // Only override if config doesn't already have a key.
-        if entry.api_key.as_ref().is_none_or(|k| k.is_empty()) {
-            entry.api_key = Some(key);
+        if entry
+            .api_key
+            .as_ref()
+            .is_none_or(|k| k.expose_secret().is_empty())
+        {
+            entry.api_key = Some(Secret::new(key));
         }
     }
     config
@@ -235,7 +241,10 @@ impl LiveProviderSetupService {
         }
         // Check config file
         if let Some(entry) = self.config.get(provider.name)
-            && entry.api_key.as_ref().is_some_and(|k| !k.is_empty())
+            && entry
+                .api_key
+                .as_ref()
+                .is_some_and(|k| !k.expose_secret().is_empty())
         {
             return true;
         }
@@ -612,7 +621,10 @@ mod tests {
         let base = ProvidersConfig::default();
         let merged = config_with_saved_keys(&base, &store);
         let entry = merged.get("anthropic").unwrap();
-        assert_eq!(entry.api_key.as_deref(), Some("sk-saved"));
+        assert_eq!(
+            entry.api_key.as_ref().map(|s| s.expose_secret().as_str()),
+            Some("sk-saved")
+        );
     }
 
     #[test]
@@ -623,13 +635,16 @@ mod tests {
 
         let mut base = ProvidersConfig::default();
         base.providers.insert("anthropic".into(), ProviderEntry {
-            api_key: Some("sk-config".into()),
+            api_key: Some(Secret::new("sk-config".into())),
             ..Default::default()
         });
         let merged = config_with_saved_keys(&base, &store);
         let entry = merged.get("anthropic").unwrap();
         // Config key takes precedence over saved key.
-        assert_eq!(entry.api_key.as_deref(), Some("sk-config"));
+        assert_eq!(
+            entry.api_key.as_ref().map(|s| s.expose_secret().as_str()),
+            Some("sk-config")
+        );
     }
 
     #[tokio::test]

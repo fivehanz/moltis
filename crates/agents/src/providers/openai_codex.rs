@@ -5,6 +5,7 @@ use {
     base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD},
     futures::StreamExt,
     moltis_oauth::{OAuthFlow, TokenStore, load_oauth_config},
+    secrecy::{ExposeSecret, Secret},
     tokio_stream::Stream,
     tracing::debug,
 };
@@ -53,10 +54,10 @@ impl OpenAiCodexProvider {
                     let oauth_config = load_oauth_config("openai-codex")
                         .ok_or_else(|| anyhow::anyhow!("missing oauth config for openai-codex"))?;
                     let flow = OAuthFlow::new(oauth_config);
-                    let refresh = refresh_token.clone();
+                    let refresh = refresh_token.expose_secret().clone();
                     let new_tokens = std::thread::scope(|_| rt.block_on(flow.refresh(&refresh)))?;
                     self.token_store.save("openai-codex", &new_tokens)?;
-                    return Ok(new_tokens.access_token);
+                    return Ok(new_tokens.access_token.expose_secret().clone());
                 }
                 return Err(anyhow::anyhow!(
                     "openai-codex token expired and no refresh token available"
@@ -64,7 +65,7 @@ impl OpenAiCodexProvider {
             }
         }
 
-        Ok(tokens.access_token)
+        Ok(tokens.access_token.expose_secret().clone())
     }
 
     fn extract_account_id(jwt: &str) -> anyhow::Result<String> {
@@ -161,8 +162,8 @@ fn parse_codex_cli_tokens(data: &str) -> Option<moltis_oauth::OAuthTokens> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     Some(moltis_oauth::OAuthTokens {
-        access_token,
-        refresh_token,
+        access_token: Secret::new(access_token),
+        refresh_token: refresh_token.map(Secret::new),
         expires_at: None,
     })
 }
@@ -531,8 +532,14 @@ mod tests {
             }
         }"#;
         let tokens = parse_codex_cli_tokens(json).unwrap();
-        assert_eq!(tokens.access_token, "test_access_token");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("test_refresh_token"));
+        assert_eq!(tokens.access_token.expose_secret(), "test_access_token");
+        assert_eq!(
+            tokens
+                .refresh_token
+                .as_ref()
+                .map(|s| s.expose_secret().as_str()),
+            Some("test_refresh_token")
+        );
         assert_eq!(tokens.expires_at, None);
     }
 
@@ -544,7 +551,7 @@ mod tests {
             }
         }"#;
         let tokens = parse_codex_cli_tokens(json).unwrap();
-        assert_eq!(tokens.access_token, "tok123");
+        assert_eq!(tokens.access_token.expose_secret(), "tok123");
         assert!(tokens.refresh_token.is_none());
     }
 

@@ -1,14 +1,16 @@
 /// OAuth + API key credential management with token refresh, stored per-agent.
+use secrecy::Secret;
+
 pub struct AuthProfile {
     pub provider: String,
     pub credentials: Credentials,
 }
 
 pub enum Credentials {
-    ApiKey(String),
+    ApiKey(Secret<String>),
     OAuth {
-        access_token: String,
-        refresh_token: Option<String>,
+        access_token: Secret<String>,
+        refresh_token: Option<Secret<String>>,
         expires_at: Option<u64>,
     },
 }

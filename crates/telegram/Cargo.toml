@@ -10,6 +10,7 @@ moltis-auto-reply = { workspace = true }
 moltis-channels   = { workspace = true }
 moltis-common     = { workspace = true }
 reqwest           = { workspace = true }
+secrecy           = { workspace = true }
 serde             = { workspace = true }
 serde_json        = { workspace = true }
 teloxide          = { workspace = true }

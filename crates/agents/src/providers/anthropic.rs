@@ -1,13 +1,13 @@
 use std::pin::Pin;
 
-use {async_trait::async_trait, futures::StreamExt, tokio_stream::Stream};
+use {async_trait::async_trait, futures::StreamExt, secrecy::ExposeSecret, tokio_stream::Stream};
 
 use tracing::{debug, trace, warn};
 
 use crate::model::{CompletionResponse, LlmProvider, StreamEvent, ToolCall, Usage};
 
 pub struct AnthropicProvider {
-    api_key: String,
+    api_key: secrecy::Secret<String>,
     model: String,
     base_url: String,
     client: reqwest::Client,
@@ -16,7 +16,7 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
     pub fn new(api_key: String, model: String, base_url: String) -> Self {
         Self {
-            api_key,
+            api_key: secrecy::Secret::new(api_key),
             model,
             base_url,
             client: reqwest::Client::new(),
@@ -161,7 +161,7 @@ impl LlmProvider for AnthropicProvider {
         let http_resp = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", self.api_key.expose_secret())
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body)
@@ -221,7 +221,7 @@ impl LlmProvider for AnthropicProvider {
             let resp = match self
                 .client
                 .post(format!("{}/v1/messages", self.base_url))
-                .header("x-api-key", &self.api_key)
+                .header("x-api-key", self.api_key.expose_secret())
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&body)

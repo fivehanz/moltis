@@ -150,6 +150,42 @@ The `auth` subcommand (`crates/cli/src/auth_commands.rs`) provides:
 - `moltis auth reset-identity` — clear identity and user profile (triggers
   onboarding on next load)
 
+## Sensitive Data Handling
+
+Never use plain `String` for passwords, API keys, tokens, or any secret
+material. Use `secrecy::Secret<String>` instead — it redacts `Debug` output,
+prevents accidental `Display`, and zeroes memory on drop.
+
+```rust
+use secrecy::{ExposeSecret, Secret};
+
+// Store secrets wrapped
+struct Config {
+    api_key: Secret<String>,
+}
+
+// Construct: wrap at the boundary
+let cfg = Config { api_key: Secret::new(raw_key) };
+
+// Use: expose only at the point of consumption
+req.header("Authorization", format!("Bearer {}", cfg.api_key.expose_secret()));
+```
+
+Rules:
+- **Struct fields** holding secrets must be `Secret<String>` (or
+  `Option<Secret<String>>`).
+- **Function parameters** can stay `&str`; call `.expose_secret()` at the call
+  site.
+- **Serde deserialize** works automatically (secrecy's `serde` feature).
+- **Serde serialize** requires a custom helper when round-tripping is needed
+  (config files, token storage). See `serialize_secret` /
+  `serialize_option_secret` in `crates/oauth/src/types.rs`.
+- **Debug impls**: replace `#[derive(Debug)]` with a manual impl that prints
+  `[REDACTED]` for secret fields.
+- **RwLock guards**: when a `RwLock<Option<Secret<String>>>` read guard is
+  followed by a write in the same function, scope the read guard in a block
+  `{ let guard = lock.read().await; ... }` to avoid deadlocks.
+
 ## Provider Implementation Guidelines
 
 ### Async all the way down

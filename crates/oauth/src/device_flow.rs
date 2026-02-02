@@ -1,4 +1,4 @@
-use {anyhow::Result, reqwest::header::HeaderMap};
+use {anyhow::Result, reqwest::header::HeaderMap, secrecy::Secret};
 
 use crate::types::{OAuthConfig, OAuthTokens};
 
@@ -107,8 +107,8 @@ pub async fn poll_for_token_with_headers(
                     + secs
             });
             return Ok(OAuthTokens {
-                access_token: token,
-                refresh_token: body.refresh_token,
+                access_token: Secret::new(token),
+                refresh_token: body.refresh_token.map(Secret::new),
                 expires_at,
             });
         }
@@ -131,7 +131,10 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use axum::{Router, extract::Form, routing::post};
+    use {
+        axum::{Router, extract::Form, routing::post},
+        secrecy::ExposeSecret,
+    };
 
     fn test_config(auth_url: String, token_url: String) -> OAuthConfig {
         OAuthConfig {
@@ -302,7 +305,7 @@ mod tests {
         .await
         .expect("timed out")
         .unwrap();
-        assert_eq!(tokens.access_token, "ghp_mock_token");
+        assert_eq!(tokens.access_token.expose_secret(), "ghp_mock_token");
         assert!(tokens.refresh_token.is_none());
     }
 
@@ -329,8 +332,14 @@ mod tests {
         .await
         .expect("timed out")
         .unwrap();
-        assert_eq!(tokens.access_token, "at_123");
-        assert_eq!(tokens.refresh_token.as_deref(), Some("rt_456"));
+        assert_eq!(tokens.access_token.expose_secret(), "at_123");
+        assert_eq!(
+            tokens
+                .refresh_token
+                .as_ref()
+                .map(|s| s.expose_secret().as_str()),
+            Some("rt_456")
+        );
         assert!(tokens.expires_at.is_some());
         // expires_at should be roughly now + 3600
         let now = std::time::SystemTime::now()
@@ -372,7 +381,7 @@ mod tests {
         .await
         .expect("timed out")
         .unwrap();
-        assert_eq!(tokens.access_token, "ghp_success");
+        assert_eq!(tokens.access_token.expose_secret(), "ghp_success");
         assert!(call_count.load(Ordering::SeqCst) >= 2);
     }
 

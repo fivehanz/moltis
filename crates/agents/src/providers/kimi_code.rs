@@ -9,6 +9,7 @@ use {
     async_trait::async_trait,
     futures::StreamExt,
     moltis_oauth::{OAuthTokens, TokenStore, kimi_headers},
+    secrecy::{ExposeSecret, Secret},
     tokio_stream::Stream,
     tracing::{debug, trace, warn},
 };
@@ -59,9 +60,10 @@ impl KimiCodeProvider {
             if now + REFRESH_THRESHOLD_SECS >= expires_at {
                 if let Some(ref refresh_token) = tokens.refresh_token {
                     debug!("refreshing kimi-code token");
-                    let new_tokens = refresh_access_token(&self.client, refresh_token).await?;
+                    let new_tokens =
+                        refresh_access_token(&self.client, refresh_token.expose_secret()).await?;
                     self.token_store.save(PROVIDER_NAME, &new_tokens)?;
-                    return Ok(new_tokens.access_token);
+                    return Ok(new_tokens.access_token.expose_secret().clone());
                 }
                 return Err(anyhow::anyhow!(
                     "kimi-code token expired and no refresh token available"
@@ -69,7 +71,7 @@ impl KimiCodeProvider {
             }
         }
 
-        Ok(tokens.access_token)
+        Ok(tokens.access_token.expose_secret().clone())
     }
 }
 
@@ -113,8 +115,8 @@ pub async fn refresh_access_token(
     });
 
     Ok(OAuthTokens {
-        access_token: body.access_token,
-        refresh_token: body.refresh_token,
+        access_token: Secret::new(body.access_token),
+        refresh_token: body.refresh_token.map(Secret::new),
         expires_at,
     })
 }

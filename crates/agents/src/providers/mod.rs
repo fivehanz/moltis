@@ -18,9 +18,19 @@ pub mod kimi_code;
 
 use std::{collections::HashMap, sync::Arc};
 
-use moltis_config::schema::ProvidersConfig;
+use {moltis_config::schema::ProvidersConfig, secrecy::ExposeSecret};
 
 use crate::model::LlmProvider;
+
+/// Resolve an API key from config (Secret) or environment variable, returning a plain String.
+fn resolve_api_key(config: &ProvidersConfig, provider: &str, env_key: &str) -> Option<String> {
+    config
+        .get(provider)
+        .and_then(|e| e.api_key.as_ref())
+        .map(|s| s.expose_secret().clone())
+        .or_else(|| std::env::var(env_key).ok())
+        .filter(|k| !k.is_empty())
+}
 
 /// Return the known context window size (in tokens) for a model ID.
 /// Falls back to 200,000 for unknown models.
@@ -270,21 +280,14 @@ impl ProviderRegistry {
             }
 
             // Use config api_key or fall back to env var.
-            let has_key = config
-                .get(provider_name)
-                .and_then(|e| e.api_key.as_ref())
-                .map(|k| !k.is_empty())
-                .unwrap_or(false)
-                || std::env::var(env_key).is_ok();
+            let resolved_key = resolve_api_key(config, provider_name, env_key);
 
-            if !has_key {
+            if resolved_key.is_none() {
                 continue;
             }
 
             // If config provides an api_key, set the env var so genai picks it up.
-            if let Some(key) = config.get(provider_name).and_then(|e| e.api_key.as_ref())
-                && !key.is_empty()
-            {
+            if let Some(ref key) = resolved_key {
                 // Safety: only called during single-threaded startup.
                 unsafe { std::env::set_var(env_key, key) };
             }
@@ -320,12 +323,7 @@ impl ProviderRegistry {
             return;
         }
 
-        let key = config
-            .get("openai")
-            .and_then(|e| e.api_key.clone())
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok());
-
-        let Some(key) = key.filter(|k| !k.is_empty()) else {
+        let Some(key) = resolve_api_key(config, "openai", "OPENAI_API_KEY") else {
             return;
         };
 
@@ -513,119 +511,109 @@ impl ProviderRegistry {
 
     fn register_builtin_providers(&mut self, config: &ProvidersConfig) {
         // Anthropic — register all known Claude models when API key is available.
-        if config.is_enabled("anthropic") {
-            let key = config
+        if config.is_enabled("anthropic")
+            && let Some(key) = resolve_api_key(config, "anthropic", "ANTHROPIC_API_KEY")
+        {
+            let base_url = config
                 .get("anthropic")
-                .and_then(|e| e.api_key.clone())
-                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+                .and_then(|e| e.base_url.clone())
+                .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
+                .unwrap_or_else(|| "https://api.anthropic.com".into());
 
-            if let Some(key) = key.filter(|k| !k.is_empty()) {
-                let base_url = config
-                    .get("anthropic")
-                    .and_then(|e| e.base_url.clone())
-                    .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
-                    .unwrap_or_else(|| "https://api.anthropic.com".into());
-
-                // If user configured a specific model, register only that one.
-                if let Some(model_id) = config.get("anthropic").and_then(|e| e.model.as_deref()) {
-                    if !self.providers.contains_key(model_id) {
-                        let display = ANTHROPIC_MODELS
-                            .iter()
-                            .find(|(id, _)| *id == model_id)
-                            .map(|(_, name)| name.to_string())
-                            .unwrap_or_else(|| model_id.to_string());
-                        let provider = Arc::new(anthropic::AnthropicProvider::new(
-                            key.clone(),
-                            model_id.into(),
-                            base_url.clone(),
-                        ));
-                        self.register(
-                            ModelInfo {
-                                id: model_id.into(),
-                                provider: "anthropic".into(),
-                                display_name: display,
-                            },
-                            provider,
-                        );
+            // If user configured a specific model, register only that one.
+            if let Some(model_id) = config.get("anthropic").and_then(|e| e.model.as_deref()) {
+                if !self.providers.contains_key(model_id) {
+                    let display = ANTHROPIC_MODELS
+                        .iter()
+                        .find(|(id, _)| *id == model_id)
+                        .map(|(_, name)| name.to_string())
+                        .unwrap_or_else(|| model_id.to_string());
+                    let provider = Arc::new(anthropic::AnthropicProvider::new(
+                        key.clone(),
+                        model_id.into(),
+                        base_url.clone(),
+                    ));
+                    self.register(
+                        ModelInfo {
+                            id: model_id.into(),
+                            provider: "anthropic".into(),
+                            display_name: display,
+                        },
+                        provider,
+                    );
+                }
+            } else {
+                // No specific model — register all known Anthropic models.
+                for &(model_id, display_name) in ANTHROPIC_MODELS {
+                    if self.providers.contains_key(model_id) {
+                        continue;
                     }
-                } else {
-                    // No specific model — register all known Anthropic models.
-                    for &(model_id, display_name) in ANTHROPIC_MODELS {
-                        if self.providers.contains_key(model_id) {
-                            continue;
-                        }
-                        let provider = Arc::new(anthropic::AnthropicProvider::new(
-                            key.clone(),
-                            model_id.into(),
-                            base_url.clone(),
-                        ));
-                        self.register(
-                            ModelInfo {
-                                id: model_id.into(),
-                                provider: "anthropic".into(),
-                                display_name: display_name.into(),
-                            },
-                            provider,
-                        );
-                    }
+                    let provider = Arc::new(anthropic::AnthropicProvider::new(
+                        key.clone(),
+                        model_id.into(),
+                        base_url.clone(),
+                    ));
+                    self.register(
+                        ModelInfo {
+                            id: model_id.into(),
+                            provider: "anthropic".into(),
+                            display_name: display_name.into(),
+                        },
+                        provider,
+                    );
                 }
             }
         }
 
         // OpenAI — register all known OpenAI models when API key is available.
-        if config.is_enabled("openai") {
-            let key = config
+        if config.is_enabled("openai")
+            && let Some(key) = resolve_api_key(config, "openai", "OPENAI_API_KEY")
+        {
+            let base_url = config
                 .get("openai")
-                .and_then(|e| e.api_key.clone())
-                .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+                .and_then(|e| e.base_url.clone())
+                .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+                .unwrap_or_else(|| "https://api.openai.com/v1".into());
 
-            if let Some(key) = key.filter(|k| !k.is_empty()) {
-                let base_url = config
-                    .get("openai")
-                    .and_then(|e| e.base_url.clone())
-                    .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
-                    .unwrap_or_else(|| "https://api.openai.com/v1".into());
-
-                if let Some(model_id) = config.get("openai").and_then(|e| e.model.as_deref()) {
-                    if !self.providers.contains_key(model_id) {
-                        let display = OPENAI_MODELS
-                            .iter()
-                            .find(|(id, _)| *id == model_id)
-                            .map(|(_, name)| name.to_string())
-                            .unwrap_or_else(|| model_id.to_string());
-                        let provider = Arc::new(openai::OpenAiProvider::new(
-                            key.clone(),
-                            model_id.into(),
-                            base_url.clone(),
-                        ));
-                        self.register(
-                            ModelInfo {
-                                id: model_id.into(),
-                                provider: "openai".into(),
-                                display_name: display,
-                            },
-                            provider,
-                        );
+            if let Some(model_id) = config.get("openai").and_then(|e| e.model.as_deref()) {
+                if !self.providers.contains_key(model_id) {
+                    let display = OPENAI_MODELS
+                        .iter()
+                        .find(|(id, _)| *id == model_id)
+                        .map(|(_, name)| name.to_string())
+                        .unwrap_or_else(|| model_id.to_string());
+                    let provider = Arc::new(openai::OpenAiProvider::new(
+                        key.clone(),
+                        model_id.into(),
+                        base_url.clone(),
+                    ));
+                    self.register(
+                        ModelInfo {
+                            id: model_id.into(),
+                            provider: "openai".into(),
+                            display_name: display,
+                        },
+                        provider,
+                    );
+                }
+            } else {
+                for &(model_id, display_name) in OPENAI_MODELS {
+                    if self.providers.contains_key(model_id) {
+                        continue;
                     }
-                } else {
-                    for &(model_id, display_name) in OPENAI_MODELS {
-                        if self.providers.contains_key(model_id) {
-                            continue;
-                        }
-                        let provider = Arc::new(openai::OpenAiProvider::new(
-                            key.clone(),
-                            model_id.into(),
-                            base_url.clone(),
-                        ));
-                        self.register(
-                            ModelInfo {
-                                id: model_id.into(),
-                                provider: "openai".into(),
-                                display_name: display_name.into(),
-                            },
-                            provider,
-                        );
-                    }
+                    let provider = Arc::new(openai::OpenAiProvider::new(
+                        key.clone(),
+                        model_id.into(),
+                        base_url.clone(),
+                    ));
+                    self.register(
+                        ModelInfo {
+                            id: model_id.into(),
+                            provider: "openai".into(),
+                            display_name: display_name.into(),
+                        },
+                        provider,
+                    );
                 }
             }
         }
@@ -637,10 +625,7 @@ impl ProviderRegistry {
                 continue;
             }
 
-            let key = config
-                .get(def.config_name)
-                .and_then(|e| e.api_key.clone())
-                .or_else(|| std::env::var(def.env_key).ok());
+            let key = resolve_api_key(config, def.config_name, def.env_key);
 
             // Ollama doesn't require an API key — use a dummy value.
             let key = if def.config_name == "ollama" {
@@ -649,7 +634,7 @@ impl ProviderRegistry {
                 key
             };
 
-            let Some(key) = key.filter(|k| !k.is_empty()) else {
+            let Some(key) = key else {
                 continue;
             };
 
@@ -937,7 +922,7 @@ mod tests {
         config
             .providers
             .insert("mistral".into(), moltis_config::schema::ProviderEntry {
-                api_key: Some("sk-test-mistral".into()),
+                api_key: Some(secrecy::Secret::new("sk-test-mistral".into())),
                 ..Default::default()
             });
 
@@ -964,7 +949,7 @@ mod tests {
         config
             .providers
             .insert("cerebras".into(), moltis_config::schema::ProviderEntry {
-                api_key: Some("sk-test-cerebras".into()),
+                api_key: Some(secrecy::Secret::new("sk-test-cerebras".into())),
                 ..Default::default()
             });
 
@@ -983,7 +968,7 @@ mod tests {
         config
             .providers
             .insert("minimax".into(), moltis_config::schema::ProviderEntry {
-                api_key: Some("sk-test-minimax".into()),
+                api_key: Some(secrecy::Secret::new("sk-test-minimax".into())),
                 ..Default::default()
             });
 
@@ -997,7 +982,7 @@ mod tests {
         config
             .providers
             .insert("moonshot".into(), moltis_config::schema::ProviderEntry {
-                api_key: Some("sk-test-moonshot".into()),
+                api_key: Some(secrecy::Secret::new("sk-test-moonshot".into())),
                 ..Default::default()
             });
 
@@ -1012,7 +997,7 @@ mod tests {
         config
             .providers
             .insert("openrouter".into(), moltis_config::schema::ProviderEntry {
-                api_key: Some("sk-test-or".into()),
+                api_key: Some(secrecy::Secret::new("sk-test-or".into())),
                 ..Default::default()
             });
 
@@ -1026,7 +1011,7 @@ mod tests {
         config
             .providers
             .insert("openrouter".into(), moltis_config::schema::ProviderEntry {
-                api_key: Some("sk-test-or".into()),
+                api_key: Some(secrecy::Secret::new("sk-test-or".into())),
                 model: Some("anthropic/claude-3-haiku".into()),
                 ..Default::default()
             });
@@ -1063,7 +1048,7 @@ mod tests {
         config
             .providers
             .insert("venice".into(), moltis_config::schema::ProviderEntry {
-                api_key: Some("sk-test-venice".into()),
+                api_key: Some(secrecy::Secret::new("sk-test-venice".into())),
                 ..Default::default()
             });
 
@@ -1077,7 +1062,7 @@ mod tests {
         config
             .providers
             .insert("mistral".into(), moltis_config::schema::ProviderEntry {
-                api_key: Some("sk-test".into()),
+                api_key: Some(secrecy::Secret::new("sk-test".into())),
                 enabled: false,
                 ..Default::default()
             });
@@ -1103,7 +1088,7 @@ mod tests {
         config
             .providers
             .insert("mistral".into(), moltis_config::schema::ProviderEntry {
-                api_key: Some("sk-test".into()),
+                api_key: Some(secrecy::Secret::new("sk-test".into())),
                 base_url: Some("https://custom.mistral.example.com/v1".into()),
                 ..Default::default()
             });
@@ -1118,7 +1103,7 @@ mod tests {
         config
             .providers
             .insert("mistral".into(), moltis_config::schema::ProviderEntry {
-                api_key: Some("sk-test".into()),
+                api_key: Some(secrecy::Secret::new("sk-test".into())),
                 model: Some("mistral-small-latest".into()),
                 ..Default::default()
             });

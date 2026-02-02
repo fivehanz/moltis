@@ -7,6 +7,7 @@ use {
             PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
         },
     },
+    secrecy::ExposeSecret,
     serde::{Deserialize, Serialize},
     sha2::{Digest, Sha256},
     sqlx::SqlitePool,
@@ -484,14 +485,14 @@ pub fn authorize_connect(
 ) -> AuthResult {
     match auth.mode {
         AuthMode::Token => {
-            let Some(expected) = auth.token.as_deref() else {
+            let Some(ref expected) = auth.token else {
                 return AuthResult {
                     ok: true,
                     reason: None,
                 };
             };
             match provided_token {
-                Some(t) if safe_equal(t, expected) => AuthResult {
+                Some(t) if safe_equal(t, expected.expose_secret()) => AuthResult {
                     ok: true,
                     reason: None,
                 },
@@ -506,14 +507,14 @@ pub fn authorize_connect(
             }
         },
         AuthMode::Password => {
-            let Some(expected) = auth.password.as_deref() else {
+            let Some(ref expected) = auth.password else {
                 return AuthResult {
                     ok: true,
                     reason: None,
                 };
             };
             match provided_password {
-                Some(p) if safe_equal(p, expected) => AuthResult {
+                Some(p) if safe_equal(p, expected.expose_secret()) => AuthResult {
                     ok: true,
                     reason: None,
                 },
@@ -531,11 +532,21 @@ pub fn authorize_connect(
 }
 
 /// Legacy resolved auth from environment vars (kept for migration).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedAuth {
     pub mode: AuthMode,
-    pub token: Option<String>,
-    pub password: Option<String>,
+    pub token: Option<secrecy::Secret<String>>,
+    pub password: Option<secrecy::Secret<String>>,
+}
+
+impl std::fmt::Debug for ResolvedAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedAuth")
+            .field("mode", &self.mode)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,8 +565,8 @@ pub fn resolve_auth(token: Option<String>, password: Option<String>) -> Resolved
     };
     ResolvedAuth {
         mode,
-        token,
-        password,
+        token: token.map(secrecy::Secret::new),
+        password: password.map(secrecy::Secret::new),
     }
 }
 

@@ -1,12 +1,15 @@
 /// OpenAI embeddings provider using the `/v1/embeddings` endpoint.
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use {
+    secrecy::ExposeSecret,
+    serde::{Deserialize, Serialize},
+};
 
 use crate::embeddings::EmbeddingProvider;
 
 pub struct OpenAiEmbeddingProvider {
     client: reqwest::Client,
-    api_key: String,
+    api_key: secrecy::Secret<String>,
     base_url: String,
     model: String,
     dims: usize,
@@ -16,7 +19,7 @@ impl OpenAiEmbeddingProvider {
     pub fn new(api_key: String) -> Self {
         Self {
             client: reqwest::Client::new(),
-            api_key,
+            api_key: secrecy::Secret::new(api_key),
             base_url: "https://api.openai.com".into(),
             model: "text-embedding-3-small".into(),
             dims: 1536,
@@ -69,7 +72,7 @@ impl EmbeddingProvider for OpenAiEmbeddingProvider {
         let resp = self
             .client
             .post(format!("{}/v1/embeddings", self.base_url))
-            .bearer_auth(&self.api_key)
+            .bearer_auth(self.api_key.expose_secret())
             .json(&req)
             .send()
             .await?

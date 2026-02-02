@@ -1,13 +1,13 @@
 use std::pin::Pin;
 
-use {async_trait::async_trait, futures::StreamExt, tokio_stream::Stream};
+use {async_trait::async_trait, futures::StreamExt, secrecy::ExposeSecret, tokio_stream::Stream};
 
 use tracing::{debug, trace, warn};
 
 use crate::model::{CompletionResponse, LlmProvider, StreamEvent, ToolCall, Usage};
 
 pub struct OpenAiProvider {
-    api_key: String,
+    api_key: secrecy::Secret<String>,
     model: String,
     base_url: String,
     provider_name: String,
@@ -17,7 +17,7 @@ pub struct OpenAiProvider {
 impl OpenAiProvider {
     pub fn new(api_key: String, model: String, base_url: String) -> Self {
         Self {
-            api_key,
+            api_key: secrecy::Secret::new(api_key),
             model,
             base_url,
             provider_name: "openai".into(),
@@ -32,7 +32,7 @@ impl OpenAiProvider {
         provider_name: String,
     ) -> Self {
         Self {
-            api_key,
+            api_key: secrecy::Secret::new(api_key),
             model,
             base_url,
             provider_name,
@@ -123,7 +123,10 @@ impl LlmProvider for OpenAiProvider {
         let http_resp = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -172,7 +175,7 @@ impl LlmProvider for OpenAiProvider {
             let resp = match self
                 .client
                 .post(format!("{}/chat/completions", self.base_url))
-                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
                 .header("content-type", "application/json")
                 .json(&body)
                 .send()

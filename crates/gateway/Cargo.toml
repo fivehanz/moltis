@@ -40,6 +40,7 @@ rcgen                 = { optional = true, workspace = true }
 reqwest               = { workspace = true }
 rustls                = { optional = true, workspace = true }
 rustls-pemfile        = { optional = true, workspace = true }
+secrecy               = { workspace = true }
 serde                 = { workspace = true }
 serde_json            = { workspace = true }
 sha2                  = { workspace = true }

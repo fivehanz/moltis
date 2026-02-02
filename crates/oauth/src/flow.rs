@@ -1,4 +1,4 @@
-use {anyhow::Result, url::Url};
+use {anyhow::Result, secrecy::Secret, url::Url};
 
 use crate::{
     pkce::{generate_pkce, generate_state},
@@ -117,8 +117,8 @@ fn parse_token_response(resp: &serde_json::Value) -> Result<OAuthTokens> {
     });
 
     Ok(OAuthTokens {
-        access_token,
-        refresh_token,
+        access_token: Secret::new(access_token),
+        refresh_token: refresh_token.map(Secret::new),
         expires_at,
     })
 }
