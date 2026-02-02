@@ -12,13 +12,59 @@ many features it has. `../clawdbot/HOWITWORKS.md` has explaination of how it
 works. But feel free to do any improvement and change the way it is to make
 it more Rustacean.
 
-Always use traits if possible, to allow other implementations.
+All code you write must have tests with high coverage.
 
-Always prefer streaming over non-streaming API calls when possible. Streaming
-provides a better, friendlier user experience by showing responses as they
-arrive.
+## Rust Style and Idioms
 
-All code you write must have test with a high coverage.
+Write idiomatic, Rustacean code. Prioritize clarity, modularity, and
+zero-cost abstractions.
+
+### Traits and generics
+
+- Always use traits to define behaviour boundaries — this allows alternative
+  implementations (e.g. swapping MCP transports, storage backends, provider
+  SDKs) and makes testing with mocks straightforward.
+- Prefer generic parameters (`fn foo<T: MyTrait>(t: T)`) for hot paths where
+  monomorphization matters. Use `dyn Trait` (behind `Arc` / `Box`) when you
+  need heterogeneous collections or the concrete type isn't known until
+  runtime.
+- Derive `Default` on structs whenever all fields have sensible defaults — it
+  pairs well with struct update syntax and `unwrap_or_default()`.
+
+### Typed data over loose JSON
+
+Use concrete Rust types (`struct`, `enum`) instead of `serde_json::Value`
+wherever the shape is known. This gives compile-time guarantees, better
+documentation, and avoids stringly-typed field access. Reserve
+`serde_json::Value` for truly dynamic / schema-less data.
+
+### Concurrency
+
+- Always prefer streaming over non-streaming API calls when possible.
+  Streaming provides a better, friendlier user experience by showing
+  responses as they arrive.
+- Run independent async work concurrently with `tokio::join!`,
+  `futures::join_all`, or `FuturesUnordered` instead of sequential `.await`
+  loops. Sequential awaits are fine when each step depends on the previous
+  result.
+- Never use `block_on` or any blocking call inside an async context (see
+  "Async all the way down" below).
+
+### Error handling
+
+- Use `anyhow::Result` for application-level errors and `thiserror` for
+  library-level errors that callers need to match on.
+- Propagate errors with `?`; avoid `.unwrap()` outside of tests.
+
+### General style
+
+- Prefer iterators and combinators (`.map()`, `.filter()`, `.collect()`)
+  over manual loops when they express intent more clearly.
+- Use `Cow<'_, str>` when a function may or may not need to allocate.
+- Keep public API surfaces small: expose only what downstream crates need
+  via `pub use` re-exports in `lib.rs`.
+- Prefer `#[must_use]` on functions whose return value should not be
+  silently ignored.
 
 ## Build and Development Commands
 

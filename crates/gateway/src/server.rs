@@ -881,6 +881,8 @@ async fn ws_upgrade_handler(
 struct GonData {
     identity: moltis_config::ResolvedIdentity,
     counts: NavCounts,
+    crons: Vec<moltis_cron::types::CronJob>,
+    cron_status: moltis_cron::types::CronStatus,
 }
 
 /// Counts shown as badges in the sidebar navigation.
@@ -909,16 +911,29 @@ async fn build_gon_data(gw: &GatewayState) -> GonData {
         .unwrap_or_default();
 
     let counts = build_nav_counts(gw).await;
-    GonData { identity, counts }
+    let (crons, cron_status) = tokio::join!(gw.services.cron.list(), gw.services.cron.status());
+    let crons: Vec<moltis_cron::types::CronJob> = crons
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let cron_status: moltis_cron::types::CronStatus = cron_status
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    GonData {
+        identity,
+        counts,
+        crons,
+        cron_status,
+    }
 }
 
 #[cfg(feature = "web-ui")]
 async fn build_nav_counts(gw: &GatewayState) -> NavCounts {
-    let (projects, models, channels, skills_data, mcp, crons, images) = tokio::join!(
+    let (projects, models, channels, mcp, crons, images) = tokio::join!(
         gw.services.project.list(),
         gw.services.model.list(),
         gw.services.channel.status(),
-        gw.services.skills.status(),
         gw.services.mcp.list(),
         gw.services.cron.list(),
         async {
@@ -956,18 +971,33 @@ async fn build_nav_counts(gw: &GatewayState) -> NavCounts {
         })
         .unwrap_or(0);
 
-    let (skills, plugins) = skills_data
-        .ok()
-        .map(|v| {
-            let installed = v
-                .get("installed")
-                .and_then(|i| i.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            // plugins count from the plugins service repos
-            (installed, 0usize)
-        })
-        .unwrap_or((0, 0));
+    // Count enabled skills from both skills and plugins manifests (same logic as
+    // api_skills_handler) — the SkillsService::status() noop returns an empty list,
+    // so we read the manifests directly.
+    let mut skills = 0usize;
+    if let Ok(path) = moltis_skills::manifest::ManifestStore::default_path() {
+        let store = moltis_skills::manifest::ManifestStore::new(path);
+        if let Ok(m) = store.load() {
+            skills += m
+                .repos
+                .iter()
+                .flat_map(|r| &r.skills)
+                .filter(|s| s.enabled)
+                .count();
+        }
+    }
+    if let Ok(path) = moltis_plugins::install::default_manifest_path() {
+        let store = moltis_skills::manifest::ManifestStore::new(path);
+        if let Ok(m) = store.load() {
+            skills += m
+                .repos
+                .iter()
+                .flat_map(|r| &r.skills)
+                .filter(|s| s.enabled)
+                .count();
+        }
+    }
+    let plugins = 0usize;
 
     // Count plugins repos separately.
     let plugins = gw

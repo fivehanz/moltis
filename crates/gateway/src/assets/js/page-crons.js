@@ -4,14 +4,19 @@ import { signal } from "@preact/signals";
 import { html } from "htm/preact";
 import { render } from "preact";
 import { useEffect } from "preact/hooks";
+import * as gon from "./gon.js";
 import { sendRpc } from "./helpers.js";
 import { updateNavCount } from "./nav-counts.js";
 import { registerPage } from "./router.js";
 import * as S from "./state.js";
 import { ConfirmDialog, Modal, requestConfirm } from "./ui.js";
 
-var cronJobs = signal([]);
-var cronStatus = signal(null);
+var initialCrons = gon.get("crons") || [];
+var cronJobs = signal(initialCrons);
+var cronStatus = signal(gon.get("cron_status"));
+if (initialCrons.length) {
+	updateNavCount("crons", initialCrons.filter((j) => j.enabled).length);
+}
 var runsHistory = signal(null); // { jobId, jobName, runs }
 var showModal = signal(false);
 var editingJob = signal(null);
@@ -64,7 +69,10 @@ function CronJobRow(props) {
 		sendRpc("cron.update", {
 			id: job.id,
 			patch: { enabled: e.target.checked },
-		}).then(() => loadStatus());
+		}).then(() => {
+			loadJobs();
+			loadStatus();
+		});
 	}
 
 	function onRun() {
@@ -99,12 +107,6 @@ function CronJobRow(props) {
 	return html`<tr>
     <td>${job.name}</td>
     <td class="cron-mono">${formatSchedule(job.schedule)}</td>
-    <td>
-      <label class="cron-toggle">
-        <input type="checkbox" checked=${job.enabled} onChange=${onToggle} />
-        <span class="cron-slider" />
-      </label>
-    </td>
     <td class="cron-mono">${job.state?.nextRunAtMs ? html`<time data-epoch-ms="${job.state.nextRunAtMs}">${new Date(job.state.nextRunAtMs).toISOString()}</time>` : "\u2014"}</td>
     <td>${job.state?.lastStatus ? html`<span class="cron-badge ${job.state.lastStatus}">${job.state.lastStatus}</span>` : "\u2014"}</td>
     <td class="cron-actions">
@@ -115,6 +117,12 @@ function CronJobRow(props) {
       <button class="cron-action-btn" onClick=${onRun}>Run</button>
       <button class="cron-action-btn" onClick=${onHistory}>History</button>
       <button class="cron-action-btn cron-action-danger" onClick=${onDelete}>Delete</button>
+    </td>
+    <td>
+      <label class="cron-toggle">
+        <input type="checkbox" checked=${job.enabled} onChange=${onToggle} />
+        <span class="cron-slider" />
+      </label>
     </td>
   </tr>`;
 }
@@ -127,8 +135,8 @@ function CronJobTable() {
 	return html`<table class="cron-table">
     <thead>
       <tr>
-        <th>Name</th><th>Schedule</th><th>Enabled</th>
-        <th>Next Run</th><th>Last Status</th><th>Actions</th>
+        <th>Name</th><th>Schedule</th>
+        <th>Next Run</th><th>Last Status</th><th>Actions</th><th>Enabled</th>
       </tr>
     </thead>
     <tbody>
@@ -357,8 +365,8 @@ registerPage(
 	"/crons",
 	function initCrons(container) {
 		container.style.cssText = "flex-direction:column;padding:0;overflow:hidden;";
-		cronJobs.value = [];
-		cronStatus.value = null;
+		cronJobs.value = gon.get("crons") || [];
+		cronStatus.value = gon.get("cron_status");
 		runsHistory.value = null;
 		showModal.value = false;
 		editingJob.value = null;

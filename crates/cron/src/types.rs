@@ -155,7 +155,7 @@ pub struct CronJobPatch {
 }
 
 /// Summary status of the cron system.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CronStatus {
     pub running: bool,
