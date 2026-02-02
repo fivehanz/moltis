@@ -1259,7 +1259,7 @@ function TailscaleSection() {
 	useEffect(() => {
 		var container = ref.current;
 		if (!container) return;
-		while (container.children.length > 2) container.removeChild(container.lastChild);
+		while (container.children.length > 3) container.removeChild(container.lastChild);
 
 		if (tsLoading) {
 			var loadEl = document.createElement("div");
