@@ -2578,6 +2578,7 @@ dependencies = [
  "moltis-config",
  "moltis-cron",
  "reqwest 0.12.28",
+ "secrecy 0.8.0",
  "serde",
  "serde_json",
  "tokio",

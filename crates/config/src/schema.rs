@@ -188,7 +188,12 @@ pub struct WebSearchConfig {
     /// Search provider.
     pub provider: SearchProvider,
     /// Brave Search API key (overrides `BRAVE_API_KEY` env var).
-    pub api_key: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_option_secret",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub api_key: Option<Secret<String>>,
     /// Maximum number of results to return (1-10).
     pub max_results: u8,
     /// HTTP request timeout in seconds.
@@ -218,7 +223,12 @@ impl Default for WebSearchConfig {
 #[serde(default)]
 pub struct PerplexityConfig {
     /// API key (overrides `PERPLEXITY_API_KEY` / `OPENROUTER_API_KEY` env vars).
-    pub api_key: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_option_secret",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub api_key: Option<Secret<String>>,
     /// Base URL override. Auto-detected from key prefix if empty.
     pub base_url: Option<String>,
     /// Model to use.
@@ -324,6 +334,8 @@ fn default_sandbox_packages() -> Vec<String> {
         "dnsutils",
         "netcat-openbsd",
         "openssh-client",
+        "iproute2",
+        "net-tools",
         // Language runtimes
         "python3",
         "python3-dev",
@@ -347,21 +359,33 @@ fn default_sandbox_packages() -> Vec<String> {
         "autoconf",
         "automake",
         "libtool",
-        // Common CLI utilities (mirrors GitHub runner "vital" + "command" sets)
-        "git",
-        "jq",
+        "bison",
+        "flex",
+        "dpkg-dev",
+        "fakeroot",
+        // Compression & archiving
         "zip",
         "unzip",
         "bzip2",
         "xz-utils",
         "p7zip-full",
         "tar",
+        "zstd",
+        "lz4",
+        "pigz",
+        // Common CLI utilities (mirrors GitHub runner image)
+        "git",
+        "gnupg2",
+        "jq",
         "rsync",
         "file",
         "tree",
         "sqlite3",
         "sudo",
         "locales",
+        "tzdata",
+        "shellcheck",
+        "patchelf",
         // Text processing & search
         "ripgrep",
     ]

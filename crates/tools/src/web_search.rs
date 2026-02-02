@@ -7,6 +7,7 @@ use std::{
 use {
     anyhow::{Result, bail},
     async_trait::async_trait,
+    secrecy::{ExposeSecret, Secret},
     serde::{Deserialize, Serialize},
     tracing::debug,
 };
@@ -27,7 +28,7 @@ struct CacheEntry {
 /// Web search tool — lets the LLM search the web via Brave Search or Perplexity.
 pub struct WebSearchTool {
     provider: SearchProvider,
-    api_key: String,
+    api_key: Secret<String>,
     max_results: u8,
     timeout: Duration,
     cache_ttl: Duration,
@@ -98,12 +99,13 @@ impl WebSearchTool {
             ConfigSearchProvider::Brave => {
                 let api_key = config
                     .api_key
-                    .clone()
+                    .as_ref()
+                    .map(|s| s.expose_secret().clone())
                     .or_else(|| std::env::var("BRAVE_API_KEY").ok())
                     .unwrap_or_default();
                 Some(Self::new(
                     SearchProvider::Brave,
-                    api_key,
+                    Secret::new(api_key),
                     config.max_results,
                     Duration::from_secs(config.timeout_seconds),
                     Duration::from_secs(config.cache_ttl_minutes * 60),
@@ -129,7 +131,7 @@ impl WebSearchTool {
 
     fn new(
         provider: SearchProvider,
-        api_key: String,
+        api_key: Secret<String>,
         max_results: u8,
         timeout: Duration,
         cache_ttl: Duration,
@@ -178,7 +180,7 @@ impl WebSearchTool {
         params: &serde_json::Value,
         accept_language: Option<&str>,
     ) -> Result<serde_json::Value> {
-        if self.api_key.is_empty() {
+        if self.api_key.expose_secret().is_empty() {
             return Ok(serde_json::json!({
                 "error": "Brave Search API key not configured",
                 "hint": "Set BRAVE_API_KEY environment variable or tools.web.search.api_key in config"
@@ -209,7 +211,7 @@ impl WebSearchTool {
             .get(&url)
             .header("Accept", "application/json")
             .header("Accept-Encoding", "gzip")
-            .header("X-Subscription-Token", &self.api_key);
+            .header("X-Subscription-Token", self.api_key.expose_secret().as_str());
         if let Some(lang) = accept_language {
             req = req.header("Accept-Language", lang);
         }
@@ -249,7 +251,7 @@ impl WebSearchTool {
         base_url: &str,
         model: &str,
     ) -> Result<serde_json::Value> {
-        if self.api_key.is_empty() {
+        if self.api_key.expose_secret().is_empty() {
             return Ok(serde_json::json!({
                 "error": "Perplexity API key not configured",
                 "hint": "Set PERPLEXITY_API_KEY or OPENROUTER_API_KEY environment variable, or tools.web.search.perplexity.api_key in config"
@@ -267,7 +269,7 @@ impl WebSearchTool {
 
         let resp = client
             .post(format!("{base_url}/chat/completions"))
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Authorization", format!("Bearer {}", self.api_key.expose_secret()))
             .json(&body)
             .send()
             .await?;
@@ -295,10 +297,11 @@ impl WebSearchTool {
 }
 
 /// Resolve Perplexity API key and base URL from config / env.
-fn resolve_perplexity_config(cfg: &PerplexityConfig) -> (String, String) {
+fn resolve_perplexity_config(cfg: &PerplexityConfig) -> (Secret<String>, String) {
     let api_key = cfg
         .api_key
-        .clone()
+        .as_ref()
+        .map(|s| s.expose_secret().clone())
         .or_else(|| std::env::var("PERPLEXITY_API_KEY").ok())
         .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
         .unwrap_or_default();
@@ -312,7 +315,7 @@ fn resolve_perplexity_config(cfg: &PerplexityConfig) -> (String, String) {
         }
     });
 
-    (api_key, base_url)
+    (Secret::new(api_key), base_url)
 }
 
 /// URL-encode helper (subset; reqwest doesn't re-export this).
@@ -424,7 +427,7 @@ mod tests {
     fn brave_tool() -> WebSearchTool {
         WebSearchTool::new(
             SearchProvider::Brave,
-            String::new(),
+            Secret::new(String::new()),
             5,
             Duration::from_secs(10),
             Duration::from_secs(60),
@@ -437,7 +440,7 @@ mod tests {
                 base_url: "https://api.perplexity.ai".into(),
                 model: "sonar-pro".into(),
             },
-            String::new(),
+            Secret::new(String::new()),
             5,
             Duration::from_secs(10),
             Duration::from_secs(60),
@@ -502,7 +505,7 @@ mod tests {
     fn test_cache_disabled_when_zero_ttl() {
         let tool = WebSearchTool::new(
             SearchProvider::Brave,
-            String::new(),
+            Secret::new(String::new()),
             5,
             Duration::from_secs(10),
             Duration::ZERO,
@@ -548,24 +551,24 @@ mod tests {
     #[test]
     fn test_resolve_perplexity_config_pplx_prefix() {
         let cfg = PerplexityConfig {
-            api_key: Some("pplx-abc123".into()),
+            api_key: Some(Secret::new("pplx-abc123".to_string())),
             base_url: None,
             model: None,
         };
         let (key, url) = resolve_perplexity_config(&cfg);
-        assert_eq!(key, "pplx-abc123");
+        assert_eq!(key.expose_secret(), "pplx-abc123");
         assert!(url.contains("perplexity.ai"));
     }
 
     #[test]
     fn test_resolve_perplexity_config_openrouter_prefix() {
         let cfg = PerplexityConfig {
-            api_key: Some("sk-or-abc123".into()),
+            api_key: Some(Secret::new("sk-or-abc123".to_string())),
             base_url: None,
             model: None,
         };
         let (key, url) = resolve_perplexity_config(&cfg);
-        assert_eq!(key, "sk-or-abc123");
+        assert_eq!(key.expose_secret(), "sk-or-abc123");
         assert!(url.contains("openrouter.ai"));
     }
 

@@ -34,8 +34,8 @@ jobs:
 
       - name: Extract moltis default packages from schema.rs
         run: |
-          grep -oP '"[a-z][a-z0-9._+-]*"' crates/config/src/schema.rs \
-            | tr -d '"' | sort -u > /tmp/moltis-packages.txt
+          sed -n '/^fn default_sandbox_packages/,/^}/p' crates/config/src/schema.rs \
+            | grep -oP '"[a-z][a-z0-9._+-]+"' | tr -d '"' | sort -u > /tmp/moltis-packages.txt
           echo "### Moltis default sandbox packages"
           cat /tmp/moltis-packages.txt
 
