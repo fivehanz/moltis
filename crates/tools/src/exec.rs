@@ -21,6 +21,13 @@ pub trait ApprovalBroadcaster: Send + Sync {
     async fn broadcast_request(&self, request_id: &str, command: &str) -> Result<()>;
 }
 
+/// Provider of environment variables to inject into sandbox execution.
+/// Values are wrapped in `Secret` to prevent accidental logging.
+#[async_trait]
+pub trait EnvVarProvider: Send + Sync {
+    async fn get_env_vars(&self) -> Vec<(String, secrecy::Secret<String>)>;
+}
+
 /// Result of a shell command execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecResult {
@@ -123,6 +130,7 @@ pub struct ExecTool {
     sandbox: Arc<dyn Sandbox>,
     sandbox_id: Option<SandboxId>,
     sandbox_router: Option<Arc<SandboxRouter>>,
+    env_provider: Option<Arc<dyn EnvVarProvider>>,
 }
 
 impl Default for ExecTool {
@@ -136,6 +144,7 @@ impl Default for ExecTool {
             sandbox: Arc::new(NoSandbox),
             sandbox_id: None,
             sandbox_router: None,
+            env_provider: None,
         }
     }
 }
@@ -162,6 +171,12 @@ impl ExecTool {
     /// Attach a sandbox router for per-session dynamic sandbox resolution.
     pub fn with_sandbox_router(mut self, router: Arc<SandboxRouter>) -> Self {
         self.sandbox_router = Some(router);
+        self
+    }
+
+    /// Attach an environment variable provider for sandbox injection.
+    pub fn with_env_provider(mut self, provider: Arc<dyn EnvVarProvider>) -> Self {
+        self.env_provider = Some(provider);
         self
     }
 
@@ -278,11 +293,24 @@ impl AgentTool for ExecTool {
             }
         }
 
+        let secret_env = if let Some(ref provider) = self.env_provider {
+            provider.get_env_vars().await
+        } else {
+            Vec::new()
+        };
+
+        // Expose secrets only at the injection boundary.
+        use secrecy::ExposeSecret;
+        let env: Vec<(String, String)> = secret_env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.expose_secret().clone()))
+            .collect();
+
         let opts = ExecOpts {
             timeout: Duration::from_secs(timeout_secs),
             max_output_bytes: self.max_output_bytes,
             working_dir,
-            env: Vec::new(),
+            env: env.clone(),
         };
 
         // Resolve sandbox: dynamic per-session router takes priority over static sandbox.
@@ -308,6 +336,19 @@ impl AgentTool for ExecTool {
             exec_command(command, &opts).await?
         };
 
+        // Redact env var values from output so secrets don't leak to the LLM.
+        // Covers the raw value plus common encodings (base64, hex) that could
+        // be used to exfiltrate secrets via `echo $SECRET | base64` etc.
+        let mut result = result;
+        for (_, v) in &env {
+            if !v.is_empty() {
+                for needle in redaction_needles(v) {
+                    result.stdout = result.stdout.replace(&needle, "[REDACTED]");
+                    result.stderr = result.stderr.replace(&needle, "[REDACTED]");
+                }
+            }
+        }
+
         info!(
             command,
             exit_code = result.exit_code,
@@ -317,6 +358,36 @@ impl AgentTool for ExecTool {
         );
         Ok(serde_json::to_value(&result)?)
     }
+}
+
+/// Build a set of strings to redact for a given secret value:
+/// the raw value, its base64 encoding, and its hex encoding.
+fn redaction_needles(value: &str) -> Vec<String> {
+    use base64::Engine;
+
+    let mut needles = vec![value.to_string()];
+
+    // base64 (standard + URL-safe, with and without padding)
+    let b64_std = base64::engine::general_purpose::STANDARD.encode(value.as_bytes());
+    let b64_url = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.as_bytes());
+    if b64_std != value {
+        needles.push(b64_std);
+    }
+    if b64_url != value {
+        needles.push(b64_url);
+    }
+
+    // Hex encoding (lowercase)
+    let hex = value
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    if hex != value {
+        needles.push(hex);
+    }
+
+    needles
 }
 
 #[cfg(test)]
@@ -500,6 +571,85 @@ mod tests {
         };
         let tool = ExecTool::default().with_sandbox(sandbox, id);
         tool.cleanup().await.unwrap();
+    }
+
+    struct TestEnvProvider;
+
+    #[async_trait]
+    impl EnvVarProvider for TestEnvProvider {
+        async fn get_env_vars(&self) -> Vec<(String, secrecy::Secret<String>)> {
+            vec![(
+                "TEST_INJECTED".into(),
+                secrecy::Secret::new("hello_from_env".into()),
+            )]
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exec_tool_with_env_provider() {
+        let provider: Arc<dyn EnvVarProvider> = Arc::new(TestEnvProvider);
+        let tool = ExecTool::default().with_env_provider(provider);
+        let result = tool
+            .execute(serde_json::json!({ "command": "echo $TEST_INJECTED" }))
+            .await
+            .unwrap();
+        // The value is redacted in output.
+        assert_eq!(result["stdout"].as_str().unwrap().trim(), "[REDACTED]");
+    }
+
+    #[tokio::test]
+    async fn test_env_var_redaction_base64_exfiltration() {
+        let provider: Arc<dyn EnvVarProvider> = Arc::new(TestEnvProvider);
+        let tool = ExecTool::default().with_env_provider(provider);
+        let result = tool
+            .execute(serde_json::json!({ "command": "echo $TEST_INJECTED | base64" }))
+            .await
+            .unwrap();
+        let stdout = result["stdout"].as_str().unwrap().trim();
+        assert!(
+            !stdout.contains("aGVsbG9fZnJvbV9lbnY"),
+            "base64 of secret should be redacted, got: {stdout}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_env_var_redaction_hex_exfiltration() {
+        let provider: Arc<dyn EnvVarProvider> = Arc::new(TestEnvProvider);
+        let tool = ExecTool::default().with_env_provider(provider);
+        let result = tool
+            .execute(serde_json::json!({ "command": "printf '%s' \"$TEST_INJECTED\" | xxd -p" }))
+            .await
+            .unwrap();
+        let stdout = result["stdout"].as_str().unwrap().trim();
+        assert!(
+            !stdout.contains("68656c6c6f5f66726f6d5f656e76"),
+            "hex of secret should be redacted, got: {stdout}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_env_var_redaction_file_exfiltration() {
+        let provider: Arc<dyn EnvVarProvider> = Arc::new(TestEnvProvider);
+        let tool = ExecTool::default().with_env_provider(provider);
+        let result = tool
+            .execute(serde_json::json!({
+                "command": "f=$(mktemp); echo $TEST_INJECTED > $f; cat $f; rm $f"
+            }))
+            .await
+            .unwrap();
+        let stdout = result["stdout"].as_str().unwrap().trim();
+        assert_eq!(stdout, "[REDACTED]", "file read-back should be redacted");
+    }
+
+    #[test]
+    fn test_redaction_needles() {
+        let needles = redaction_needles("secret123");
+        // Raw value
+        assert!(needles.contains(&"secret123".to_string()));
+        // base64
+        assert!(needles.iter().any(|n| n.contains("c2VjcmV0MTIz")));
+        // hex
+        assert!(needles.iter().any(|n| n.contains("736563726574313233")));
     }
 
     #[tokio::test]

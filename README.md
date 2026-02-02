@@ -1,10 +1,41 @@
 # Moltis
 
 [![CI](https://github.com/penso/moltis/actions/workflows/ci.yml/badge.svg)](https://github.com/penso/moltis/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/moltis.svg)](https://crates.io/crates/moltis)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org)
 
-A personal AI gateway written in Rust. Moltis provides a unified interface to
-multiple LLM providers and communication channels, inspired by
-[OpenClaw](https://docs.openclaw.ai).
+A personal AI gateway written in Rust, inspired by
+[OpenClaw](https://docs.openclaw.ai). One binary, no runtime, no npm — just
+build it and run it.
+
+Moltis compiles your entire AI gateway — web UI, LLM providers, tools, and
+all assets — into a single self-contained executable. There is no Node.js
+process to babysit, no `node_modules` to keep in sync, no V8 garbage collector
+introducing latency spikes mid-conversation. Tokio's async runtime handles
+thousands of concurrent WebSocket connections with a fraction of the memory
+footprint, and Rust's ownership model means secrets wrapped in
+`secrecy::Secret` are zeroed on drop — not "eventually collected."
+
+What you get out of the box:
+
+- **Single binary deployment** — `cargo build --release` produces one file
+  that embeds the web UI, serves HTTP, speaks WebSocket, and connects to
+  Telegram. Copy it anywhere and run it.
+- **Native Apple Container support** — Sandbox commands in Docker *or* macOS
+  Containers (macOS 15+), with automatic backend selection. No other open-source
+  AI gateway does this.
+- **Compile-time safety** — Every LLM provider, tool, hook, and channel is
+  wired through traits. Misconfigurations that would be a runtime crash in
+  TypeScript are caught by `cargo check`.
+- **Streaming-first** — Token streaming is not bolted on; it is the primary
+  path. Responses start appearing the moment the first token arrives.
+- **Lock-free hook circuit breaker** — Hooks that fail repeatedly are
+  auto-disabled using atomic counters, not mutexes. They re-enable themselves
+  after a cooldown — no manual intervention.
+- **Auto-compaction** — When a conversation approaches 95 % of the model's
+  context window, history is summarized and important facts are persisted to
+  the memory store. No manual truncation.
 
 ## Features
 
@@ -43,6 +74,156 @@ multiple LLM providers and communication channels, inspired by
   defaults so you can edit packages and settings without recompiling
 - **Configurable directories** — `--config-dir` / `--data-dir` CLI flags and
   `MOLTIS_CONFIG_DIR` / `MOLTIS_DATA_DIR` environment variables
+
+## Quickstart
+
+```bash
+# Clone and build
+git clone https://github.com/penso/moltis.git
+cd moltis
+cargo build --release
+
+# Start the gateway
+cargo run --release -- gateway
+```
+
+On first launch, a one-time setup code is printed to the terminal. Open
+`http://localhost:3000` in your browser, enter the code, and set a password or
+register a passkey. From there you can configure LLM providers and start
+chatting.
+
+## How It Works
+
+Moltis is a **local-first AI gateway** — a single Rust binary that sits
+between you and multiple LLM providers. Everything runs on your machine; no
+cloud relay required.
+
+```
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│   Web UI    │  │  Telegram   │  │  Discord    │
+└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
+       │                │                │
+       └────────┬───────┴────────┬───────┘
+                │   WebSocket    │
+                ▼                ▼
+        ┌─────────────────────────────────┐
+        │          Gateway Server         │
+        │   (Axum · HTTP · WS · Auth)     │
+        ├─────────────────────────────────┤
+        │        Chat Service             │
+        │  ┌───────────┐ ┌─────────────┐  │
+        │  │   Agent   │ │    Tool     │  │
+        │  │   Runner  │◄┤   Registry  │  │
+        │  └─────┬─────┘ └─────────────┘  │
+        │        │                        │
+        │  ┌─────▼─────────────────────┐  │
+        │  │    Provider Registry      │  │
+        │  │  Anthropic · OpenAI ·     │  │
+        │  │  Mistral · Copilot · …    │  │
+        │  └───────────────────────────┘  │
+        ├─────────────────────────────────┤
+        │  Sessions  │ Memory  │  Hooks   │
+        │  (JSONL)   │ (SQLite)│ (events) │
+        └─────────────────────────────────┘
+                       │
+               ┌───────▼───────┐
+               │    Sandbox    │
+               │ Docker/Apple  │
+               │  Container    │
+               └───────────────┘
+```
+
+### Gateway startup
+
+When `moltis gateway` runs, it loads `moltis.toml`, initializes the credential
+store (passwords, passkeys, API keys), registers LLM providers and tools,
+discovers hooks and skills, optionally starts the memory manager, and
+pre-builds a sandbox image if configured. An Axum HTTP server then listens for
+WebSocket and REST connections.
+
+### Message flow
+
+1. **Connect** — A client (web UI, Telegram bot, API key bearer) opens a
+   WebSocket. The server validates auth and Origin headers, then assigns a
+   connection ID.
+2. **Send** — The client calls the `chat.send` RPC method with message text
+   and an optional model override. The gateway resolves the session, persists
+   the user message to a JSONL file, loads conversation history, and builds a
+   system prompt (agent identity, project context, discovered skills).
+3. **Agent loop** — If the chosen provider supports tool calling, an agent
+   loop runs (up to 25 iterations). Each iteration calls the LLM, inspects the
+   response for tool calls, fires `BeforeToolCall` / `AfterToolCall` hooks,
+   executes tools inside the sandbox, appends results, and loops until the LLM
+   produces a final text answer. If tools are not available, the provider
+   streams tokens directly.
+4. **Broadcast** — Every step (thinking, tool start/end, text deltas, final
+   response) is broadcast over the WebSocket as sequenced events. The web UI
+   renders them in real time.
+5. **Channel replies** — If the message originated from Telegram or another
+   channel, the final response is delivered back through that channel's
+   outbound interface.
+
+### Sessions and memory
+
+Conversations are stored as append-only JSONL files under
+`~/.moltis/agents/<agent>/sessions/`. A SQLite database tracks metadata
+(message counts, model selection, project bindings, channel bindings).
+When token usage approaches 95% of the context window, the session is
+auto-compacted: history is summarized and important facts are persisted to the
+memory store.
+
+The optional memory manager watches `memory/` directories for Markdown files,
+chunks them by heading, embeds the chunks, and stores vectors in SQLite for
+hybrid (vector + full-text) search. Memory context is injected into the system
+prompt automatically.
+
+### Hooks
+
+Lifecycle hooks let you observe, modify, or block actions at key points.
+Modifying events (`BeforeToolCall`, `BeforeCompaction`, `MessageSending`) run
+sequentially — a hook can rewrite arguments or block execution. Read-only
+events (`AfterToolCall`, `SessionEnd`, `GatewayStart`, …) run in parallel.
+Hooks are discovered from `HOOK.md` files and include a circuit breaker that
+auto-disables after repeated failures.
+
+### Security model
+
+Moltis applies defense in depth across several layers:
+
+- **Authentication** — On first run a one-time setup code is printed to the
+  terminal. The user enters it to set a password or register a WebAuthn
+  passkey. Subsequent requests are authenticated via session cookies or API key
+  bearer tokens. Connections from loopback addresses (localhost, 127.0.0.1,
+  ::1) are allowed without credentials as a safe default for local use.
+- **WebSocket Origin validation** — The WebSocket upgrade handler rejects
+  cross-origin requests to prevent Cross-Site WebSocket Hijacking (CSWSH). A
+  malicious webpage cannot connect to your local gateway from the browser.
+- **SSRF protection** — The `web_fetch` tool resolves DNS before making HTTP
+  requests and blocks any target IP in loopback, private, link-local, or CGNAT
+  ranges. This prevents the LLM from reaching internal services.
+- **Secret handling** — Passwords, API keys, and tokens are stored as
+  `secrecy::Secret<String>`, which redacts `Debug` output, prevents accidental
+  `Display`, and zeroes memory on drop. Environment variable values injected
+  into sandbox sessions are redacted from command output (including base64 and
+  hex encoded forms).
+- **Hook gating** — `BeforeToolCall` hooks can inspect, modify, or block any
+  tool invocation before it executes, giving you a programmable policy layer
+  over what the agent is allowed to do.
+
+### Sandboxed execution
+
+User commands never run directly on the host. They execute inside isolated
+containers using either Docker or Apple Container as the backend.
+
+At startup the gateway builds a deterministic image from the configured base
+image (`ubuntu:25.10` by default) and the package list in `moltis.toml`. The
+image tag is a hash of the base image + sorted packages — if you add or remove
+a package, the tag changes and a rebuild is triggered automatically.
+
+Each command invocation gets a per-session container. Environment variables
+configured for the agent are injected into the container, but their values are
+redacted from any output the LLM sees (plain text, base64, and hex forms) to
+prevent leaking secrets through tool results.
 
 ## Getting Started
 
@@ -199,6 +380,10 @@ Moltis is organized as a Cargo workspace with the following crates:
 | `moltis-oauth` | OAuth2 flows |
 | `moltis-protocol` | Serializable protocol definitions |
 | `moltis-common` | Shared utilities |
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=penso/moltis&type=Date)](https://star-history.com/#penso/moltis&Date)
 
 ## License
 

@@ -919,15 +919,22 @@ impl Sandbox for AppleContainerSandbox {
 
         let mut args = vec!["exec".to_string(), name.clone()];
 
-        if let Some(ref dir) = opts.working_dir {
-            args.extend([
-                "sh".to_string(),
-                "-c".to_string(),
-                format!("cd {} && {}", dir.display(), command),
-            ]);
-        } else {
-            args.extend(["sh".to_string(), "-c".to_string(), command.to_string()]);
+        // Apple Container CLI doesn't support -e flags, so prepend export
+        // statements to inject env vars into the shell.
+        let mut prefix = String::new();
+        for (k, v) in &opts.env {
+            // Shell-escape the value with single quotes.
+            let escaped = v.replace('\'', "'\\''");
+            prefix.push_str(&format!("export {k}='{escaped}'; "));
         }
+
+        let full_command = if let Some(ref dir) = opts.working_dir {
+            format!("{prefix}cd {} && {command}", dir.display())
+        } else {
+            format!("{prefix}{command}")
+        };
+
+        args.extend(["sh".to_string(), "-c".to_string(), full_command]);
 
         let child = tokio::process::Command::new("container")
             .args(&args)

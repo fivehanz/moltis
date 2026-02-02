@@ -44,6 +44,11 @@ var sections = [
 		icon: html`<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z"/></svg>`,
 	},
 	{
+		id: "environment",
+		label: "Environment",
+		icon: html`<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="m6.75 7.5 3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z"/></svg>`,
+	},
+	{
 		id: "security",
 		label: "Security",
 		icon: html`<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"/></svg>`,
@@ -359,6 +364,177 @@ function IdentitySection() {
 				${error ? html`<span class="settings-error">${error}</span>` : null}
 			</div>
 		</form>
+	</div>`;
+}
+
+// ── Environment section ──────────────────────────────────────
+
+function EnvironmentSection() {
+	var [envVars, setEnvVars] = useState([]);
+	var [envLoading, setEnvLoading] = useState(true);
+	var [newKey, setNewKey] = useState("");
+	var [newValue, setNewValue] = useState("");
+	var [envMsg, setEnvMsg] = useState(null);
+	var [envErr, setEnvErr] = useState(null);
+	var [saving, setSaving] = useState(false);
+	var [updateId, setUpdateId] = useState(null);
+	var [updateValue, setUpdateValue] = useState("");
+
+	function fetchEnvVars() {
+		fetch("/api/env")
+			.then((r) => (r.ok ? r.json() : { env_vars: [] }))
+			.then((d) => {
+				setEnvVars(d.env_vars || []);
+				setEnvLoading(false);
+				rerender();
+			})
+			.catch(() => {
+				setEnvLoading(false);
+				rerender();
+			});
+	}
+
+	useEffect(() => {
+		fetchEnvVars();
+	}, []);
+
+	function onAdd(e) {
+		e.preventDefault();
+		setEnvErr(null);
+		setEnvMsg(null);
+		var key = newKey.trim();
+		if (!key) {
+			setEnvErr("Key is required.");
+			rerender();
+			return;
+		}
+		if (!/^[A-Za-z0-9_]+$/.test(key)) {
+			setEnvErr("Key must contain only letters, digits, and underscores.");
+			rerender();
+			return;
+		}
+		setSaving(true);
+		rerender();
+		fetch("/api/env", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ key, value: newValue }),
+		})
+			.then((r) => {
+				if (r.ok) {
+					setNewKey("");
+					setNewValue("");
+					setEnvMsg("Variable saved.");
+					setTimeout(() => {
+						setEnvMsg(null);
+						rerender();
+					}, 2000);
+					fetchEnvVars();
+				} else {
+					return r.json().then((d) => setEnvErr(d.error || "Failed to save"));
+				}
+				setSaving(false);
+				rerender();
+			})
+			.catch((err) => {
+				setEnvErr(err.message);
+				setSaving(false);
+				rerender();
+			});
+	}
+
+	function onDelete(id) {
+		fetch(`/api/env/${id}`, { method: "DELETE" }).then(() => fetchEnvVars());
+	}
+
+	function onStartUpdate(id) {
+		setUpdateId(id);
+		setUpdateValue("");
+		rerender();
+	}
+
+	function onCancelUpdate() {
+		setUpdateId(null);
+		setUpdateValue("");
+		rerender();
+	}
+
+	function onConfirmUpdate(key) {
+		fetch("/api/env", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ key, value: updateValue }),
+		}).then((r) => {
+			if (r.ok) {
+				setUpdateId(null);
+				setUpdateValue("");
+				fetchEnvVars();
+			}
+		});
+	}
+
+	return html`<div class="settings-content">
+		<h2 class="settings-title">Environment Variables</h2>
+		<p class="settings-hint">Environment variables are injected into sandbox command execution. Values are write-only and never displayed.</p>
+
+		${
+			envLoading
+				? html`<p class="settings-hint">Loading...</p>`
+				: html`
+			<div class="settings-section">
+				${
+					envVars.length > 0
+						? html`<div class="security-list">
+					${envVars.map(
+						(v) => html`<div class="security-list-item" key=${v.id}>
+						${
+							updateId === v.id
+								? html`<form style="display:flex;align-items:center;gap:6px;flex:1" onSubmit=${(e) => {
+										e.preventDefault();
+										onConfirmUpdate(v.key);
+									}}>
+									<code style="font-size:0.85rem">${v.key}</code>
+									<input type="password" class="settings-input" value=${updateValue}
+										onInput=${(e) => setUpdateValue(e.target.value)}
+										placeholder="New value" style="flex:1" autofocus />
+									<button type="submit" class="settings-btn">Save</button>
+									<button type="button" class="settings-btn" onClick=${onCancelUpdate}>Cancel</button>
+								</form>`
+								: html`<div>
+									<code style="font-size:0.85rem">${v.key}</code>
+									<span style="margin-left:0.5rem;color:var(--muted);font-size:0.78rem">\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022</span>
+									<span style="color:var(--muted);font-size:0.78rem"> - <time datetime="${v.updated_at}">${v.updated_at}</time></span>
+								</div>
+								<div style="display:flex;gap:4px">
+									<button class="settings-btn" onClick=${() => onStartUpdate(v.id)}>Update</button>
+									<button class="settings-btn settings-btn-danger" onClick=${() => onDelete(v.id)}>Delete</button>
+								</div>`
+						}
+					</div>`,
+					)}
+				</div>`
+						: html`<p class="settings-hint">No environment variables set.</p>`
+				}
+
+				<form onSubmit=${onAdd} style="margin-top:1rem">
+					<h3 class="settings-section-title">Add Variable</h3>
+					<div class="security-add-row" style="flex-wrap:wrap">
+						<input type="text" class="settings-input" value=${newKey}
+							onInput=${(e) => setNewKey(e.target.value)}
+							placeholder="KEY_NAME" style="flex:1;min-width:120px" />
+						<input type="password" class="settings-input" value=${newValue}
+							onInput=${(e) => setNewValue(e.target.value)}
+							placeholder="Value" style="flex:2;min-width:200px" />
+						<button type="submit" class="settings-btn" disabled=${saving || !newKey.trim()}>
+							${saving ? "Saving\u2026" : "Add"}
+						</button>
+					</div>
+					${envMsg ? html`<span class="settings-saved" style="display:block;margin-top:0.5rem">${envMsg}</span>` : null}
+					${envErr ? html`<span class="settings-error" style="display:block;margin-top:0.5rem">${envErr}</span>` : null}
+				</form>
+			</div>
+		`
+		}
 	</div>`;
 }
 
@@ -845,6 +1021,7 @@ function SettingsPage() {
 	return html`<div class="settings-layout">
 		<${SettingsSidebar} />
 		${section === "identity" ? html`<${IdentitySection} />` : null}
+		${section === "environment" ? html`<${EnvironmentSection} />` : null}
 		${section === "security" ? html`<${SecuritySection} />` : null}
 	</div>`;
 }

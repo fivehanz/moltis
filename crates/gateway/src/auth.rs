@@ -47,6 +47,15 @@ pub struct ApiKeyEntry {
     pub created_at: String,
 }
 
+/// An environment variable entry (for listing in the UI — never exposes the value).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvVarEntry {
+    pub id: i64,
+    pub key: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // ── Credential store ─────────────────────────────────────────────────────────
 
 /// Single-user credential store backed by SQLite.
@@ -135,6 +144,18 @@ impl CredentialStore {
                 token TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 expires_at TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS env_variables (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL UNIQUE,
+                value TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )",
         )
         .execute(&self.pool)
@@ -320,6 +341,57 @@ impl CredentialStore {
         Ok(row.is_some())
     }
 
+    // ── Environment Variables ─────────────────────────────────────────────
+
+    /// List all environment variables (names only, no values).
+    pub async fn list_env_vars(&self) -> anyhow::Result<Vec<EnvVarEntry>> {
+        let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT id, key, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), strftime('%Y-%m-%dT%H:%M:%SZ', updated_at) FROM env_variables ORDER BY key ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, key, created_at, updated_at)| EnvVarEntry {
+                id,
+                key,
+                created_at,
+                updated_at,
+            })
+            .collect())
+    }
+
+    /// Set (upsert) an environment variable.
+    pub async fn set_env_var(&self, key: &str, value: &str) -> anyhow::Result<i64> {
+        let result = sqlx::query(
+            "INSERT INTO env_variables (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_rowid())
+    }
+
+    /// Delete an environment variable by id.
+    pub async fn delete_env_var(&self, id: i64) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM env_variables WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Get all environment variable key-value pairs (internal use for sandbox injection).
+    pub async fn get_all_env_values(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, value FROM env_variables ORDER BY key ASC")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows)
+    }
+
     // ── Reset (remove all auth) ─────────────────────────────────────────
 
     /// Remove all authentication data: password, sessions, passkeys, API keys.
@@ -413,6 +485,20 @@ impl CredentialStore {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.is_some())
+    }
+}
+
+// ── EnvVarProvider impl ─────────────────────────────────────────────────────
+
+#[async_trait::async_trait]
+impl moltis_tools::exec::EnvVarProvider for CredentialStore {
+    async fn get_env_vars(&self) -> Vec<(String, secrecy::Secret<String>)> {
+        self.get_all_env_values()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, secrecy::Secret::new(v)))
+            .collect()
     }
 }
 
@@ -730,6 +816,47 @@ mod tests {
         let store3 = CredentialStore::new(pool).await.unwrap();
         assert!(!store3.is_auth_disabled());
         assert!(store3.is_setup_complete());
+    }
+
+    #[tokio::test]
+    async fn test_credential_store_env_vars() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let store = CredentialStore::new(pool).await.unwrap();
+
+        // Empty initially.
+        let vars = store.list_env_vars().await.unwrap();
+        assert!(vars.is_empty());
+
+        // Set a variable.
+        let id = store.set_env_var("MY_KEY", "secret123").await.unwrap();
+        assert!(id > 0);
+
+        let vars = store.list_env_vars().await.unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].key, "MY_KEY");
+
+        // Values returned by get_all_env_values.
+        let values = store.get_all_env_values().await.unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], ("MY_KEY".into(), "secret123".into()));
+
+        // Upsert overwrites.
+        store.set_env_var("MY_KEY", "updated").await.unwrap();
+        let values = store.get_all_env_values().await.unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].1, "updated");
+
+        // Add a second variable.
+        store.set_env_var("OTHER", "val").await.unwrap();
+        let vars = store.list_env_vars().await.unwrap();
+        assert_eq!(vars.len(), 2);
+
+        // Delete by id.
+        let first_id = vars.iter().find(|v| v.key == "MY_KEY").unwrap().id;
+        store.delete_env_var(first_id).await.unwrap();
+        let vars = store.list_env_vars().await.unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].key, "OTHER");
     }
 
     #[tokio::test]

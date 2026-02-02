@@ -25,7 +25,7 @@ use {moltis_channels::ChannelPlugin, moltis_protocol::TICK_INTERVAL_MS};
 
 use moltis_agents::providers::ProviderRegistry;
 
-use moltis_tools::{approval::ApprovalManager, image_cache::ImageBuilder};
+use moltis_tools::{approval::ApprovalManager, exec::EnvVarProvider, image_cache::ImageBuilder};
 
 use {
     moltis_projects::ProjectStore,
@@ -115,6 +115,14 @@ pub fn build_gateway_app(state: Arc<GatewayState>, methods: Arc<MethodRegistry>)
             .route(
                 "/api/images/default",
                 get(api_get_default_image_handler).put(api_set_default_image_handler),
+            )
+            .route(
+                "/api/env",
+                get(crate::env_routes::env_list).post(crate::env_routes::env_set),
+            )
+            .route(
+                "/api/env/{id}",
+                axum::routing::delete(crate::env_routes::env_delete),
             )
             .layer(axum::middleware::from_fn_with_state(
                 app_state.clone(),
@@ -935,9 +943,11 @@ pub async fn start_gateway(
     // Wire live chat service (needs state reference, so done after state creation).
     if !registry.read().await.is_empty() {
         let broadcaster = Arc::new(GatewayApprovalBroadcaster::new(Arc::clone(&state)));
+        let env_provider: Arc<dyn EnvVarProvider> = credential_store.clone();
         let exec_tool = moltis_tools::exec::ExecTool::default()
             .with_approval(Arc::clone(&approval_manager), broadcaster)
-            .with_sandbox_router(Arc::clone(&sandbox_router));
+            .with_sandbox_router(Arc::clone(&sandbox_router))
+            .with_env_provider(env_provider);
 
         let cron_tool = moltis_tools::cron_tool::CronTool::new(Arc::clone(&cron_service));
 
