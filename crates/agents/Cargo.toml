@@ -5,6 +5,9 @@ version.workspace = true
 
 [features]
 default                 = ["provider-async-openai", "provider-genai"]
+local-llm               = ["dep:directories", "dep:llama-cpp-2", "dep:sysinfo"]
+local-llm-cuda          = ["llama-cpp-2/cuda", "local-llm"]
+local-llm-metal         = ["llama-cpp-2/metal", "local-llm"]
 provider-async-openai   = ["dep:async-openai"]
 provider-genai          = ["dep:genai"]
 provider-github-copilot = ["dep:moltis-oauth"]
@@ -33,8 +36,11 @@ uuid            = { workspace = true }
 # Optional LLM provider crates
 async-openai = { optional = true, workspace = true }
 base64       = { optional = true, workspace = true }
+directories  = { optional = true, workspace = true }
 genai        = { optional = true, workspace = true }
+llama-cpp-2  = { optional = true, version = "0.1" }
 moltis-oauth = { optional = true, workspace = true }
+sysinfo      = { optional = true, version = "0.34" }
 
 [dev-dependencies]
 axum     = { workspace = true }

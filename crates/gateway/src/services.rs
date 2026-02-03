@@ -1301,6 +1301,42 @@ pub trait ProviderSetupService: Send + Sync {
     async fn remove_key(&self, params: Value) -> ServiceResult;
 }
 
+// ── Local LLM ───────────────────────────────────────────────────────────────
+
+/// Service for managing local GGUF LLM provider.
+#[async_trait]
+pub trait LocalLlmService: Send + Sync {
+    /// Get system info (RAM, GPU, memory tier).
+    async fn system_info(&self) -> ServiceResult;
+    /// Get available models with recommendations based on memory tier.
+    async fn models(&self) -> ServiceResult;
+    /// Configure and load a model by ID.
+    async fn configure(&self, params: Value) -> ServiceResult;
+    /// Get current provider status (loading/loaded/error).
+    async fn status(&self) -> ServiceResult;
+}
+
+pub struct NoopLocalLlmService;
+
+#[async_trait]
+impl LocalLlmService for NoopLocalLlmService {
+    async fn system_info(&self) -> ServiceResult {
+        Err("local-llm feature not enabled".into())
+    }
+
+    async fn models(&self) -> ServiceResult {
+        Err("local-llm feature not enabled".into())
+    }
+
+    async fn configure(&self, _params: Value) -> ServiceResult {
+        Err("local-llm feature not enabled".into())
+    }
+
+    async fn status(&self) -> ServiceResult {
+        Ok(serde_json::json!({ "status": "unavailable" }))
+    }
+}
+
 pub struct NoopProviderSetupService;
 
 #[async_trait]
@@ -1397,6 +1433,7 @@ pub struct GatewayServices {
     pub logs: Arc<dyn LogsService>,
     pub provider_setup: Arc<dyn ProviderSetupService>,
     pub project: Arc<dyn ProjectService>,
+    pub local_llm: Arc<dyn LocalLlmService>,
     /// Optional channel outbound for sending replies back to channels.
     channel_outbound: Option<Arc<dyn ChannelOutbound>>,
     /// Optional session metadata for cross-service access (e.g. channel binding).
@@ -1459,10 +1496,16 @@ impl GatewayServices {
             logs: Arc::new(NoopLogsService),
             provider_setup: Arc::new(NoopProviderSetupService),
             project: Arc::new(NoopProjectService),
+            local_llm: Arc::new(NoopLocalLlmService),
             channel_outbound: None,
             session_metadata: None,
             session_store: None,
         }
+    }
+
+    pub fn with_local_llm(mut self, local_llm: Arc<dyn LocalLlmService>) -> Self {
+        self.local_llm = local_llm;
+        self
     }
 
     pub fn with_onboarding(mut self, onboarding: Arc<dyn OnboardingService>) -> Self {

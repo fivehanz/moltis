@@ -17,7 +17,7 @@ use {
     moltis_agents::{
         AgentRunError,
         model::StreamEvent,
-        prompt::build_system_prompt_with_session,
+        prompt::{build_system_prompt_minimal, build_system_prompt_with_session},
         providers::ProviderRegistry,
         runner::{RunnerEvent, run_agent_loop_with_context},
         tool_registry::ToolRegistry,
@@ -443,6 +443,7 @@ impl ChatService for LiveChatService {
         let hook_registry = self.hook_registry.clone();
 
         // Warn if tool mode is active but the provider doesn't support tools.
+        // Notify the user so they understand why some features are unavailable.
         if !stream_only && !provider.supports_tools() {
             warn!(
                 provider = provider.name(),
@@ -450,6 +451,26 @@ impl ChatService for LiveChatService {
                 "selected provider does not support tool calling; \
                  LLM will not be able to use tools"
             );
+            // Broadcast notice to the user
+            broadcast(
+                &self.state,
+                "chat",
+                serde_json::json!({
+                    "runId": run_id,
+                    "sessionKey": session_key,
+                    "state": "notice",
+                    "type": "tools_disabled",
+                    "title": "Tools unavailable",
+                    "message": format!(
+                        "The {} model doesn't support tool calling. \
+                         Features like file operations, shell commands, and memory search are disabled. \
+                         The assistant will respond in chat-only mode.",
+                        provider.id()
+                    ),
+                }),
+                BroadcastOpts::default(),
+            )
+            .await;
         }
 
         info!(
@@ -1153,13 +1174,21 @@ impl ChatService for LiveChatService {
         // Session info
         let message_count = self.session_store.count(&session_key).await.unwrap_or(0);
         let session_entry = self.session_metadata.get(&session_key).await;
-        let provider_name = {
+        let (provider_name, supports_tools) = {
             let reg = self.providers.read().await;
             let session_model = session_entry.as_ref().and_then(|e| e.model.as_deref());
             if let Some(id) = session_model {
-                reg.get(id).map(|p| p.name().to_string())
+                let p = reg.get(id);
+                (
+                    p.as_ref().map(|p| p.name().to_string()),
+                    p.as_ref().map(|p| p.supports_tools()).unwrap_or(true),
+                )
             } else {
-                reg.first().map(|p| p.name().to_string())
+                let p = reg.first();
+                (
+                    p.as_ref().map(|p| p.name().to_string()),
+                    p.as_ref().map(|p| p.supports_tools()).unwrap_or(true),
+                )
             }
         };
         let session_info = serde_json::json!({
@@ -1226,17 +1255,21 @@ impl ChatService for LiveChatService {
             serde_json::json!(null)
         };
 
-        // Tools
-        let tool_schemas = self.tool_registry.read().await.list_schemas();
-        let tools: Vec<serde_json::Value> = tool_schemas
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "name": s.get("name").and_then(|v| v.as_str()).unwrap_or("unknown"),
-                    "description": s.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+        // Tools (only include if the provider supports tool calling)
+        let tools: Vec<serde_json::Value> = if supports_tools {
+            let tool_schemas = self.tool_registry.read().await.list_schemas();
+            tool_schemas
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.get("name").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                        "description": s.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                    })
                 })
-            })
-            .collect();
+                .collect()
+        } else {
+            vec![]
+        };
 
         // Token usage from actual API-reported counts stored in messages.
         let messages = self
@@ -1301,32 +1334,39 @@ impl ChatService for LiveChatService {
             })
         };
 
-        // Discover enabled skills/plugins
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths(&cwd);
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let skills_list: Vec<_> = match discoverer.discover().await {
-            Ok(s) => s
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "name": s.name,
-                        "description": s.description,
-                        "source": s.source,
+        // Discover enabled skills/plugins (only if provider supports tools)
+        let skills_list: Vec<serde_json::Value> = if supports_tools {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths(&cwd);
+            let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
+            match discoverer.discover().await {
+                Ok(s) => s
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "name": s.name,
+                            "description": s.description,
+                            "source": s.source,
+                        })
                     })
-                })
-                .collect(),
-            Err(_) => vec![],
+                    .collect(),
+                Err(_) => vec![],
+            }
+        } else {
+            vec![]
         };
 
-        // MCP servers
-        let mcp_servers = self
-            .state
-            .services
-            .mcp
-            .list()
-            .await
-            .unwrap_or(serde_json::json!([]));
+        // MCP servers (only if provider supports tools)
+        let mcp_servers = if supports_tools {
+            self.state
+                .services
+                .mcp
+                .list()
+                .await
+                .unwrap_or(serde_json::json!([]))
+        } else {
+            serde_json::json!([])
+        };
 
         Ok(serde_json::json!({
             "session": session_info,
@@ -1335,6 +1375,7 @@ impl ChatService for LiveChatService {
             "skills": skills_list,
             "mcpServers": mcp_servers,
             "sandbox": sandbox_info,
+            "supportsTools": supports_tools,
             "tokenUsage": {
                 "inputTokens": total_input,
                 "outputTokens": total_output,
@@ -1368,17 +1409,31 @@ async fn run_with_tools(
     let config = moltis_config::discover_and_load();
 
     let native_tools = provider.supports_tools();
-    let registry_guard = tool_registry.read().await;
-    let system_prompt = build_system_prompt_with_session(
-        &registry_guard,
-        native_tools,
-        project_context,
-        session_context,
-        skills,
-        Some(&config.identity),
-        Some(&config.user),
-    );
-    drop(registry_guard);
+
+    // Use a minimal prompt without tool schemas for providers that don't support tools.
+    // This reduces context size and avoids confusing the LLM with unusable instructions.
+    let system_prompt = if native_tools {
+        let registry_guard = tool_registry.read().await;
+        let prompt = build_system_prompt_with_session(
+            &registry_guard,
+            native_tools,
+            project_context,
+            session_context,
+            skills,
+            Some(&config.identity),
+            Some(&config.user),
+        );
+        drop(registry_guard);
+        prompt
+    } else {
+        // Minimal prompt without tools for local LLMs
+        build_system_prompt_minimal(
+            project_context,
+            session_context,
+            Some(&config.identity),
+            Some(&config.user),
+        )
+    };
 
     // Broadcast tool events to the UI as they happen.
     let state_for_events = Arc::clone(state);
