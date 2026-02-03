@@ -366,13 +366,13 @@ fn known_providers() -> Vec<KnownProvider> {
         },
     ];
 
-    // Add local-gguf provider when the local-llm feature is enabled
+    // Add local-llm provider when the local-llm feature is enabled
     #[cfg(feature = "local-llm")]
     let providers = {
         let mut p = providers;
         p.push(KnownProvider {
-            name: "local-gguf",
-            display_name: "Local GGUF (Offline)",
+            name: "local-llm",
+            display_name: "Local LLM (Offline)",
             auth_type: "local",
             env_key: None,
             default_base_url: None,
@@ -427,7 +427,7 @@ impl LiveProviderSetupService {
         }
         // For local providers, check if model is configured in local_llm config
         #[cfg(feature = "local-llm")]
-        if provider.auth_type == "local" && provider.name == "local-gguf" {
+        if provider.auth_type == "local" && provider.name == "local-llm" {
             // Check if local-llm model config file exists
             if let Some(config_dir) = moltis_config::config_dir() {
                 let config_path = config_dir.join("local-llm.json");
@@ -673,7 +673,7 @@ impl ProviderSetupService for LiveProviderSetupService {
         // Remove local-llm config
         #[cfg(feature = "local-llm")]
         if known.auth_type == "local"
-            && provider_name == "local-gguf"
+            && provider_name == "local-llm"
             && let Some(config_dir) = moltis_config::config_dir()
         {
             let config_path = config_dir.join("local-llm.json");
