@@ -694,7 +694,7 @@ async fn search_huggingface(
                 "displayName": m.id.split('/').next_back().unwrap_or(&m.id),
                 "downloads": m.downloads,
                 "likes": m.likes,
-                "lastModified": m.last_modified,
+                "createdAt": m.created_at,
                 "tags": m.tags,
                 "backend": backend,
             })
@@ -706,10 +706,9 @@ async fn search_huggingface(
 
 /// HuggingFace model info from API response.
 #[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct HfModelInfo {
     /// Model ID (e.g., "TheBloke/Llama-2-7B-GGUF")
-    #[serde(rename = "modelId", alias = "id")]
+    /// The API returns both "id" and "modelId" fields with the same value.
     id: String,
     /// Number of downloads
     #[serde(default)]
@@ -717,9 +716,9 @@ struct HfModelInfo {
     /// Number of likes
     #[serde(default)]
     likes: u64,
-    /// Last modified timestamp
-    #[serde(default)]
-    last_modified: Option<String>,
+    /// Created timestamp
+    #[serde(default, rename = "createdAt")]
+    created_at: Option<String>,
     /// Model tags
     #[serde(default)]
     tags: Vec<String>,
@@ -756,45 +755,47 @@ mod tests {
 
     #[test]
     fn test_hf_model_info_parsing() {
-        // Test parsing with all fields
+        // Test parsing with all fields (matching actual HF API response)
         let json = r#"{
-            "modelId": "TheBloke/Llama-2-7B-GGUF",
+            "id": "TheBloke/Llama-2-7B-GGUF",
             "downloads": 1234567,
             "likes": 100,
-            "lastModified": "2024-01-15T10:30:00Z",
+            "createdAt": "2024-01-15T10:30:00Z",
             "tags": ["gguf", "llama"]
         }"#;
         let info: HfModelInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.id, "TheBloke/Llama-2-7B-GGUF");
         assert_eq!(info.downloads, 1234567);
         assert_eq!(info.likes, 100);
-        assert!(info.last_modified.is_some());
+        assert!(info.created_at.is_some());
         assert_eq!(info.tags.len(), 2);
     }
 
     #[test]
-    fn test_hf_model_info_parsing_with_id_alias() {
-        // Test parsing with "id" instead of "modelId"
+    fn test_hf_model_info_parsing_mlx_community() {
+        // Test parsing MLX community model response
         let json = r#"{
             "id": "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit",
-            "downloads": 500
+            "downloads": 500,
+            "likes": 10,
+            "tags": ["mlx", "safetensors"]
         }"#;
         let info: HfModelInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.id, "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit");
         assert_eq!(info.downloads, 500);
-        assert_eq!(info.likes, 0); // default
-        assert!(info.tags.is_empty()); // default
+        assert_eq!(info.likes, 10);
+        assert_eq!(info.tags.len(), 2);
     }
 
     #[test]
     fn test_hf_model_info_parsing_minimal() {
         // Test parsing with minimal fields
-        let json = r#"{"modelId": "test/model"}"#;
+        let json = r#"{"id": "test/model"}"#;
         let info: HfModelInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.id, "test/model");
         assert_eq!(info.downloads, 0);
         assert_eq!(info.likes, 0);
-        assert!(info.last_modified.is_none());
+        assert!(info.created_at.is_none());
         assert!(info.tags.is_empty());
     }
 
