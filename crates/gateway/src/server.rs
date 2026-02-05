@@ -2044,6 +2044,42 @@ struct GonData {
     cron_status: moltis_cron::types::CronStatus,
     heartbeat_config: moltis_config::schema::HeartbeatConfig,
     heartbeat_runs: Vec<moltis_cron::types::CronRunRecord>,
+    /// Non-main git branch name, if running from a git checkout on a
+    /// non-default branch. `None` when on `main`/`master` or outside a repo.
+    git_branch: Option<String>,
+}
+
+/// Detect the current git branch, returning `None` for `main`/`master` or
+/// when not inside a git repository. The result is cached in a `OnceLock` so
+/// the `git` subprocess runs at most once per process.
+#[cfg(feature = "web-ui")]
+fn detect_git_branch() -> Option<String> {
+    static BRANCH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    BRANCH
+        .get_or_init(|| {
+            let output = std::process::Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let raw = String::from_utf8(output.stdout).ok()?;
+            parse_git_branch(&raw)
+        })
+        .clone()
+}
+
+/// Parse the raw output of `git rev-parse --abbrev-ref HEAD`, returning
+/// `None` for default branches (`main`/`master`) or empty/blank output.
+#[cfg(feature = "web-ui")]
+fn parse_git_branch(raw: &str) -> Option<String> {
+    let branch = raw.trim();
+    if branch.is_empty() || branch == "main" || branch == "master" {
+        None
+    } else {
+        Some(branch.to_owned())
+    }
 }
 
 /// Counts shown as badges in the sidebar navigation.
@@ -2102,6 +2138,7 @@ async fn build_gon_data(gw: &GatewayState) -> GonData {
         cron_status,
         heartbeat_config,
         heartbeat_runs,
+        git_branch: detect_git_branch(),
     }
 }
 
@@ -2884,5 +2921,42 @@ mod tests {
         // One has port, other doesn't — different origins.
         assert!(!is_same_origin("http://localhost:8080", "localhost"));
         assert!(!is_same_origin("http://localhost", "localhost:8080"));
+    }
+
+    #[cfg(feature = "web-ui")]
+    mod git_branch_tests {
+        use super::super::parse_git_branch;
+
+        #[test]
+        fn feature_branch_returned() {
+            assert_eq!(
+                parse_git_branch("top-banner-branch\n"),
+                Some("top-banner-branch".to_owned())
+            );
+        }
+
+        #[test]
+        fn main_returns_none() {
+            assert_eq!(parse_git_branch("main\n"), None);
+        }
+
+        #[test]
+        fn master_returns_none() {
+            assert_eq!(parse_git_branch("master\n"), None);
+        }
+
+        #[test]
+        fn empty_returns_none() {
+            assert_eq!(parse_git_branch(""), None);
+            assert_eq!(parse_git_branch("  \n"), None);
+        }
+
+        #[test]
+        fn trims_whitespace() {
+            assert_eq!(
+                parse_git_branch("  feat/my-feature  \n"),
+                Some("feat/my-feature".to_owned())
+            );
+        }
     }
 }
