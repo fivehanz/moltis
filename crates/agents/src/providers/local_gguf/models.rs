@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use {anyhow::Context, futures::StreamExt, tracing::info};
+use {anyhow::Context, futures::StreamExt, tracing::{debug, info}};
 
 use super::{chat_templates::ChatTemplateHint, system_info::MemoryTier};
 
@@ -387,12 +387,20 @@ where
         return Ok(model_path);
     }
 
+    debug!(cache_dir = %cache_dir.display(), "ensuring cache directory exists");
     tokio::fs::create_dir_all(cache_dir)
         .await
         .context("creating models cache dir")?;
 
     let url = model.hf_url();
-    info!(url = %url, model = model.id, "downloading model");
+    info!(
+        url = %url,
+        model = model.id,
+        backend = %model.backend,
+        "downloading model from HuggingFace"
+    );
+
+    let download_start = std::time::Instant::now();
 
     let response = reqwest::get(&url)
         .await
@@ -403,17 +411,26 @@ where
     let total = response.content_length();
     let mut downloaded: u64 = 0;
 
+    if let Some(size) = total {
+        debug!(
+            total_size_mb = size / (1024 * 1024),
+            "download size known"
+        );
+    }
+
     // Report initial progress
     on_progress(DownloadProgress { downloaded, total });
 
     // Stream the download to a temp file
     let tmp_path = model_path.with_extension("tmp");
+    debug!(tmp_path = %tmp_path.display(), "creating temp file for download");
     let mut file = tokio::fs::File::create(&tmp_path)
         .await
         .context("creating temp file")?;
 
     let mut stream = response.bytes_stream();
     let mut last_report = std::time::Instant::now();
+    let mut last_log = std::time::Instant::now();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("reading chunk")?;
@@ -428,6 +445,19 @@ where
             on_progress(DownloadProgress { downloaded, total });
             last_report = std::time::Instant::now();
         }
+
+        // Log progress every 5 seconds for visibility
+        if last_log.elapsed() >= std::time::Duration::from_secs(5) {
+            let percent = total
+                .map(|t| (downloaded as f64 / t as f64 * 100.0) as u32)
+                .unwrap_or(0);
+            debug!(
+                downloaded_mb = downloaded / (1024 * 1024),
+                percent,
+                "download progress"
+            );
+            last_log = std::time::Instant::now();
+        }
     }
 
     // Final progress report
@@ -439,15 +469,29 @@ where
         .context("flushing file")?;
     drop(file);
 
+    debug!(
+        from = %tmp_path.display(),
+        to = %model_path.display(),
+        "renaming temp file to final location"
+    );
     tokio::fs::rename(&tmp_path, &model_path)
         .await
         .context("renaming model file")?;
 
+    let download_duration = download_start.elapsed();
+    let download_speed_mbps = if download_duration.as_secs_f64() > 0.0 {
+        (downloaded as f64 / (1024.0 * 1024.0)) / download_duration.as_secs_f64()
+    } else {
+        0.0
+    };
+
     info!(
         path = %model_path.display(),
         size_mb = downloaded / (1024 * 1024),
+        duration_secs = download_duration.as_secs_f64(),
+        speed_mbps = format!("{:.1}", download_speed_mbps),
         model = model.id,
-        "model downloaded"
+        "model downloaded successfully"
     );
 
     Ok(model_path)

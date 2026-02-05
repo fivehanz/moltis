@@ -9,7 +9,13 @@ pub mod chat_templates;
 pub mod models;
 pub mod system_info;
 
-use std::{num::NonZeroU32, path::PathBuf, pin::Pin, sync::Arc};
+use std::{
+    num::NonZeroU32,
+    path::PathBuf,
+    pin::Pin,
+    sync::Arc,
+    time::Instant,
+};
 
 use {
     anyhow::{Context, Result, bail},
@@ -26,6 +32,9 @@ use {
     tokio_stream::Stream,
     tracing::{debug, info, warn},
 };
+
+#[cfg(feature = "metrics")]
+use moltis_metrics::{gauge, histogram, labels, llm as llm_metrics};
 
 use crate::model::{CompletionResponse, LlmProvider, StreamEvent, Usage};
 
@@ -115,6 +124,8 @@ impl LocalGgufProvider {
     ///
     /// This will download the model if needed.
     pub async fn from_config(config: LocalGgufConfig) -> Result<Self> {
+        let load_start = Instant::now();
+
         // Resolve model path
         let (model_path, model_def) = if let Some(path) = config.model_path {
             // User provided direct path
@@ -141,6 +152,7 @@ impl LocalGgufProvider {
             .unwrap_or(8192);
 
         // Load the model
+        debug!(model = %config.model_id, "initializing llama backend");
         let backend = LlamaBackend::init().context("initializing llama backend")?;
 
         let mut model_params = LlamaModelParams::default();
@@ -151,15 +163,40 @@ impl LocalGgufProvider {
             info!(gpu_layers = config.gpu_layers, "GPU offloading enabled");
         }
 
+        debug!(
+            path = %model_path.display(),
+            model = %config.model_id,
+            "loading GGUF model file"
+        );
         let model = LlamaModel::load_from_file(&backend, &model_path, &model_params)
             .map_err(|e| anyhow::anyhow!("failed to load GGUF model: {e}"))?;
+
+        let load_duration = load_start.elapsed();
 
         info!(
             path = %model_path.display(),
             model = %config.model_id,
             context_size,
+            load_duration_secs = load_duration.as_secs_f64(),
             "loaded local GGUF model"
         );
+
+        // Record model load metrics
+        #[cfg(feature = "metrics")]
+        {
+            // Use a local-llm specific metric for model loading
+            histogram!(
+                "moltis_local_llm_model_load_duration_seconds",
+                labels::MODEL => config.model_id.clone()
+            )
+            .record(load_duration.as_secs_f64());
+
+            gauge!(
+                "moltis_local_llm_models_loaded",
+                labels::MODEL => config.model_id.clone()
+            )
+            .increment(1.0);
+        }
 
         Ok(Self::new_with_model(
             backend,
@@ -180,6 +217,7 @@ impl LocalGgufProvider {
 
     /// Generate text synchronously (called from blocking context).
     fn generate_sync(&self, prompt: &str, max_tokens: u32) -> Result<(String, u32, u32)> {
+        let generation_start = Instant::now();
         let model = self.model.blocking_lock();
         let backend = &self.backend.0;
 
@@ -207,6 +245,7 @@ impl LocalGgufProvider {
         }
 
         // Process prompt in batches to avoid exceeding n_batch
+        debug!(num_chunks = tokens.len().div_ceil(batch_size), "processing prompt");
         let mut batch = LlamaBatch::new(batch_size, 1);
         for (chunk_idx, chunk) in tokens.chunks(batch_size).enumerate() {
             batch.clear();
@@ -226,6 +265,12 @@ impl LocalGgufProvider {
                 .map_err(|e| anyhow::anyhow!("prompt decode failed: {e}"))?;
         }
 
+        let prompt_eval_time = generation_start.elapsed();
+        debug!(
+            prompt_eval_secs = prompt_eval_time.as_secs_f64(),
+            "prompt evaluation complete"
+        );
+
         // Set up sampler chain: temperature -> random distribution
         let mut sampler = LlamaSampler::chain_simple([
             LlamaSampler::temp(self.temperature),
@@ -233,6 +278,7 @@ impl LocalGgufProvider {
         ]);
 
         // Generate tokens
+        let token_gen_start = Instant::now();
         let mut output_tokens = Vec::new();
         let mut pos = tokens.len() as i32;
         let eos_token = model.token_eos();
@@ -260,10 +306,29 @@ impl LocalGgufProvider {
             pos += 1;
         }
 
+        let token_gen_duration = token_gen_start.elapsed();
+        let total_duration = generation_start.elapsed();
+        let output_token_count = output_tokens.len() as u32;
+
+        // Calculate tokens per second
+        let tokens_per_sec = if token_gen_duration.as_secs_f64() > 0.0 {
+            output_token_count as f64 / token_gen_duration.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        debug!(
+            output_tokens = output_token_count,
+            generation_secs = token_gen_duration.as_secs_f64(),
+            total_secs = total_duration.as_secs_f64(),
+            tokens_per_sec = format!("{:.1}", tokens_per_sec),
+            "generation complete"
+        );
+
         // Detokenize output
         let output_text = detokenize(&model, &output_tokens)?;
 
-        Ok((output_text, input_tokens, output_tokens.len() as u32))
+        Ok((output_text, input_tokens, output_token_count))
     }
 }
 
@@ -394,6 +459,7 @@ fn stream_generate_sync(
     temperature: f32,
     tx: tokio::sync::mpsc::Sender<StreamEvent>,
 ) {
+    let generation_start = Instant::now();
     // Batch size for processing (default in llama.cpp is 2048, we use 512 for safety)
     let batch_size: usize = 512;
 
@@ -414,6 +480,7 @@ fn stream_generate_sync(
             .map_err(|e| anyhow::anyhow!("tokenization failed: {e}"))?;
 
         let input_tokens = tokens.len() as u32;
+        debug!(input_tokens, "tokenized prompt for streaming");
 
         if tokens.is_empty() {
             bail!("empty token sequence");
@@ -439,11 +506,19 @@ fn stream_generate_sync(
                 .map_err(|e| anyhow::anyhow!("prompt decode failed: {e}"))?;
         }
 
+        let prompt_eval_time = generation_start.elapsed();
+        debug!(
+            prompt_eval_secs = prompt_eval_time.as_secs_f64(),
+            "prompt evaluation complete, starting token generation"
+        );
+
         // Set up sampler chain: temperature -> random distribution
         let mut sampler =
             LlamaSampler::chain_simple([LlamaSampler::temp(temperature), LlamaSampler::dist(42)]);
 
         // Generate tokens
+        let token_gen_start = Instant::now();
+        let mut first_token_time: Option<std::time::Duration> = None;
         let mut output_tokens = 0u32;
         let mut pos = tokens.len() as i32;
         let eos_token = model.token_eos();
@@ -453,10 +528,25 @@ fn stream_generate_sync(
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
 
             if token == eos_token {
+                debug!("reached EOS token");
                 break;
             }
 
             output_tokens += 1;
+
+            // Record time to first token
+            if first_token_time.is_none() {
+                first_token_time = Some(generation_start.elapsed());
+                debug!(
+                    ttft_secs = first_token_time.unwrap().as_secs_f64(),
+                    "time to first token"
+                );
+
+                #[cfg(feature = "metrics")]
+                histogram!(llm_metrics::TIME_TO_FIRST_TOKEN_SECONDS)
+                    .record(first_token_time.unwrap().as_secs_f64());
+            }
+
             sampler.accept(token);
 
             // Detokenize and send
@@ -466,6 +556,7 @@ fn stream_generate_sync(
 
             if tx.blocking_send(StreamEvent::Delta(piece)).is_err() {
                 // Receiver dropped, stop generation
+                debug!("receiver dropped, stopping generation");
                 break;
             }
 
@@ -480,6 +571,29 @@ fn stream_generate_sync(
             pos += 1;
         }
 
+        let token_gen_duration = token_gen_start.elapsed();
+        let total_duration = generation_start.elapsed();
+
+        // Calculate and log tokens per second
+        let tokens_per_sec = if token_gen_duration.as_secs_f64() > 0.0 {
+            output_tokens as f64 / token_gen_duration.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        debug!(
+            output_tokens,
+            generation_secs = token_gen_duration.as_secs_f64(),
+            total_secs = total_duration.as_secs_f64(),
+            tokens_per_sec = format!("{:.1}", tokens_per_sec),
+            "streaming generation complete"
+        );
+
+        #[cfg(feature = "metrics")]
+        if tokens_per_sec > 0.0 {
+            histogram!(llm_metrics::TOKENS_PER_SECOND).record(tokens_per_sec);
+        }
+
         Ok((input_tokens, output_tokens))
     })();
 
@@ -491,6 +605,7 @@ fn stream_generate_sync(
             }));
         },
         Err(e) => {
+            warn!(error = %e, "streaming generation failed");
             let _ = tx.blocking_send(StreamEvent::Error(e.to_string()));
         },
     }
