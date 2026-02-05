@@ -81,23 +81,23 @@ loop:
 │  1. Call provider.stream_with_tools()                   │
 │                                                         │
 │  2. While stream has events:                            │
-│     ├─ Delta(text) → emit RunnerEvent::TextDelta       │
-│     ├─ ToolCallStart → accumulate tool call            │
-│     ├─ ToolCallArgumentsDelta → accumulate args        │
-│     ├─ ToolCallComplete → finalize args                │
-│     ├─ Done → record usage                             │
-│     └─ Error → return error                            │
+│     ├─ Delta(text) → emit RunnerEvent::TextDelta        │
+│     ├─ ToolCallStart → accumulate tool call             │
+│     ├─ ToolCallArgumentsDelta → accumulate args         │
+│     ├─ ToolCallComplete → finalize args                 │
+│     ├─ Done → record usage                              │
+│     └─ Error → return error                             │
 │                                                         │
-│  3. If no tool calls → return accumulated text         │
+│  3. If no tool calls → return accumulated text          │
 │                                                         │
-│  4. Execute tool calls concurrently                    │
-│     ├─ Emit ToolCallStart events                       │
-│     ├─ Run tools in parallel                           │
-│     └─ Emit ToolCallEnd events                         │
+│  4. Execute tool calls concurrently                     │
+│     ├─ Emit ToolCallStart events                        │
+│     ├─ Run tools in parallel                            │
+│     └─ Emit ToolCallEnd events                          │
 │                                                         │
-│  5. Append tool results to messages                    │
+│  5. Append tool results to messages                     │
 │                                                         │
-│  6. Loop back to step 1                                │
+│  6. Loop back to step 1                                 │
 └─────────────────────────────────────────────────────────┘
 ```
 
