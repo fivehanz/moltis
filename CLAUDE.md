@@ -7,12 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is doing a Rust version of openclaw. Openclaw documentation is available at
 https://docs.openclaw.ai and its code is at https://github.com/openclaw/openclaw
 
-Dig this repo and documentation to figure out how moltbot is working and how
-many features it has. `../clawdbot/HOWITWORKS.md` has explaination of how it
-works. But feel free to do any improvement and change the way it is to make
-it more Rustacean.
-
-All code you write must have tests with high coverage.
+All code you write must have tests with high coverage. Always check for Security
+to make code safe.
 
 ## Rust Style and Idioms
 
