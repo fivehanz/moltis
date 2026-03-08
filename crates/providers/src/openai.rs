@@ -606,7 +606,9 @@ impl OpenAiProvider {
     /// Build the HTTP URL for the Responses API (`/responses`).
     ///
     /// If the base URL already ends with `/responses`, use it as-is.
-    /// Otherwise derive it as a sibling of `/chat/completions`.
+    /// Otherwise derive it as a sibling of `/chat/completions`, ensuring
+    /// `/v1` is present — matching the normalization in
+    /// `responses_websocket_url`.
     fn responses_sse_url(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
         if base.ends_with("/responses") {
@@ -615,7 +617,12 @@ impl OpenAiProvider {
         if let Some(prefix) = base.strip_suffix("/chat/completions") {
             return format!("{prefix}/responses");
         }
-        format!("{base}/responses")
+        // Ensure /v1 is present, consistent with responses_websocket_url.
+        if base.ends_with("/v1") {
+            format!("{base}/responses")
+        } else {
+            format!("{base}/v1/responses")
+        }
     }
 
     fn responses_websocket_url(&self) -> crate::error::Result<String> {
@@ -779,8 +786,9 @@ impl OpenAiProvider {
             }
 
             // If the stream closed without response.completed, emit Done with
-            // whatever usage we collected.
-            if state.input_tokens > 0 || state.output_tokens > 0 {
+            // whatever usage we collected.  Guard against double-Done when
+            // response.completed already emitted one.
+            if !state.done_emitted && (state.input_tokens > 0 || state.output_tokens > 0) {
                 yield StreamEvent::Done(Usage {
                     input_tokens: state.input_tokens,
                     output_tokens: state.output_tokens,
@@ -2355,6 +2363,19 @@ mod tests {
     }
 
     #[test]
+    fn responses_sse_url_bare_host_appends_v1() {
+        let provider = OpenAiProvider::new(
+            Secret::new("test".to_string()),
+            "gpt-5.2".to_string(),
+            "https://api.openai.com".to_string(),
+        );
+        assert_eq!(
+            provider.responses_sse_url(),
+            "https://api.openai.com/v1/responses"
+        );
+    }
+
+    #[test]
     fn with_wire_api_builder() {
         let provider = OpenAiProvider::new(
             Secret::new("test".to_string()),
@@ -2373,7 +2394,7 @@ mod tests {
         let captured_clone = captured.clone();
 
         let app = Router::new().route(
-            "/responses",
+            "/v1/responses",
             post(move |req: Request| {
                 let cap = captured_clone.clone();
                 let payload = sse_payload.clone();
@@ -2417,11 +2438,17 @@ mod tests {
 
         let mut stream = provider.stream_with_tools(vec![ChatMessage::user("hi")], vec![]);
         let mut text = String::new();
+        let mut done_count = 0u32;
         let mut done_usage = None;
+        let mut raw_count = 0u32;
         while let Some(event) = stream.next().await {
             match event {
                 StreamEvent::Delta(d) => text.push_str(&d),
-                StreamEvent::Done(u) => done_usage = Some(u),
+                StreamEvent::Done(u) => {
+                    done_count += 1;
+                    done_usage = Some(u);
+                },
+                StreamEvent::ProviderRaw(_) => raw_count += 1,
                 _ => {},
             }
         }
@@ -2429,6 +2456,16 @@ mod tests {
         let usage = done_usage.expect("should have received Done event");
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 2);
+        // Must emit exactly one Done — no double-Done on EOF.
+        assert_eq!(
+            done_count, 1,
+            "expected exactly 1 Done event, got {done_count}"
+        );
+        // Must emit ProviderRaw for each SSE event (3 data lines).
+        assert_eq!(
+            raw_count, 3,
+            "expected 3 ProviderRaw events, got {raw_count}"
+        );
 
         // Verify the request used Responses API format (input, not messages)
         let reqs = captured.lock().unwrap();
@@ -2498,7 +2535,10 @@ mod tests {
         .with_wire_api(WireApi::Responses);
 
         let mut stream = provider.stream_with_tools(vec![ChatMessage::user("hi")], vec![]);
-        let first = stream.next().await.expect("should emit error");
-        assert!(matches!(first, StreamEvent::Error(msg) if msg == "rate limited"));
+        // First event is ProviderRaw, second is the Error.
+        let first = stream.next().await.expect("should emit ProviderRaw");
+        assert!(matches!(first, StreamEvent::ProviderRaw(_)));
+        let second = stream.next().await.expect("should emit error");
+        assert!(matches!(second, StreamEvent::Error(msg) if msg == "rate limited"));
     }
 }
