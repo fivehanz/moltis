@@ -112,6 +112,7 @@ impl LiveTtsService {
             },
             openai: moltis_voice::OpenAiTtsConfig {
                 api_key: resolve_openai_key(cfg.voice.tts.openai.api_key.as_ref(), &cfg),
+                base_url: cfg.voice.tts.openai.base_url.clone(),
                 voice: cfg.voice.tts.openai.voice.clone(),
                 model: cfg.voice.tts.openai.model.clone(),
                 speed: None,
@@ -150,13 +151,19 @@ impl LiveTtsService {
                     config.elevenlabs.model.clone(),
                 )) as Box<dyn TtsProvider + Send + Sync>
             }),
-            TtsProviderId::OpenAi => config.openai.api_key.as_ref().map(|key| {
-                Box::new(OpenAiTts::with_defaults(
-                    Some(key.clone()),
+            TtsProviderId::OpenAi => {
+                let provider = OpenAiTts::with_defaults(
+                    config.openai.api_key.clone(),
+                    config.openai.base_url.clone(),
                     config.openai.voice.clone(),
                     config.openai.model.clone(),
-                )) as Box<dyn TtsProvider + Send + Sync>
-            }),
+                );
+                if provider.is_configured() {
+                    Some(Box::new(provider) as Box<dyn TtsProvider + Send + Sync>)
+                } else {
+                    None
+                }
+            },
             TtsProviderId::Google => config.google.api_key.as_ref().map(|_| {
                 Box::new(GoogleTts::new(&config.google)) as Box<dyn TtsProvider + Send + Sync>
             }),
@@ -187,7 +194,10 @@ impl LiveTtsService {
                 TtsProviderId::ElevenLabs,
                 config.elevenlabs.api_key.is_some(),
             ),
-            (TtsProviderId::OpenAi, config.openai.api_key.is_some()),
+            (
+                TtsProviderId::OpenAi,
+                config.openai.api_key.is_some() || config.openai.base_url.is_some(),
+            ),
             (TtsProviderId::Google, config.google.api_key.is_some()),
             (TtsProviderId::Piper, config.piper.model_path.is_some()),
             (TtsProviderId::Coqui, true), // Always available if server running
@@ -518,9 +528,18 @@ impl LiveSttService {
         match provider_id {
             SttProviderId::Whisper => {
                 let key = resolve_openai_key(cfg.voice.stt.whisper.api_key.as_ref(), &cfg);
-                key.map(|k| {
-                    Box::new(WhisperStt::new(Some(k))) as Box<dyn SttProvider + Send + Sync>
-                })
+                let provider = WhisperStt::with_options(
+                    key,
+                    cfg.voice.stt.whisper.base_url.clone(),
+                    cfg.voice.stt.whisper.model.clone(),
+                );
+                if provider.is_configured() {
+                    Some(
+                        Box::new(provider) as Box<dyn SttProvider + Send + Sync>,
+                    )
+                } else {
+                    None
+                }
             },
             SttProviderId::Groq => cfg.voice.stt.groq.api_key.as_ref().map(|key| {
                 Box::new(GroqStt::with_options(

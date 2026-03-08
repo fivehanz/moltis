@@ -30,6 +30,7 @@ const DEFAULT_MODEL: &str = "whisper-1";
 pub struct WhisperStt {
     client: Client,
     api_key: Option<Secret<String>>,
+    base_url: String,
     model: String,
 }
 
@@ -37,6 +38,7 @@ impl std::fmt::Debug for WhisperStt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WhisperStt")
             .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
             .field("model", &self.model)
             .finish()
     }
@@ -55,25 +57,24 @@ impl WhisperStt {
         Self {
             client: Client::new(),
             api_key,
+            base_url: API_BASE.into(),
             model: DEFAULT_MODEL.into(),
         }
     }
 
-    /// Create with custom model.
+    /// Create with custom model and optional base URL.
     #[must_use]
-    pub fn with_model(api_key: Option<Secret<String>>, model: Option<String>) -> Self {
+    pub fn with_options(
+        api_key: Option<Secret<String>>,
+        base_url: Option<String>,
+        model: Option<String>,
+    ) -> Self {
         Self {
             client: Client::new(),
             api_key,
+            base_url: base_url.unwrap_or_else(|| API_BASE.into()),
             model: model.unwrap_or_else(|| DEFAULT_MODEL.into()),
         }
-    }
-
-    /// Get the API key, returning an error if not configured.
-    fn get_api_key(&self) -> Result<&Secret<String>> {
-        self.api_key
-            .as_ref()
-            .ok_or_else(|| anyhow!("OpenAI API key not configured for Whisper"))
     }
 
     /// Get file extension for audio format.
@@ -98,12 +99,12 @@ impl SttProvider for WhisperStt {
     }
 
     fn is_configured(&self) -> bool {
-        self.api_key.is_some()
+        // Configured if API key is set, or if using a custom base URL (local servers
+        // like faster-whisper-server don't require auth).
+        self.api_key.is_some() || self.base_url != API_BASE
     }
 
     async fn transcribe(&self, request: TranscribeRequest) -> Result<Transcript> {
-        let api_key = self.get_api_key()?;
-
         let filename = format!("audio.{}", Self::file_extension(request.format));
         let mime_type = Self::mime_type(request.format);
 
@@ -126,14 +127,20 @@ impl SttProvider for WhisperStt {
             form = form.text("prompt", prompt);
         }
 
-        let response = self
+        let mut req = self
             .client
-            .post(format!("{API_BASE}/audio/transcriptions"))
-            .header(
+            .post(format!("{}/audio/transcriptions", self.base_url))
+            .multipart(form);
+
+        // Only add auth header if an API key is configured (local servers skip auth).
+        if let Some(api_key) = &self.api_key {
+            req = req.header(
                 "Authorization",
                 format!("Bearer {}", api_key.expose_secret()),
-            )
-            .multipart(form)
+            );
+        }
+
+        let response = req
             .send()
             .await
             .context("failed to send Whisper transcription request")?;
@@ -232,18 +239,32 @@ mod tests {
             prompt: None,
         };
 
+        // Without API key and default base URL, the request will fail
+        // (either connection refused to api.openai.com or auth error).
         let result = provider.transcribe(request).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not configured"));
     }
 
     #[test]
-    fn test_with_model() {
-        let provider = WhisperStt::with_model(
+    fn test_with_options() {
+        let provider = WhisperStt::with_options(
             Some(Secret::new("key".into())),
+            None,
             Some("whisper-large-v3".into()),
         );
         assert_eq!(provider.model, "whisper-large-v3");
+        assert_eq!(provider.base_url, API_BASE);
+    }
+
+    #[test]
+    fn test_with_custom_base_url() {
+        let provider = WhisperStt::with_options(
+            None,
+            Some("http://10.1.2.30:8001".into()),
+            None,
+        );
+        assert!(provider.is_configured());
+        assert_eq!(provider.base_url, "http://10.1.2.30:8001");
     }
 
     #[test]

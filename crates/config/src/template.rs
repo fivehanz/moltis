@@ -553,6 +553,7 @@ providers = ["whisper", "mistral", "elevenlabs"] # UI allowlist (empty = show al
 
 # No api_key needed for OpenAI TTS/Whisper when OpenAI is configured as an LLM provider.
 # [voice.tts.openai]
+# base_url = "https://api.openai.com/v1"     # API endpoint (change for Chatterbox, etc.)
 # voice = "alloy"                 # alloy, echo, fable, onyx, nova, shimmer
 # model = "tts-1"                 # tts-1 or tts-1-hd
 

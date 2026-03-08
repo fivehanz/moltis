@@ -3700,7 +3700,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                                 "enabled": config.voice.tts.enabled,
                                 "provider": config.voice.tts.provider,
                                 "elevenlabs_configured": config.voice.tts.elevenlabs.api_key.is_some(),
-                                "openai_configured": config.voice.tts.openai.api_key.is_some(),
+                                "openai_configured": config.voice.tts.openai.api_key.is_some() || config.voice.tts.openai.base_url.is_some(),
                             },
                             "stt": {
                                 "enabled": config.voice.stt.enabled,
