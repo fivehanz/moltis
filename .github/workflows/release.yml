@@ -44,7 +44,7 @@ jobs:
           online-audits: false
 
   validate-tag:
-    if: startsWith(github.ref, 'refs/tags/') && env.RELEASE_DRY_RUN != 'true'
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
     runs-on: ubuntu-latest
     name: Validate Tag Format
     permissions:
@@ -60,7 +60,7 @@ jobs:
           fi
 
   biome:
-    if: env.RELEASE_DRY_RUN != 'true'
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
     needs: zizmor
     runs-on: ubuntu-latest
     name: Biome
@@ -83,7 +83,7 @@ jobs:
         run: ./scripts/i18n-check.sh
 
   fmt:
-    if: env.RELEASE_DRY_RUN != 'true'
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
     needs: zizmor
     runs-on: ubuntu-latest
     name: Format
@@ -105,7 +105,7 @@ jobs:
         run: cargo fmt --all -- --check
 
   clippy:
-    if: env.RELEASE_DRY_RUN != 'true'
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
     needs: [fmt, biome]
     runs-on: [self-hosted, Linux, X64]
     container:
@@ -159,7 +159,7 @@ jobs:
         run: cargo clippy -Z unstable-options --workspace --all-features --all-targets --timings -- -D warnings
 
   test:
-    if: env.RELEASE_DRY_RUN != 'true'
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
     needs: [fmt, biome]
     runs-on: ubuntu-latest
     name: Test
@@ -189,7 +189,7 @@ jobs:
         run: cargo nextest run --profile ci
 
   e2e:
-    if: env.RELEASE_DRY_RUN != 'true'
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
     name: E2E Tests
     needs: [fmt, biome]
     runs-on: ubuntu-latest
