@@ -1155,6 +1155,12 @@ fn spawn_post_listener_warmups(
     browser_service: Arc<dyn crate::services::BrowserService>,
     browser_tool: Option<Arc<dyn moltis_agents::tool_registry::AgentTool>>,
 ) {
+    // Warm the container CLI OnceLock off the async worker threads.
+    tokio::task::spawn_blocking(|| {
+        let cli = moltis_tools::sandbox::container_cli();
+        debug!(cli, "container CLI detected");
+    });
+
     if !env_flag_enabled("MOLTIS_BROWSER_WARMUP") {
         debug!("startup browser warmup disabled (set MOLTIS_BROWSER_WARMUP=1 to enable)");
         return;
@@ -3651,6 +3657,11 @@ pub async fn prepare_gateway(
         tool_registry.register(Box::new(
             moltis_tools::send_image::SendImageTool::new()
                 .with_sandbox_router(Arc::clone(&sandbox_router)),
+        ));
+        tool_registry.register(Box::new(
+            moltis_tools::send_document::SendDocumentTool::new()
+                .with_sandbox_router(Arc::clone(&sandbox_router))
+                .with_session_store(Arc::clone(&session_store)),
         ));
         if let Some(t) = moltis_tools::web_search::WebSearchTool::from_config_with_env_overrides(
             &config.tools.web.search,
