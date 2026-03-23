@@ -318,11 +318,94 @@ function MissingDepsSection(props) {
   </div>`;
 }
 
+// ── Skill editor panel ───────────────────────────────────────
+function SkillEditor(props) {
+	var d = props.detail;
+	var isForking = props.forking;
+	var nameRef = useRef(null);
+	var descRef = useRef(null);
+	var toolsRef = useRef(null);
+	var bodyRef = useRef(null);
+	var saving = useSignal(false);
+
+	useEffect(() => {
+		if (nameRef.current) nameRef.current.value = isForking ? d.name : d.name;
+		if (descRef.current) descRef.current.value = d.description || "";
+		if (toolsRef.current) toolsRef.current.value = (d.allowed_tools || []).join(", ");
+		if (bodyRef.current) bodyRef.current.value = d.body || "";
+	}, [d.name]);
+
+	function onSave() {
+		var name = nameRef.current?.value.trim();
+		var description = descRef.current?.value.trim();
+		var toolsRaw = toolsRef.current?.value.trim();
+		var body = bodyRef.current?.value;
+		if (!name) {
+			showToast("Name is required.", "error");
+			return;
+		}
+		if (!description) {
+			showToast("Description is required.", "error");
+			return;
+		}
+		var allowed_tools = toolsRaw
+			? toolsRaw
+					.split(",")
+					.map((t) => t.trim())
+					.filter(Boolean)
+			: [];
+		saving.value = true;
+		sendRpc("skills.skill.save", {
+			name: name,
+			description: description,
+			body: body,
+			allowed_tools: allowed_tools,
+		}).then((res) => {
+			saving.value = false;
+			if (res?.ok) {
+				showToast(isForking ? `Forked "${name}" to personal skills` : `Saved "${name}"`, "success");
+				fetchAll();
+				props.onClose();
+			} else {
+				showToast(`Save failed: ${res?.error?.message || res?.error || "unknown"}`, "error");
+			}
+		});
+	}
+
+	var title = isForking ? "Fork to Personal Skills" : "Edit Skill";
+	return html`<div class="skills-detail-panel" style="display:block">
+    <div class="flex items-center justify-between mb-3">
+      <span class="text-sm font-semibold text-[var(--text-strong)]">${title}</span>
+      <button onClick=${props.onClose} class="text-[var(--muted)] text-lg cursor-pointer bg-transparent border-0 p-0.5">\u2715</button>
+    </div>
+    <div class="skill-editor-form">
+      <label class="skill-editor-label">Name
+        <input ref=${nameRef} type="text" class="skill-editor-input font-mono" placeholder="my-skill" disabled=${!isForking} />
+      </label>
+      <label class="skill-editor-label">Description
+        <input ref=${descRef} type="text" class="skill-editor-input" placeholder="Short description" />
+      </label>
+      <label class="skill-editor-label">Allowed tools <span class="text-[var(--muted)] text-xs font-normal">(comma-separated, optional)</span>
+        <input ref=${toolsRef} type="text" class="skill-editor-input font-mono" placeholder="exec, web_fetch" />
+      </label>
+      <label class="skill-editor-label">Body <span class="text-[var(--muted)] text-xs font-normal">(markdown)</span>
+        <textarea ref=${bodyRef} class="skill-editor-textarea font-mono" rows="12" placeholder="Skill instructions in markdown..." />
+      </label>
+      <div class="flex gap-2 mt-1">
+        <button class="provider-btn" onClick=${onSave} disabled=${saving.value}>${saving.value ? "Saving\u2026" : "Save"}</button>
+        <button class="provider-btn provider-btn-secondary" onClick=${props.onClose}>Cancel</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 // ── Skill detail panel ───────────────────────────────────────
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: UI component with multiple states
 function SkillDetail(props) {
 	var d = props.detail;
 	var onClose = props.onClose;
+	var editing = useSignal(false);
+	var forking = useSignal(false);
 
 	var panelRef = useRef(null);
 	var didScroll = useRef(false);
@@ -362,6 +445,18 @@ function SkillDetail(props) {
 	}, [d?.body_html]);
 
 	if (!d) return null;
+
+	// Show the editor when editing or forking.
+	if (editing.value || forking.value) {
+		return html`<${SkillEditor}
+			detail=${d}
+			forking=${forking.value}
+			onClose=${() => {
+				editing.value = false;
+				forking.value = false;
+			}}
+		/>`;
+	}
 
 	var isDisc = d.source === "personal" || d.source === "project";
 	var needsTrust = !isDisc && d.trusted === false;
@@ -418,6 +513,14 @@ function SkillDetail(props) {
 		doToggle();
 	}
 
+	function onEdit() {
+		if (isDisc) {
+			editing.value = true;
+		} else {
+			forking.value = true;
+		}
+	}
+
 	return html`<div ref=${panelRef} class="skills-detail-panel" style="display:block">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div style="display:flex;align-items:center;gap:8px">
@@ -429,6 +532,7 @@ function SkillDetail(props) {
         ${trustBadge(d)}
       </div>
       <div style="display:flex;align-items:center;gap:6px">
+        <button onClick=${onEdit} class="provider-btn provider-btn-sm provider-btn-secondary">${isDisc ? "Edit" : "Fork & Edit"}</button>
 				<button onClick=${onToggle} disabled=${isProtected || actionBusy.value} class=${isDisc && d.enabled ? "provider-btn provider-btn-sm provider-btn-danger" : ""} style=${
 					isDisc && d.enabled
 						? {}

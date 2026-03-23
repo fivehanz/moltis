@@ -2659,6 +2659,19 @@ pub(super) fn register(reg: &mut MethodRegistry) {
             })
         }),
     );
+    reg.register(
+        "skills.skill.save",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .skills
+                    .skill_save(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
 
     // MCP
     reg.register(

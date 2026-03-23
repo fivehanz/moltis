@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Skill Editing & Forking**: Edit personal skills or fork repo skills into personal skills directly from the web UI
+  - "Edit" button on personal/project skills opens an inline editor for name, description, allowed tools, and body
+  - "Fork & Edit" button on repo skills copies the skill to personal skills for customization
+  - Confirmation hint in chat after skill creation/update with link to the skills page
+
 ### Changed
 
 ### Deprecated

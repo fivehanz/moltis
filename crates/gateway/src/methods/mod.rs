@@ -198,6 +198,7 @@ const WRITE_METHODS: &[&str] = &[
     "skills.skill.enable",
     "skills.skill.disable",
     "skills.install_dep",
+    "skills.skill.save",
     "mcp.add",
     "mcp.remove",
     "mcp.enable",

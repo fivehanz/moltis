@@ -452,6 +452,10 @@ impl moltis_service_traits::SkillsService for MockSkills {
     async fn security_scan(&self) -> ServiceResult {
         self.0.call("skills.security.scan", json!({}))
     }
+
+    async fn skill_save(&self, p: Value) -> ServiceResult {
+        self.0.call("skills.skill.save", p)
+    }
 }
 
 #[async_trait::async_trait]
