@@ -252,7 +252,11 @@ async fn setup_handler(
             #[cfg(feature = "vault")]
             if let Some(rk) = vault_recovery_key {
                 let domain_attr = localhost_cookie_domain(&headers, behind_proxy);
-                let secure_attr = if secure { "; Secure" } else { "" };
+                let secure_attr = if secure {
+                    "; Secure"
+                } else {
+                    ""
+                };
                 let cookie = format!(
                     "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000{domain_attr}{secure_attr}"
                 );
@@ -593,7 +597,11 @@ fn session_response(
     secure: bool,
 ) -> axum::response::Response {
     let domain_attr = localhost_cookie_domain(headers, behind_proxy);
-    let secure_attr = if secure { "; Secure" } else { "" };
+    let secure_attr = if secure {
+        "; Secure"
+    } else {
+        ""
+    };
     let cookie = format!(
         "{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000{domain_attr}{secure_attr}"
     );
@@ -611,9 +619,14 @@ fn clear_session_response(
     secure: bool,
 ) -> axum::response::Response {
     let domain_attr = localhost_cookie_domain(headers, behind_proxy);
-    let secure_attr = if secure { "; Secure" } else { "" };
-    let cookie =
-        format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{domain_attr}{secure_attr}");
+    let secure_attr = if secure {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie = format!(
+        "{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{domain_attr}{secure_attr}"
+    );
     (
         StatusCode::OK,
         [(axum::http::header::SET_COOKIE, cookie)],
