@@ -237,6 +237,7 @@ metrics-tracing-context     = "0.16"
 # Content processing
 html2text      = "0.16"
 image          = { default-features = false, features = ["jpeg", "png", "webp"], version = "0.25" }
+mime_guess     = "2"
 ipnet          = "2"
 mdns-sd        = "0.18"
 pulldown-cmark = { default-features = false, version = "0.12" }

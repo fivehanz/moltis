@@ -148,7 +148,8 @@ test.describe("Sandboxes page – Running Containers", () => {
 	test("running containers section renders with heading and refresh button", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 
-		// Mock containers so the loading state resolves immediately.
+		// Mock container list so the button text resolves to "Refresh" quickly
+		// (the real endpoint can be slow with Apple Container).
 		await page.route("**/api/sandbox/containers", (route, request) => {
 			if (request.method() === "GET") {
 				return route.fulfill({
@@ -171,9 +172,9 @@ test.describe("Sandboxes page – Running Containers", () => {
 
 	test("refresh button triggers container list fetch", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
-		var fetchCount = 0;
+		let fetchCount = 0;
 
-		// Mock containers endpoint — tracks call count to verify refresh triggers a fetch.
+		// Mock container list for fast initial load; tracks call count.
 		await page.route("**/api/sandbox/containers", (route, request) => {
 			if (request.method() === "GET") {
 				fetchCount++;
@@ -261,7 +262,7 @@ test.describe("Sandboxes page – Running Containers", () => {
 		const pageErrors = watchPageErrors(page);
 		var diskFetchCount = 0;
 
-		// Mock containers so the loading state resolves and "Refresh" button appears.
+		// Mock container list so the button resolves to "Refresh" quickly.
 		await page.route("**/api/sandbox/containers", (route, request) => {
 			if (request.method() === "GET") {
 				return route.fulfill({
@@ -297,13 +298,26 @@ test.describe("Sandboxes page – Running Containers", () => {
 	test("clean all endpoint responds correctly", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 
-		// Mock the clean-all endpoint so the test doesn't depend on a real sandbox daemon.
+		// Mock container list so the page loads quickly.
+		await page.route("**/api/sandbox/containers", (route, request) => {
+			if (request.method() === "GET") {
+				return route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({ containers: [] }),
+				});
+			}
+			return route.continue();
+		});
+
+		// Mock the clean endpoint — the real operation can be slow with
+		// Apple Container. We only verify the response shape here.
 		await page.route("**/api/sandbox/containers/clean", (route, request) => {
 			if (request.method() === "POST") {
 				return route.fulfill({
 					status: 200,
 					contentType: "application/json",
-					body: JSON.stringify({ ok: true, removed: 0 }),
+					body: JSON.stringify({ ok: true, removed: [] }),
 				});
 			}
 			return route.continue();
