@@ -6031,6 +6031,7 @@ dependencies = [
  "async-trait",
  "futures",
  "moltis-metrics",
+ "secrecy 0.8.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
