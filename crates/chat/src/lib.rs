@@ -5392,7 +5392,7 @@ async fn run_explicit_shell_command(
 
     let exec_tool = {
         let registry = tool_registry.read().await;
-        registry.get_arc("exec")
+        registry.get("exec")
     };
 
     let exec_result = match exec_tool {
@@ -5994,6 +5994,14 @@ async fn run_with_tools(
     };
     if tools_enabled && let Some(manager) = state.memory_manager() {
         install_agent_scoped_memory_tools(&mut filtered_registry, manager, agent_id);
+    }
+    if tools_enabled
+        && matches!(
+            persona.config.tools.registry_mode,
+            moltis_config::ToolRegistryMode::Lazy
+        )
+    {
+        filtered_registry = moltis_agents::lazy_tools::wrap_registry_lazy(filtered_registry);
     }
 
     // Build system prompt:

@@ -592,10 +592,11 @@ fn append_memory_section(
     memory_text: Option<&str>,
     tool_schemas: &[serde_json::Value],
 ) {
+    let has_tool_search = has_tool_schema(tool_schemas, "tool_search");
     let has_memory_search = has_tool_schema(tool_schemas, "memory_search");
     let has_memory_save = has_tool_schema(tool_schemas, "memory_save");
     let memory_content = memory_text.filter(|text| !text.is_empty());
-    if memory_content.is_none() && !has_memory_search && !has_memory_save {
+    if memory_content.is_none() && !has_memory_search && !has_memory_save && !has_tool_search {
         return;
     }
 
@@ -636,6 +637,15 @@ fn append_memory_section(
             "- **memory/&lt;topic&gt;.md** — everything else (detailed notes, project ",
             "context, decisions, session summaries). These are only retrieved via ",
             "`memory_search` and do not consume prompt space.\n",
+        ));
+    }
+    // In lazy mode, memory tools are discoverable via tool_search but not
+    // directly visible. Tell the model they exist so it knows to search.
+    if has_tool_search && !has_memory_search && !has_memory_save {
+        prompt.push_str(concat!(
+            "\nMemory tools (`memory_search`, `memory_save`) are available but must be ",
+            "activated first. Use `tool_search(query=\"memory\")` to discover them, ",
+            "then `tool_search(name=\"memory_search\")` to activate.\n",
         ));
     }
     prompt.push('\n');

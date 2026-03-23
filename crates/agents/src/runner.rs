@@ -684,15 +684,20 @@ pub async fn run_agent_loop_with_context(
     let native_tools = provider.supports_tools();
     let config = moltis_config::discover_and_load();
     let max_tool_result_bytes = config.tools.max_tool_result_bytes;
-    let max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
-    let tool_schemas = tools.list_schemas();
+    let base_max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
+    // Lazy mode needs extra iterations for tool_search discovery round-trips.
+    let max_iterations = if config.tools.registry_mode == moltis_config::ToolRegistryMode::Lazy {
+        base_max_iterations * 3
+    } else {
+        base_max_iterations
+    };
 
     let is_multimodal = matches!(user_content, UserContent::Multimodal(_));
     info!(
         provider = provider.name(),
         model = provider.id(),
         native_tools,
-        tools_count = tool_schemas.len(),
+        tools_count = tools.list_names().len(),
         is_multimodal,
         "starting agent loop"
     );
@@ -708,13 +713,6 @@ pub async fn run_agent_loop_with_context(
         content: user_content.clone(),
     });
     let explicit_shell_command = explicit_shell_command_from_user_content(user_content);
-
-    // Only send tool schemas to providers that support them natively.
-    let schemas_for_api = if native_tools {
-        &tool_schemas
-    } else {
-        &vec![]
-    };
 
     // Extract session key once for hook payloads.
     let session_key_for_hooks = tool_context
@@ -743,6 +741,14 @@ pub async fn run_agent_loop_with_context(
                 "agent loop exceeded max iterations"
             )));
         }
+
+        // Re-compute schemas each iteration so activated tools appear immediately.
+        let tool_schemas = tools.list_schemas();
+        let schemas_for_api = if native_tools {
+            &tool_schemas
+        } else {
+            &vec![]
+        };
 
         if let Some(cb) = on_event {
             cb(RunnerEvent::Iteration(iterations));
@@ -1229,15 +1235,20 @@ pub async fn run_agent_loop_streaming(
     let native_tools = provider.supports_tools();
     let config = moltis_config::discover_and_load();
     let max_tool_result_bytes = config.tools.max_tool_result_bytes;
-    let max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
-    let tool_schemas = tools.list_schemas();
+    let base_max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
+    // Lazy mode needs extra iterations for tool_search discovery round-trips.
+    let max_iterations = if config.tools.registry_mode == moltis_config::ToolRegistryMode::Lazy {
+        base_max_iterations * 3
+    } else {
+        base_max_iterations
+    };
 
     let is_multimodal = matches!(user_content, UserContent::Multimodal(_));
     info!(
         provider = provider.name(),
         model = provider.id(),
         native_tools,
-        tools_count = tool_schemas.len(),
+        tools_count = tools.list_names().len(),
         is_multimodal,
         "starting streaming agent loop"
     );
@@ -1253,20 +1264,6 @@ pub async fn run_agent_loop_streaming(
         content: user_content.clone(),
     });
     let explicit_shell_command = explicit_shell_command_from_user_content(user_content);
-
-    // Only send tool schemas to providers that support them natively.
-    let schemas_for_api = if native_tools {
-        tool_schemas.clone()
-    } else {
-        vec![]
-    };
-
-    info!(
-        native_tools,
-        schemas_for_api_count = schemas_for_api.len(),
-        tool_schemas_count = tool_schemas.len(),
-        "schemas_for_api prepared for streaming"
-    );
 
     // Extract session key once for hook payloads.
     let session_key_for_hooks = tool_context
@@ -1302,6 +1299,13 @@ pub async fn run_agent_loop_streaming(
                 "agent loop exceeded max iterations"
             )));
         }
+
+        // Re-compute schemas each iteration so activated tools appear immediately.
+        let schemas_for_api = if native_tools {
+            tools.list_schemas()
+        } else {
+            vec![]
+        };
 
         if let Some(cb) = on_event {
             cb(RunnerEvent::Iteration(iterations));

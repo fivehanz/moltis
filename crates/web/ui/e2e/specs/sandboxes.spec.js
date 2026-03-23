@@ -108,7 +108,47 @@ test.describe("Sandboxes page – Shared home settings", () => {
 	});
 });
 
+/**
+ * Make the sandbox runtime appear available in the e2e environment.
+ *
+ * CI has no container daemon so gon/bootstrap report `backend: "none"`,
+ * which disables buttons (changing their accessible name to a long hint).
+ * This helper patches three layers:
+ *   1. `window.__MOLTIS__` (gon data embedded in HTML) — via addInitScript
+ *   2. `/api/gon` responses — via route interception
+ *   3. `/api/bootstrap` responses — via route interception
+ */
+async function mockSandboxAvailable(page) {
+	await page.addInitScript(() => {
+		var m = window.__MOLTIS__ || {};
+		m.sandbox = Object.assign(m.sandbox || {}, { backend: "docker" });
+		window.__MOLTIS__ = m;
+	});
+
+	await page.route("**/api/gon*", async (route) => {
+		var response = await route.fetch();
+		var json = await response.json();
+		json.sandbox = Object.assign(json.sandbox || {}, { backend: "docker" });
+		return route.fulfill({ response, json });
+	});
+
+	await page.route("**/api/bootstrap*", async (route) => {
+		var response = await route.fetch();
+		var json = await response.json();
+		json.sandbox = Object.assign(json.sandbox || {}, { backend: "docker" });
+		return route.fulfill({ response, json });
+	});
+}
+
 test.describe("Sandboxes page – Running Containers", () => {
+	test.beforeEach(async ({ page }) => {
+		await mockSandboxAvailable(page);
+	});
+
+	test.afterEach(async ({ page }) => {
+		await page.unrouteAll({ behavior: "ignoreErrors" });
+	});
+
 	test("running containers section renders with heading and refresh button", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 
@@ -136,12 +176,12 @@ test.describe("Sandboxes page – Running Containers", () => {
 
 	test("refresh button triggers container list fetch", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
+		let fetchCount = 0;
 
-		// Mock container list for fast initial load, then let the refresh hit the real endpoint.
-		let callCount = 0;
+		// Mock container list for fast initial load; tracks call count.
 		await page.route("**/api/sandbox/containers", (route, request) => {
 			if (request.method() === "GET") {
-				callCount++;
+				fetchCount++;
 				return route.fulfill({
 					status: 200,
 					contentType: "application/json",
@@ -152,16 +192,16 @@ test.describe("Sandboxes page – Running Containers", () => {
 		});
 
 		await navigateAndWait(page, "/settings/sandboxes");
-
-		const refreshBtn = page.getByRole("button", { name: "Refresh", exact: true });
-		await expect(refreshBtn).toBeVisible();
+		await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
+		const mountCount = fetchCount;
 
 		const fetchPromise = page.waitForResponse((r) => r.url().includes("/api/sandbox/containers") && r.status() === 200);
-		await refreshBtn.click();
+		await page.getByRole("button", { name: "Refresh", exact: true }).click();
 		const response = await fetchPromise;
 		const data = await response.json();
 		expect(data).toHaveProperty("containers");
 		expect(Array.isArray(data.containers)).toBe(true);
+		expect(fetchCount).toBeGreaterThan(mountCount);
 
 		expect(pageErrors).toEqual([]);
 	});
@@ -289,7 +329,7 @@ test.describe("Sandboxes page – Running Containers", () => {
 
 		await navigateAndWait(page, "/settings/sandboxes");
 
-		// Call the clean all API directly to verify the endpoint works
+		// Call the clean all API via page.evaluate; the route mock intercepts it.
 		const result = await page.evaluate(async () => {
 			const r = await fetch("/api/sandbox/containers/clean", { method: "POST" });
 			return { status: r.status, data: await r.json() };
@@ -303,6 +343,14 @@ test.describe("Sandboxes page – Running Containers", () => {
 });
 
 test.describe("Sandboxes page – Container error handling", () => {
+	test.beforeEach(async ({ page }) => {
+		await mockSandboxAvailable(page);
+	});
+
+	test.afterEach(async ({ page }) => {
+		await page.unrouteAll({ behavior: "ignoreErrors" });
+	});
+
 	test("delete failure shows error message that clears on refresh", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 

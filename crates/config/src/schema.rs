@@ -1480,6 +1480,17 @@ pub enum MessageQueueMode {
     Collect,
 }
 
+/// How tool schemas are presented to the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolRegistryMode {
+    /// All tool schemas are sent to the model on every turn (default).
+    #[default]
+    Full,
+    /// Only `tool_search` is sent; the model discovers and activates tools on demand.
+    Lazy,
+}
+
 /// Tools configuration (exec, sandbox, policy, web, browser).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1498,6 +1509,9 @@ pub struct ToolsConfig {
     /// Maximum bytes for a single tool result before truncation. Default 50KB.
     #[serde(default = "default_max_tool_result_bytes")]
     pub max_tool_result_bytes: usize,
+    /// How tool schemas are presented to the model. Default "full".
+    #[serde(default)]
+    pub registry_mode: ToolRegistryMode,
 }
 
 impl Default for ToolsConfig {
@@ -1511,6 +1525,7 @@ impl Default for ToolsConfig {
             agent_timeout_secs: default_agent_timeout_secs(),
             agent_max_iterations: default_agent_max_iterations(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
+            registry_mode: ToolRegistryMode::default(),
         }
     }
 }
