@@ -286,6 +286,44 @@ scopes = ["mcp:read", "mcp:write"]
 
 If your session expires or tokens are revoked, Moltis automatically re-authenticates on the next `401` response. You can also trigger re-authentication manually via the `mcp.reauth` RPC method.
 
+## Running MCP Servers in Docker
+
+When running Moltis in Docker, you have two options for stdio-based MCP servers:
+
+### Using the built-in Node.js
+
+The Moltis Docker image includes Node.js and npm, so most MCP servers work out of the box:
+
+```toml
+[mcp.servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+```
+
+### Using Docker containers
+
+Since the Docker CLI is available in the image (via the mounted socket), you can also run MCP servers as isolated containers. This is useful when you need a specific Node version, want stronger isolation, or prefer official MCP Docker images:
+
+```toml
+# Run an npm-based MCP server in a container
+[mcp.servers.filesystem]
+command = "docker"
+args = [
+  "run", "--rm", "-i",
+  "-v", "/data:/data",
+  "--entrypoint", "npx",
+  "node:20-alpine",
+  "-y", "@modelcontextprotocol/server-filesystem", "/data",
+]
+
+# Use an official MCP Docker image
+[mcp.servers.memory]
+command = "docker"
+args = ["run", "--rm", "-i", "mcp/memory"]
+```
+
+When using containerized MCP servers, remember to mount any directories the server needs access to with `-v`.
+
 ## Security Considerations
 
 ```admonish warning

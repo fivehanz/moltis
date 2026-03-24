@@ -56,6 +56,7 @@ FROM debian:bookworm-slim
 # - ca-certificates: for HTTPS connections to LLM providers
 # - chromium: headless browser for the browser tool (web search/fetch)
 # - curl: makes it possible to run healthchecks from docker
+# - nodejs + npm: run stdio-based MCP servers (most are npm packages)
 # - sudo: allows moltis user to install packages at runtime (passwordless)
 # - docker-ce-cli + docker-buildx-plugin: Docker CLI for sandbox execution
 #   (talks to mounted socket, no daemon in-container)
@@ -69,6 +70,8 @@ RUN apt-get update -qq && \
         curl \
         gnupg \
         libgomp1 \
+        nodejs \
+        npm \
         sudo \
         tmux \
         vim-tiny && \
