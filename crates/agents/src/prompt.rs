@@ -894,14 +894,8 @@ mod tests {
         let skills = vec![SkillMetadata {
             name: "commit".into(),
             description: "Create git commits".into(),
-            license: None,
-            compatibility: None,
-            allowed_tools: vec![],
-            homepage: None,
-            dockerfile: None,
-            requires: Default::default(),
             path: std::path::PathBuf::from("/skills/commit"),
-            source: None,
+            ..Default::default()
         }];
         let prompt = build_system_prompt_with_session_runtime(
             &tools, true, None, &skills, None, None, None, None, None, None, None,

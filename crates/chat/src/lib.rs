@@ -10773,14 +10773,8 @@ mod tests {
         let skills = vec![moltis_skills::types::SkillMetadata {
             name: "my-skill".into(),
             description: "test".into(),
-            license: None,
-            compatibility: None,
             allowed_tools: vec!["Bash(git:*)".into()],
-            homepage: None,
-            dockerfile: None,
-            requires: Default::default(),
-            path: PathBuf::new(),
-            source: None,
+            ..Default::default()
         }];
 
         let filtered = apply_runtime_tool_filters(&registry, &cfg, &skills, false);
@@ -10806,14 +10800,8 @@ mod tests {
         let skills = vec![moltis_skills::types::SkillMetadata {
             name: "weather".into(),
             description: "weather checker".into(),
-            license: None,
-            compatibility: None,
             allowed_tools: vec!["WebFetch".into()],
-            homepage: None,
-            dockerfile: None,
-            requires: Default::default(),
-            path: PathBuf::new(),
-            source: None,
+            ..Default::default()
         }];
 
         let filtered = apply_runtime_tool_filters(&registry, &cfg, &skills, false);
