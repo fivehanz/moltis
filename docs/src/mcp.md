@@ -300,6 +300,13 @@ command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
 ```
 
+> **Tip:** Mount `/home/moltis/.npm` as a named volume so packages are only
+> downloaded once:
+>
+> ```sh
+> docker run -v moltis-npm-cache:/home/moltis/.npm ...
+> ```
+
 ### Using Docker containers
 
 Since the Moltis image ships the Docker CLI (`docker-ce-cli`), and given a Docker daemon is reachable via the mounted socket, you can also run MCP servers as isolated containers. This is useful when you need a specific Node version, want stronger isolation, or prefer official MCP Docker images:
