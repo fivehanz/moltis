@@ -118,6 +118,14 @@ fn normalize_schedule_kind(raw: &str) -> Option<&'static str> {
 }
 
 fn normalize_schedule_value(schedule: &mut Value) -> Result<()> {
+    // Rescue double-serialised objects before interpreting plain strings as cron
+    // expressions.  A bare cron expression like "0 9 * * 1" will fail JSON
+    // parsing and fall through to the String arm below.
+    if let Value::String(s) = &*schedule {
+        if let Ok(parsed @ Value::Object(_)) = serde_json::from_str(s.trim()) {
+            *schedule = parsed;
+        }
+    }
     match schedule {
         Value::String(expr) => {
             let expr = expr.trim();
@@ -275,6 +283,13 @@ fn prefers_system_event(session_target_hint: Option<&str>) -> bool {
 }
 
 fn normalize_payload_value(payload: &mut Value, session_target_hint: Option<&str>) -> Result<()> {
+    // Rescue double-serialised objects before interpreting plain strings as
+    // shorthand message text.
+    if let Value::String(s) = &*payload {
+        if let Ok(parsed @ Value::Object(_)) = serde_json::from_str(s.trim()) {
+            *payload = parsed;
+        }
+    }
     match payload {
         Value::String(message) => {
             let message = message.trim();
@@ -433,6 +448,11 @@ fn parse_sandbox_enabled(value: &Value, field: &str) -> Result<bool> {
 }
 
 fn normalize_sandbox_value(sandbox: &mut Value, field: &str) -> Result<()> {
+    if let Value::String(s) = &*sandbox {
+        if let Ok(parsed @ Value::Object(_)) = serde_json::from_str(s.trim()) {
+            *sandbox = parsed;
+        }
+    }
     match sandbox {
         Value::Bool(enabled) => {
             *sandbox = json!({ "enabled": enabled });
@@ -558,8 +578,20 @@ fn normalize_sandbox_field(obj: &mut Map<String, Value>) -> Result<()> {
     Ok(())
 }
 
+/// If `value` is a JSON string that parses to an object, return the parsed
+/// object.  Otherwise return the value unchanged.  This rescues the common
+/// LLM mistake of double-serialising an object parameter.
+fn try_parse_stringified_object(value: Value) -> Value {
+    if let Value::String(ref s) = value {
+        if let Ok(parsed @ Value::Object(_)) = serde_json::from_str(s.trim()) {
+            return parsed;
+        }
+    }
+    value
+}
+
 fn normalize_job_value(job: &Value) -> Result<Value> {
-    let mut normalized = job.clone();
+    let mut normalized = try_parse_stringified_object(job.clone());
     let obj = normalized
         .as_object_mut()
         .ok_or_else(|| Error::message("job must be an object"))?;
@@ -586,7 +618,7 @@ fn normalize_job_value(job: &Value) -> Result<Value> {
 }
 
 fn normalize_patch_value(patch: &Value) -> Result<Value> {
-    let mut normalized = patch.clone();
+    let mut normalized = try_parse_stringified_object(patch.clone());
     let obj = normalized
         .as_object_mut()
         .ok_or_else(|| Error::message("patch must be an object"))?;
@@ -754,10 +786,28 @@ impl AgentTool for CronTool {
                 Ok(serde_json::to_value(jobs)?)
             },
             "add" => {
-                let job_val = params
-                    .get("job")
-                    .ok_or_else(|| Error::message("missing 'job' parameter for add"))?;
-                let normalized = normalize_job_value(job_val)?;
+                let job_val = match params.get("job") {
+                    Some(v) => v.clone(),
+                    None => {
+                        // Rescue flat params: some models splay job fields at
+                        // the top level instead of nesting them under "job".
+                        let obj = params
+                            .as_object()
+                            .ok_or_else(|| Error::message("missing 'job' parameter for add"))?;
+                        if obj.contains_key("schedule") || obj.contains_key("payload") {
+                            let mut job_obj = Map::new();
+                            for (k, v) in obj {
+                                if k != "action" && k != "force" {
+                                    job_obj.insert(k.clone(), v.clone());
+                                }
+                            }
+                            Value::Object(job_obj)
+                        } else {
+                            return Err(Error::message("missing 'job' parameter for add").into());
+                        }
+                    },
+                };
+                let normalized = normalize_job_value(&job_val)?;
                 let create: CronJobCreate = serde_json::from_value(normalized)
                     .map_err(|e| Error::message(format!("invalid job spec: {e}")))?;
                 let job = self.service.add(create).await?;
@@ -1301,5 +1351,105 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated["wakeMode"], "now");
+    }
+
+    // --- Stringified-JSON rescue tests (issue #430) ---
+
+    #[tokio::test]
+    async fn test_add_accepts_stringified_job() {
+        let tool = make_tool();
+        let job_json = serde_json::to_string(&json!({
+            "name": "stringified job",
+            "schedule": { "kind": "every", "every_ms": 60000 },
+            "payload": { "kind": "agentTurn", "message": "do stuff" },
+            "sessionTarget": "isolated"
+        }))
+        .unwrap();
+
+        let result = tool
+            .execute(json!({ "action": "add", "job": job_json }))
+            .await
+            .unwrap();
+
+        assert!(result.get("id").is_some());
+        assert_eq!(result["name"], "stringified job");
+    }
+
+    #[tokio::test]
+    async fn test_add_accepts_flat_params_without_job_wrapper() {
+        let tool = make_tool();
+        let result = tool
+            .execute(json!({
+                "action": "add",
+                "name": "flat params",
+                "schedule": { "kind": "every", "every_ms": 60000 },
+                "payload": { "kind": "agentTurn", "message": "run" },
+                "sessionTarget": "isolated"
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.get("id").is_some());
+        assert_eq!(result["name"], "flat params");
+    }
+
+    #[tokio::test]
+    async fn test_add_accepts_stringified_nested_fields() {
+        let tool = make_tool();
+        let result = tool
+            .execute(json!({
+                "action": "add",
+                "job": {
+                    "name": "stringified nested",
+                    "schedule": r#"{"kind":"cron","expr":"0 9 * * 1"}"#,
+                    "payload": r#"{"kind":"agentTurn","message":"hello"}"#,
+                    "sandbox": r#"{"enabled":false}"#,
+                    "sessionTarget": "isolated"
+                }
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.get("id").is_some());
+        assert_eq!(result["schedule"]["kind"], "cron");
+        assert_eq!(result["schedule"]["expr"], "0 9 * * 1");
+        assert_eq!(result["payload"]["kind"], "agentTurn");
+        assert_eq!(result["payload"]["message"], "hello");
+        assert_eq!(result["sandbox"]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn test_update_accepts_stringified_patch() {
+        let tool = make_tool();
+        let add = tool
+            .execute(json!({
+                "action": "add",
+                "job": {
+                    "name": "to patch",
+                    "schedule": { "kind": "every", "every_ms": 60000 },
+                    "payload": { "kind": "agentTurn", "message": "x" },
+                    "sessionTarget": "isolated"
+                }
+            }))
+            .await
+            .unwrap();
+        let id = add["id"].as_str().unwrap();
+
+        let patch_json = serde_json::to_string(&json!({ "name": "patched" })).unwrap();
+        let updated = tool
+            .execute(json!({ "action": "update", "id": id, "patch": patch_json }))
+            .await
+            .unwrap();
+
+        assert_eq!(updated["name"], "patched");
+    }
+
+    #[tokio::test]
+    async fn test_stringified_job_with_invalid_json_is_rejected() {
+        let tool = make_tool();
+        let result = tool
+            .execute(json!({ "action": "add", "job": "not valid json {" }))
+            .await;
+        assert!(result.is_err());
     }
 }
