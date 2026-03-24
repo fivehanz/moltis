@@ -67,7 +67,8 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 22 LTS via NodeSource (npm/npx bundled) for stdio-based MCP servers
-RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+RUN install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
         | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
         > /etc/apt/sources.list.d/nodesource.list && \
