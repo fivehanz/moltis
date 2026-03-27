@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260327.03] - 2026-03-27
+### Added
+- [website] Add changelog HTML page and fix RPM version override
+
 ## [20260327.02] - 2026-03-27
 ### Fixed
 - [install] Support date-based version tags in installer and package builds
