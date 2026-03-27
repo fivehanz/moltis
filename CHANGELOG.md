@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260327.05] - 2026-03-27
+### Changed
+- [release] Build changelog HTML in prepare-release instead of CI
+
 ## [20260327.04] - 2026-03-27
 ### Fixed
 - [ci] Use file input for changelog blob to avoid argument list too long
