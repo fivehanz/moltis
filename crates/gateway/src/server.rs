@@ -20,7 +20,7 @@ use moltis_tools::{
     exec::EnvVarProvider,
     sessions_communicate::{
         SendToSessionFn, SendToSessionRequest, SessionsHistoryTool, SessionsListTool,
-        SessionsSendTool,
+        SessionsSearchTool, SessionsSendTool,
     },
     sessions_manage::{
         CreateSessionFn, CreateSessionRequest, DeleteSessionFn, DeleteSessionRequest,
@@ -3479,6 +3479,10 @@ pub async fn prepare_gateway_core(
             &session_metadata,
         ))));
         tool_registry.register(Box::new(SessionsHistoryTool::new(
+            Arc::clone(&session_store),
+            Arc::clone(&session_metadata),
+        )));
+        tool_registry.register(Box::new(SessionsSearchTool::new(
             Arc::clone(&session_store),
             Arc::clone(&session_metadata),
         )));
