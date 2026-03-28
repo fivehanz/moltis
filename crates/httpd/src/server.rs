@@ -1000,6 +1000,7 @@ pub async fn prepare_gateway(
                                             target.channel_type.as_str(),
                                             &target.account_id,
                                             &target.chat_id,
+                                            target.thread_id.as_deref(),
                                         )
                                         .await
                                         .map(|key| key == entry.key)

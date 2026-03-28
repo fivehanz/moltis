@@ -209,7 +209,7 @@ impl moltis_tools::location::LocationRequester for GatewayLocationRequester {
         outbound
             .send_text(
                 &reply_target.account_id,
-                &reply_target.chat_id,
+                &reply_target.outbound_to(),
                 "Please share your location in this chat.",
                 None,
             )

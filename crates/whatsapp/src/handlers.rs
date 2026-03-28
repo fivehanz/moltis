@@ -323,6 +323,7 @@ async fn handle_message(
             account_id: state.account_id.clone(),
             chat_id: chat_id.clone(),
             message_id: Some(info.id.to_string()),
+            thread_id: None,
         };
         if let Some(ref sink) = state.event_sink {
             match sink.dispatch_command(cmd, reply_to).await {
@@ -353,6 +354,7 @@ async fn handle_message(
         account_id: state.account_id.clone(),
         chat_id: chat_id.clone(),
         message_id: Some(info.id.to_string()),
+        thread_id: None,
     };
     let meta = ChannelMessageMeta {
         channel_type: ChannelType::Whatsapp,

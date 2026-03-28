@@ -277,6 +277,7 @@ impl MsTeamsPlugin {
             account_id: account_id.to_string(),
             chat_id: chat_id.clone(),
             message_id: activity.id,
+            thread_id: None,
         };
 
         let Some(sink) = event_sink else {

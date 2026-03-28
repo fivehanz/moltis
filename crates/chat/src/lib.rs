@@ -2950,6 +2950,7 @@ impl ChatService for LiveChatService {
                         target.channel_type.as_str(),
                         &target.account_id,
                         &target.chat_id,
+                        target.thread_id.as_deref(),
                     )
                     .await
                     .map(|k| k == session_key)
@@ -3363,6 +3364,7 @@ impl ChatService for LiveChatService {
                     target.channel_type.as_str(),
                     &target.account_id,
                     &target.chat_id,
+                    target.thread_id.as_deref(),
                 )
                 .await
                 .map(|k| k == session_key)
@@ -9185,6 +9187,7 @@ mod tests {
             account_id: "bot-main".to_string(),
             chat_id: "123456".to_string(),
             message_id: Some("99".to_string()),
+            thread_id: None,
         };
         let binding_json = serde_json::to_string(&binding).expect("serialize binding");
         let entry = make_session_entry_with_binding(Some(binding_json));
@@ -9447,6 +9450,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "123".to_string(),
             message_id: None,
+            thread_id: None,
         }];
         let state = mock_runtime();
 
@@ -9485,6 +9489,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "123".to_string(),
             message_id: Some("42".to_string()),
+            thread_id: None,
         };
 
         state
@@ -9530,6 +9535,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "123".to_string(),
             message_id: Some("42".to_string()),
+            thread_id: None,
         };
 
         state
@@ -9577,6 +9583,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "123".to_string(),
             message_id: Some("42".to_string()),
+            thread_id: None,
         };
         let session_key = "telegram:acct:123";
         state.push_channel_reply(session_key, target.clone()).await;
@@ -9626,6 +9633,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "456".to_string(),
             message_id: Some("99".to_string()),
+            thread_id: None,
         };
         let session_key = "discord:acct:456";
         state.push_channel_reply(session_key, target.clone()).await;
@@ -9672,6 +9680,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "123".to_string(),
             message_id: Some("42".to_string()),
+            thread_id: None,
         };
         let session_key = "discord:acct:123";
         state.push_channel_reply(session_key, target.clone()).await;
@@ -9720,6 +9729,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "123".to_string(),
             message_id: Some("55".to_string()),
+            thread_id: None,
         };
         let session_key = "telegram:acct:123";
         state.push_channel_reply(session_key, target.clone()).await;
@@ -9755,6 +9765,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "123".to_string(),
             message_id: Some("55".to_string()),
+            thread_id: None,
         };
         let session_key = "telegram:acct:123";
         state.push_channel_reply(session_key, target.clone()).await;
@@ -9791,6 +9802,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "123".to_string(),
             message_id: Some("55".to_string()),
+            thread_id: None,
         };
         let session_key = "telegram:acct:123";
         state.push_channel_reply(session_key, target.clone()).await;
@@ -9823,6 +9835,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "123".to_string(),
             message_id: Some("55".to_string()),
+            thread_id: None,
         };
         let session_key = "telegram:acct:123";
         state.push_channel_reply(session_key, target.clone()).await;
@@ -9863,6 +9876,7 @@ mod tests {
             account_id: "acct".to_string(),
             chat_id: "456".to_string(),
             message_id: Some("77".to_string()),
+            thread_id: None,
         };
         let session_key = "telegram:acct:456";
         state.push_channel_reply(session_key, target.clone()).await;
