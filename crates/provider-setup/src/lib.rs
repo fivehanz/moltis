@@ -2492,8 +2492,13 @@ impl ProviderSetupService for LiveProviderSetupService {
         .await;
 
         const VALIDATION_MAX_MODEL_PROBES: usize = 8;
-        const VALIDATION_MAX_TIMEOUTS: usize = 3;
-        const VALIDATION_PROBE_TIMEOUT_SECS: u64 = 10;
+        // With a 30 s per-probe timeout, a single timeout is enough to
+        // decide the endpoint is unreachable — keeps worst-case at ~30 s.
+        const VALIDATION_MAX_TIMEOUTS: usize = 1;
+        // Local LLM servers may need 10-20+ seconds to load a model before
+        // responding.  30 s gives them room while still failing reasonably
+        // fast when the endpoint is genuinely unreachable.
+        const VALIDATION_PROBE_TIMEOUT_SECS: u64 = 30;
 
         reorder_models_for_validation(&mut models);
 

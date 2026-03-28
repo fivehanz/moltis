@@ -2228,7 +2228,10 @@ impl ModelService for LiveModelService {
         let probe = vec![ChatMessage::user("ping")];
         let mut stream = provider.stream(probe);
 
-        let result = tokio::time::timeout(Duration::from_secs(10), async {
+        // Local LLM servers (llama.cpp, Ollama, etc.) may need significant
+        // time to load a model into memory before streaming the first token.
+        // 30 s accommodates slow cold-starts without penalising cloud providers.
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
             while let Some(event) = stream.next().await {
                 match event {
                     StreamEvent::Delta(_) | StreamEvent::Done(_) => return Ok(()),
@@ -2279,9 +2282,9 @@ impl ModelService for LiveModelService {
                     model_id,
                     provider = provider.name(),
                     elapsed_ms = started.elapsed().as_millis(),
-                    "model probe timed out after 10s"
+                    "model probe timed out after 30s"
                 );
-                Err("Connection timed out after 10 seconds".into())
+                Err("Connection timed out after 30 seconds".into())
             },
         }
     }
@@ -12375,5 +12378,121 @@ mod tests {
             mode: Some(ToolMode::Auto),
         };
         assert_eq!(effective_tool_mode(&text), ToolMode::Text);
+    }
+
+    // ── Slow-start provider for model-probe timeout regression tests ────
+
+    /// Provider that delays `startup_delay` before yielding the first token.
+    /// Simulates local LLM servers that need to load a model into memory.
+    struct SlowStartProvider {
+        name: String,
+        id: String,
+        startup_delay: Duration,
+    }
+
+    #[async_trait]
+    impl LlmProvider for SlowStartProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[Value],
+        ) -> Result<moltis_agents::model::CompletionResponse> {
+            tokio::time::sleep(self.startup_delay).await;
+            Ok(moltis_agents::model::CompletionResponse {
+                text: Some("pong".to_string()),
+                tool_calls: vec![],
+                usage: moltis_agents::model::Usage::default(),
+            })
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            let delay = self.startup_delay;
+            Box::pin(async_stream::stream! {
+                tokio::time::sleep(delay).await;
+                yield StreamEvent::Delta("pong".to_string());
+                yield StreamEvent::Done(moltis_agents::model::Usage::default());
+            })
+        }
+    }
+
+    /// Regression test for GitHub issue #514: local LLM servers that need
+    /// time to load a model should not be rejected by the probe timeout.
+    /// The probe timeout is 30 s; a 2 s delay must succeed.
+    #[tokio::test]
+    async fn model_probe_succeeds_with_slow_start_provider() {
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "local::slow-model".to_string(),
+                provider: "local".to_string(),
+                display_name: "Slow Model".to_string(),
+                created_at: None,
+            },
+            Arc::new(SlowStartProvider {
+                name: "local".to_string(),
+                id: "local::slow-model".to_string(),
+                startup_delay: Duration::from_secs(2),
+            }),
+        );
+
+        let disabled = Arc::new(RwLock::new(DisabledModelsStore::default()));
+        let service = LiveModelService::new(Arc::new(RwLock::new(registry)), disabled, vec![]);
+
+        let result = service
+            .test(serde_json::json!({ "modelId": "local::slow-model" }))
+            .await;
+        assert!(
+            result.is_ok(),
+            "probe should succeed for slow-start provider: {result:?}"
+        );
+        let payload = result.unwrap();
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["modelId"], "local::slow-model");
+    }
+
+    /// Verify that a truly unreachable provider still produces a timeout error
+    /// (not an infinite hang) after the 30 s limit.
+    /// Uses `start_paused = true` so the 30 s timeout elapses instantly.
+    #[tokio::test(start_paused = true)]
+    async fn model_probe_times_out_for_unresponsive_provider() {
+        let mut registry = ProviderRegistry::empty();
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "local::stuck-model".to_string(),
+                provider: "local".to_string(),
+                display_name: "Stuck Model".to_string(),
+                created_at: None,
+            },
+            Arc::new(SlowStartProvider {
+                name: "local".to_string(),
+                id: "local::stuck-model".to_string(),
+                // Well beyond the 30 s timeout — will trigger the timeout branch.
+                startup_delay: Duration::from_secs(120),
+            }),
+        );
+
+        let disabled = Arc::new(RwLock::new(DisabledModelsStore::default()));
+        let service = LiveModelService::new(Arc::new(RwLock::new(registry)), disabled, vec![]);
+
+        let result = service
+            .test(serde_json::json!({ "modelId": "local::stuck-model" }))
+            .await;
+        assert!(result.is_err(), "probe should fail for stuck provider");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("timed out"),
+            "error should mention timeout: {err}"
+        );
     }
 }
