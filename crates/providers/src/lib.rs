@@ -1980,6 +1980,10 @@ impl ProviderRegistry {
             // Get alias if configured (for metrics differentiation).
             let alias = config.get("anthropic").and_then(|e| e.alias.clone());
             let provider_label = alias.clone().unwrap_or_else(|| "anthropic".into());
+            let cache_retention = config
+                .get("anthropic")
+                .map(|e| e.cache_retention)
+                .unwrap_or(moltis_config::CacheRetention::Short);
             let preferred = configured_models_for_provider(config, "anthropic");
             let discovered = if should_fetch_models(config, "anthropic") {
                 ANTHROPIC_MODELS
@@ -1997,12 +2001,15 @@ impl ProviderRegistry {
                 if self.has_provider_model(&provider_label, &model_id) {
                     continue;
                 }
-                let provider = Arc::new(anthropic::AnthropicProvider::with_alias(
-                    key.clone(),
-                    model_id.clone(),
-                    base_url.clone(),
-                    alias.clone(),
-                ));
+                let provider = Arc::new(
+                    anthropic::AnthropicProvider::with_alias(
+                        key.clone(),
+                        model_id.clone(),
+                        base_url.clone(),
+                        alias.clone(),
+                    )
+                    .with_cache_retention(cache_retention),
+                );
                 self.register(
                     ModelInfo {
                         id: model_id,
@@ -2113,6 +2120,10 @@ impl ProviderRegistry {
             // Get alias if configured (for metrics differentiation).
             let alias = config.get(def.config_name).and_then(|e| e.alias.clone());
             let provider_label = alias.unwrap_or_else(|| def.config_name.into());
+            let cache_retention = config
+                .get(def.config_name)
+                .map(|e| e.cache_retention)
+                .unwrap_or(moltis_config::CacheRetention::Short);
             let stream_transport = config
                 .get(def.config_name)
                 .map(|entry| entry.stream_transport)
@@ -2204,7 +2215,8 @@ impl ProviderRegistry {
                     base_url.clone(),
                     provider_label.clone(),
                 )
-                .with_stream_transport(stream_transport);
+                .with_stream_transport(stream_transport)
+                .with_cache_retention(cache_retention);
 
                 if !matches!(effective_tool_mode, moltis_config::ToolMode::Auto) {
                     oai = oai.with_tool_mode(effective_tool_mode);

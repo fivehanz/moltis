@@ -41,6 +41,8 @@ pub struct OpenAiProvider {
     tool_mode_override: Option<moltis_config::ToolMode>,
     /// Optional reasoning effort level for o-series models.
     reasoning_effort: Option<moltis_agents::model::ReasoningEffort>,
+    /// Prompt cache retention policy (used for OpenRouter Anthropic passthrough).
+    cache_retention: moltis_config::CacheRetention,
 }
 
 const OPENAI_MODELS_ENDPOINT_PATH: &str = "/models";
@@ -435,6 +437,7 @@ impl OpenAiProvider {
             metadata_cache: tokio::sync::OnceCell::new(),
             tool_mode_override: None,
             reasoning_effort: None,
+            cache_retention: moltis_config::CacheRetention::Short,
         }
     }
 
@@ -455,7 +458,14 @@ impl OpenAiProvider {
             metadata_cache: tokio::sync::OnceCell::new(),
             tool_mode_override: None,
             reasoning_effort: None,
+            cache_retention: moltis_config::CacheRetention::Short,
         }
+    }
+
+    #[must_use]
+    pub fn with_cache_retention(mut self, cache_retention: moltis_config::CacheRetention) -> Self {
+        self.cache_retention = cache_retention;
+        self
     }
 
     #[must_use]
@@ -624,6 +634,74 @@ impl OpenAiProvider {
             .ok()
             .and_then(|url| url.host_str().map(ToString::to_string))
             .is_some_and(|host| host.eq_ignore_ascii_case("api.openai.com"))
+    }
+
+    /// Returns `true` when this provider targets an Anthropic model via
+    /// OpenRouter, which supports prompt caching when `cache_control`
+    /// breakpoints are present in the message payload.
+    fn is_openrouter_anthropic(&self) -> bool {
+        self.base_url.contains("openrouter.ai") && self.model.starts_with("anthropic/")
+    }
+
+    /// For OpenRouter Anthropic models, inject `cache_control` breakpoints
+    /// on the system message and the last user message to enable prompt
+    /// caching passthrough to Anthropic.
+    fn apply_openrouter_cache_control(&self, messages: &mut [serde_json::Value]) {
+        if !self.is_openrouter_anthropic()
+            || matches!(self.cache_retention, moltis_config::CacheRetention::None)
+        {
+            return;
+        }
+
+        let cache_control = serde_json::json!({ "type": "ephemeral" });
+
+        // Add cache_control to the system message content.
+        for msg in messages.iter_mut() {
+            if msg.get("role").and_then(serde_json::Value::as_str) != Some("system") {
+                continue;
+            }
+            match msg.get_mut("content") {
+                Some(content) if content.is_string() => {
+                    let text = content.as_str().unwrap_or_default().to_string();
+                    msg["content"] = serde_json::json!([{
+                        "type": "text",
+                        "text": text,
+                        "cache_control": cache_control
+                    }]);
+                },
+                Some(content) if content.is_array() => {
+                    if let Some(last) = content.as_array_mut().and_then(|a| a.last_mut()) {
+                        last["cache_control"] = cache_control.clone();
+                    }
+                },
+                _ => {},
+            }
+            break;
+        }
+
+        // Add cache_control to the last user message.
+        if let Some(last_user) = messages
+            .iter_mut()
+            .rev()
+            .find(|m| m.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        {
+            match last_user.get_mut("content") {
+                Some(content) if content.is_string() => {
+                    let text = content.as_str().unwrap_or_default().to_string();
+                    last_user["content"] = serde_json::json!([{
+                        "type": "text",
+                        "text": text,
+                        "cache_control": cache_control
+                    }]);
+                },
+                Some(content) if content.is_array() => {
+                    if let Some(last) = content.as_array_mut().and_then(|a| a.last_mut()) {
+                        last["cache_control"] = cache_control;
+                    }
+                },
+                _ => {},
+            }
+        }
     }
 
     /// Build the HTTP URL for the Responses API (`/responses`).
@@ -811,7 +889,8 @@ impl OpenAiProvider {
     ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
         Box::pin(async_stream::stream! {
             let serialized_messages = self.serialize_messages_for_request(&messages);
-            let (openai_messages, system_prompt) = self.prepare_request_messages(serialized_messages);
+            let (mut openai_messages, system_prompt) = self.prepare_request_messages(serialized_messages);
+            self.apply_openrouter_cache_control(&mut openai_messages);
             let mut body = serde_json::json!({
                 "model": self.model,
                 "messages": openai_messages,
@@ -1350,6 +1429,7 @@ impl LlmProvider for OpenAiProvider {
             tool_mode_override: self.tool_mode_override,
             reasoning_effort: Some(effort),
             wire_api: self.wire_api,
+            cache_retention: self.cache_retention,
         }))
     }
 
@@ -1436,7 +1516,9 @@ impl LlmProvider for OpenAiProvider {
         }
 
         let serialized_messages = self.serialize_messages_for_request(messages);
-        let (openai_messages, system_prompt) = self.prepare_request_messages(serialized_messages);
+        let (mut openai_messages, system_prompt) =
+            self.prepare_request_messages(serialized_messages);
+        self.apply_openrouter_cache_control(&mut openai_messages);
         let mut body = serde_json::json!({
             "model": self.model,
             "messages": openai_messages,
@@ -2644,5 +2726,73 @@ mod tests {
             Some(ReasoningEffort::Medium)
         );
         assert_eq!(with_effort.id(), "o3");
+    }
+
+    #[test]
+    fn openrouter_anthropic_injects_cache_control_on_system_and_last_user() {
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new("key".into()),
+            "anthropic/claude-sonnet-4-20250514".into(),
+            "https://openrouter.ai/api/v1".into(),
+            "openrouter".into(),
+        );
+
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "You are helpful."}),
+            serde_json::json!({"role": "user", "content": "hello"}),
+            serde_json::json!({"role": "assistant", "content": "hi there"}),
+            serde_json::json!({"role": "user", "content": "bye"}),
+        ];
+
+        provider.apply_openrouter_cache_control(&mut messages);
+
+        // System message converted to content-block array with cache_control.
+        let sys_content = messages[0]["content"].as_array().expect("should be array");
+        assert_eq!(sys_content.len(), 1);
+        assert_eq!(sys_content[0]["text"], "You are helpful.");
+        assert_eq!(sys_content[0]["cache_control"]["type"], "ephemeral");
+
+        // First user message should NOT have cache_control.
+        assert_eq!(messages[1]["content"], "hello");
+
+        // Last user message should have cache_control.
+        let last_user_content = messages[3]["content"].as_array().expect("should be array");
+        assert_eq!(last_user_content[0]["text"], "bye");
+        assert_eq!(last_user_content[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn non_openrouter_skips_cache_control() {
+        let provider = OpenAiProvider::new(
+            Secret::new("key".into()),
+            "gpt-4o".into(),
+            "https://api.openai.com/v1".into(),
+        );
+
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "sys"}),
+            serde_json::json!({"role": "user", "content": "hello"}),
+        ];
+
+        provider.apply_openrouter_cache_control(&mut messages);
+
+        // Nothing should change for non-OpenRouter providers.
+        assert_eq!(messages[0]["content"], "sys");
+        assert_eq!(messages[1]["content"], "hello");
+    }
+
+    #[test]
+    fn openrouter_non_anthropic_model_skips_cache_control() {
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new("key".into()),
+            "openai/gpt-4o".into(),
+            "https://openrouter.ai/api/v1".into(),
+            "openrouter".into(),
+        );
+
+        let mut messages = vec![serde_json::json!({"role": "user", "content": "hello"})];
+
+        provider.apply_openrouter_cache_control(&mut messages);
+        assert_eq!(messages[0]["content"], "hello");
     }
 }

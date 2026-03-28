@@ -107,6 +107,7 @@ offered = ["local-llm", "github-copilot", "openai-codex", "openai", "anthropic",
 # fetch_models = true                          # Set false to skip remote discovery
 # base_url = "https://api.anthropic.com"     # API endpoint
 # alias = "anthropic"                         # Custom name for metrics
+# cache_retention = "short"                    # Prompt caching: "none" | "short" | "long"
 
 # ── OpenAI ────────────────────────────────────────────────────
 [providers.openai]

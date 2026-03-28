@@ -120,6 +120,7 @@ fn build_schema_map() -> KnownKeys {
             ("wire_api", Leaf),
             ("alias", Leaf),
             ("tool_mode", Leaf),
+            ("cache_retention", Leaf),
         ]))
     };
 
@@ -2638,5 +2639,46 @@ tool_mode = "{mode}"
             "reasoning_effort should be a recognized field, got: {:?}",
             result.diagnostics
         );
+    }
+
+    #[test]
+    fn cache_retention_field_accepted_in_provider_entry() {
+        let toml = r#"
+[providers.anthropic]
+enabled = true
+cache_retention = "short"
+"#;
+        let result = validate_toml_str(toml);
+        let unknown = result
+            .diagnostics
+            .iter()
+            .find(|d| d.category == "unknown-field" && d.path.contains("cache_retention"));
+        assert!(
+            unknown.is_none(),
+            "cache_retention should be a known field, got: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn cache_retention_all_values_parse_correctly() {
+        for mode in ["none", "short", "long"] {
+            let toml = format!(
+                r#"
+[providers.anthropic]
+cache_retention = "{mode}"
+"#
+            );
+            let result = validate_toml_str(&toml);
+            let type_error = result
+                .diagnostics
+                .iter()
+                .find(|d| d.category == "type-error");
+            assert!(
+                type_error.is_none(),
+                "cache_retention = \"{mode}\" should parse without type error, got: {:?}",
+                result.diagnostics
+            );
+        }
     }
 }
