@@ -283,13 +283,7 @@ pub fn build_gateway_base(
     }
 
     #[cfg(feature = "graphql")]
-    let graphql_schema = {
-        let system_info = Arc::new(crate::graphql_routes::GatewaySystemInfoService {
-            state: Arc::clone(&state),
-        });
-        let services = state.services.to_services(system_info);
-        moltis_graphql::build_schema(services, state.graphql_broadcast.clone())
-    };
+    let graphql_schema = crate::graphql_routes::build_graphql_schema(Arc::clone(&state));
 
     let app_state = AppState {
         gateway: state,
@@ -349,13 +343,7 @@ pub fn build_gateway_base(
     }
 
     #[cfg(feature = "graphql")]
-    let graphql_schema = {
-        let system_info = Arc::new(crate::graphql_routes::GatewaySystemInfoService {
-            state: Arc::clone(&state),
-        });
-        let services = state.services.to_services(system_info);
-        moltis_graphql::build_schema(services, state.graphql_broadcast.clone())
-    };
+    let graphql_schema = crate::graphql_routes::build_graphql_schema(Arc::clone(&state));
 
     let app_state = AppState {
         gateway: state,
