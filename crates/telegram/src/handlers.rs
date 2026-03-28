@@ -360,6 +360,105 @@ pub async fn handle_message_direct(
                 )
             },
         }
+    } else if let Some(document_file) = extract_document_file(&msg) {
+        // Handle documents/files - only download supported types to avoid
+        // wasting bandwidth on files we cannot process.
+        let caption = text.clone().unwrap_or_default();
+        let doc_label = format_document_label(
+            document_file.file_name.as_deref(),
+            &document_file.media_type,
+        );
+
+        if !is_supported_document_type(&document_file.media_type) {
+            debug!(
+                account_id,
+                media_type = %document_file.media_type,
+                file_name = ?document_file.file_name,
+                "skipping unsupported document type"
+            );
+            let body = if caption.is_empty() {
+                doc_label
+            } else {
+                format!("{caption}\n{doc_label}")
+            };
+            (body, Vec::new(), None)
+        } else {
+            match download_telegram_file(bot, &document_file.file_id).await {
+                Ok(document_data) => {
+                    debug!(
+                        account_id,
+                        file_id = %document_file.file_id,
+                        media_type = %document_file.media_type,
+                        file_name = ?document_file.file_name,
+                        size = document_data.len(),
+                        "downloaded document"
+                    );
+
+                    if document_file.media_type.starts_with("image/") {
+                        // Optimize image documents the same way as photo messages
+                        let (final_data, media_type) =
+                            match moltis_media::image_ops::optimize_for_llm(&document_data, None) {
+                                Ok(optimized) => {
+                                    if optimized.was_resized {
+                                        info!(
+                                            account_id,
+                                            original_size = document_data.len(),
+                                            final_size = optimized.data.len(),
+                                            original_dims = %format!("{}x{}", optimized.original_width, optimized.original_height),
+                                            final_dims = %format!("{}x{}", optimized.final_width, optimized.final_height),
+                                            "resized document image for LLM"
+                                        );
+                                    }
+                                    (optimized.data, optimized.media_type)
+                                },
+                                Err(e) => {
+                                    warn!(account_id, error = %e, "failed to optimize document image, using original");
+                                    (document_data, document_file.media_type.clone())
+                                },
+                            };
+                        let attachment = ChannelAttachment {
+                            media_type,
+                            data: final_data,
+                        };
+                        (caption, vec![attachment], None)
+                    } else if let Some(extracted_text) =
+                        extract_text_document_content(&document_data, &document_file.media_type)
+                    {
+                        let body = if caption.is_empty() {
+                            format!("{doc_label}\n\n{extracted_text}")
+                        } else {
+                            format!("{caption}\n\n{doc_label}\n\n{extracted_text}")
+                        };
+                        (body, Vec::new(), None)
+                    } else {
+                        let body = if caption.is_empty() {
+                            doc_label
+                        } else {
+                            format!("{caption}\n{doc_label}")
+                        };
+                        (body, Vec::new(), None)
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        account_id,
+                        error = %e,
+                        file_id = %document_file.file_id,
+                        media_type = %document_file.media_type,
+                        file_name = ?document_file.file_name,
+                        "failed to download document"
+                    );
+
+                    let body = if caption.is_empty() {
+                        format!("{doc_label}\n[Document - download failed]")
+                    } else {
+                        format!("{caption}\n{doc_label}\n[Document - download failed]")
+                    };
+
+                    (body, Vec::new(), None)
+                },
+            }
+        }
     } else if let Some(loc_info) = extract_location(&msg) {
         let lat = loc_info.latitude;
         let lon = loc_info.longitude;
@@ -1464,6 +1563,127 @@ fn extract_photo_file(msg: &Message) -> Option<PhotoFileInfo> {
     }
 }
 
+/// Document/file info for generic file handling.
+struct DocumentFileInfo {
+    file_id: String,
+    /// MIME type for the file (e.g., "text/html", "application/pdf").
+    media_type: String,
+    /// Optional original filename supplied by Telegram.
+    file_name: Option<String>,
+}
+
+/// Extract document file info from a message.
+/// The returned `media_type` is already normalized (lowercased, parameters stripped).
+fn extract_document_file(msg: &Message) -> Option<DocumentFileInfo> {
+    match &msg.kind {
+        MessageKind::Common(common) => match &common.media_kind {
+            MediaKind::Document(d) => {
+                let raw = d
+                    .document
+                    .mime_type
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "application/octet-stream".to_string());
+                Some(DocumentFileInfo {
+                    file_id: d.document.file.id.clone(),
+                    media_type: normalize_media_type(&raw),
+                    file_name: d.document.file_name.clone(),
+                })
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+const MAX_INLINE_DOCUMENT_BYTES: usize = 64 * 1024;
+const MAX_INLINE_DOCUMENT_CHARS: usize = 24_000;
+
+fn format_document_label(file_name: Option<&str>, media_type: &str) -> String {
+    match file_name {
+        Some(name) if !name.trim().is_empty() => format!("[Document: {name} ({media_type})]"),
+        _ => format!("[Document: {media_type}]"),
+    }
+}
+
+/// Normalize a MIME type by stripping parameters (e.g. `; charset=utf-8`) and
+/// lower-casing. Returns the base media type only.
+fn normalize_media_type(media_type: &str) -> String {
+    media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Check whether a normalized media type is inlineable as text.
+/// Expects input from `normalize_media_type` (lowercased, no parameters).
+fn should_inline_document_text(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "text/html"
+            | "text/plain"
+            | "text/markdown"
+            | "text/x-markdown"
+            | "text/xml"
+            | "application/json"
+            | "application/xml"
+    ) || media_type.ends_with("+json")
+        || media_type.ends_with("+xml")
+}
+
+/// Returns `true` for document types we can actually process (text inlining or
+/// image attachment). Used to skip downloading unsupported files.
+/// Expects input from `normalize_media_type`.
+fn is_supported_document_type(media_type: &str) -> bool {
+    media_type.starts_with("image/") || should_inline_document_text(media_type)
+}
+
+/// Expects a normalized `media_type` (from `normalize_media_type`).
+fn extract_text_document_content(data: &[u8], media_type: &str) -> Option<String> {
+    if data.is_empty() || !should_inline_document_text(media_type) {
+        return None;
+    }
+
+    let mut truncated = false;
+
+    // Byte-limit: truncate to the last valid UTF-8 boundary within the cap
+    // so we never inject U+FFFD from slicing a multi-byte sequence.
+    let bounded = if data.len() > MAX_INLINE_DOCUMENT_BYTES {
+        truncated = true;
+        let slice = &data[..MAX_INLINE_DOCUMENT_BYTES];
+        match std::str::from_utf8(slice) {
+            Ok(_) => slice,
+            Err(e) => &slice[..e.valid_up_to()],
+        }
+    } else {
+        data
+    };
+
+    // Lossy-convert for files with stray invalid bytes in the middle.
+    let lossy = String::from_utf8_lossy(bounded);
+    let trimmed = lossy.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Char-limit: find the byte offset of the Nth char boundary in one pass.
+    let mut text =
+        if let Some((byte_idx, _)) = trimmed.char_indices().nth(MAX_INLINE_DOCUMENT_CHARS) {
+            truncated = true;
+            trimmed[..byte_idx].to_string()
+        } else {
+            trimmed.to_string()
+        };
+
+    if truncated {
+        text.push_str("\n\n[Document content truncated]");
+    }
+
+    Some(text)
+}
+
 /// Extracted location info from a Telegram message.
 struct LocationInfo {
     latitude: f64,
@@ -1780,8 +2000,16 @@ mod tests {
     struct MockSink {
         dispatch_calls: std::sync::atomic::AtomicUsize,
         dispatched_texts: Mutex<Vec<String>>,
+        dispatched_with_attachments: Mutex<Vec<DispatchedAttachment>>,
         stt_available: bool,
         transcription_result: Mutex<Option<Result<String>>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct DispatchedAttachment {
+        text: String,
+        media_types: Vec<String>,
+        sizes: Vec<usize>,
     }
 
     impl MockSink {
@@ -1810,6 +2038,31 @@ mod tests {
                 .lock()
                 .expect("lock")
                 .push(text.to_string());
+        }
+
+        async fn dispatch_to_chat_with_attachments(
+            &self,
+            text: &str,
+            attachments: Vec<ChannelAttachment>,
+            _reply_to: ChannelReplyTarget,
+            _meta: ChannelMessageMeta,
+        ) {
+            let media_types = attachments
+                .iter()
+                .map(|attachment| attachment.media_type.clone())
+                .collect();
+            let sizes = attachments
+                .iter()
+                .map(|attachment| attachment.data.len())
+                .collect();
+            self.dispatched_with_attachments
+                .lock()
+                .expect("lock")
+                .push(DispatchedAttachment {
+                    text: text.to_string(),
+                    media_types,
+                    sizes,
+                });
         }
 
         async fn dispatch_command(
@@ -1929,6 +2182,382 @@ mod tests {
             message_kind(&msg),
             Some(ChannelMessageKind::Voice)
         ));
+    }
+
+    #[test]
+    fn extract_document_file_from_message() {
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 2,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "caption": "please review",
+            "document": {
+                "file_id": "doc-file-id",
+                "file_unique_id": "doc-unique-id",
+                "file_name": "pinned.html",
+                "mime_type": "text/html",
+                "file_size": 512
+            }
+        }))
+        .expect("deserialize document message");
+
+        let document = extract_document_file(&msg).expect("document should be extracted");
+        assert_eq!(document.file_id, "doc-file-id");
+        assert_eq!(document.media_type, "text/html");
+        assert_eq!(document.file_name.as_deref(), Some("pinned.html"));
+    }
+
+    #[test]
+    fn extract_document_file_defaults_media_type_when_missing() {
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 3,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "document": {
+                "file_id": "doc-file-id",
+                "file_unique_id": "doc-unique-id",
+                "file_name": "payload.bin",
+                "file_size": 128
+            }
+        }))
+        .expect("deserialize document message");
+
+        let document = extract_document_file(&msg).expect("document should be extracted");
+        assert_eq!(document.media_type, "application/octet-stream");
+    }
+
+    #[test]
+    fn should_inline_markdown_document_types() {
+        assert!(should_inline_document_text("text/markdown"));
+        assert!(should_inline_document_text("text/x-markdown"));
+    }
+
+    #[test]
+    fn should_inline_text_xml() {
+        assert!(should_inline_document_text("text/xml"));
+    }
+
+    #[test]
+    fn should_inline_after_normalizing_mime_parameters() {
+        // should_inline_document_text expects pre-normalized input;
+        // verify the full normalize → check pipeline works.
+        assert!(should_inline_document_text(&normalize_media_type(
+            "text/plain; charset=utf-8"
+        )));
+        assert!(should_inline_document_text(&normalize_media_type(
+            "application/json; charset=utf-8"
+        )));
+        assert!(should_inline_document_text(&normalize_media_type(
+            "text/html; charset=iso-8859-1"
+        )));
+    }
+
+    #[test]
+    fn normalize_media_type_strips_params() {
+        assert_eq!(
+            normalize_media_type("text/plain; charset=utf-8"),
+            "text/plain"
+        );
+        assert_eq!(normalize_media_type("TEXT/HTML"), "text/html");
+        assert_eq!(normalize_media_type("application/json"), "application/json");
+    }
+
+    #[test]
+    fn is_supported_document_type_checks() {
+        assert!(is_supported_document_type("image/png"));
+        assert!(is_supported_document_type("text/plain"));
+        assert!(is_supported_document_type("application/json"));
+        assert!(!is_supported_document_type("application/pdf"));
+        assert!(!is_supported_document_type("application/octet-stream"));
+    }
+
+    #[test]
+    fn extract_text_document_content_utf8_boundary() {
+        // 3-byte UTF-8 char: € = [0xE2, 0x82, 0xAC]
+        let mut data = vec![b'A'; MAX_INLINE_DOCUMENT_BYTES - 1];
+        // Place a 3-byte char straddling the boundary
+        data.push(0xE2);
+        data.push(0x82);
+        data.push(0xAC);
+        let result =
+            extract_text_document_content(&data, "text/plain").expect("should produce text");
+        // Should not end with the replacement character
+        assert!(!result.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn extract_text_document_content_cjk_no_replacement_char() {
+        // CJK chars are 3 bytes each. Build a buffer that exceeds the byte
+        // limit but stays under the char limit (~21K chars < 24K cap), so the
+        // char-limit branch is NOT taken. U+FFFD must still not appear.
+        // U+4E00 (一) = [0xE4, 0xB8, 0x80]
+        let cjk = [0xE4u8, 0xB8, 0x80];
+        let char_count = (MAX_INLINE_DOCUMENT_BYTES + 2) / 3; // enough to exceed byte cap
+        assert!(
+            char_count < MAX_INLINE_DOCUMENT_CHARS,
+            "test requires char count below cap"
+        );
+        let data: Vec<u8> = cjk.iter().copied().cycle().take(char_count * 3).collect();
+        assert!(data.len() > MAX_INLINE_DOCUMENT_BYTES);
+
+        let result =
+            extract_text_document_content(&data, "text/plain").expect("should produce text");
+        assert!(
+            !result.contains('\u{FFFD}'),
+            "U+FFFD found in CJK truncation result"
+        );
+        assert!(result.contains("[Document content truncated]"));
+    }
+
+    #[tokio::test]
+    async fn document_html_is_inlined_into_chat_body() {
+        use axum::{http::Method, routing::any};
+
+        async fn combined_handler(
+            method: Method,
+            State(state): State<MockTelegramApi>,
+            uri: Uri,
+            body: Bytes,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            if method == Method::GET {
+                return Bytes::from_static(b"<html><body><h1>Pinned</h1></body></html>")
+                    .into_response();
+            }
+            telegram_api_handler(State(state), uri, body)
+                .await
+                .into_response()
+        }
+
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route("/{*path}", any(combined_handler))
+            .with_state(mock_api);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_id = "test-account";
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(account_id.to_string(), AccountState {
+                bot: bot.clone(),
+                bot_username: Some("test_bot".into()),
+                account_id: account_id.to_string(),
+                config: TelegramAccountConfig {
+                    token: Secret::new("test-token".to_string()),
+                    dm_policy: DmPolicy::Open,
+                    ..Default::default()
+                },
+                outbound: Arc::clone(&outbound),
+                cancel: CancellationToken::new(),
+                message_log: None,
+                event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                otp: Mutex::new(OtpState::new(300)),
+            });
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 9,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "caption": "Please review this",
+            "document": {
+                "file_id": "doc-file-id",
+                "file_unique_id": "doc-unique-id",
+                "file_name": "pinned.html",
+                "mime_type": "text/html",
+                "file_size": 512
+            }
+        }))
+        .expect("deserialize document message");
+
+        handle_message_direct(msg, &bot, account_id, &accounts)
+            .await
+            .expect("handle message");
+
+        assert_eq!(
+            sink.dispatch_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "text/html documents should be dispatched as text content"
+        );
+
+        {
+            let texts = sink.dispatched_texts.lock().expect("lock");
+            assert_eq!(texts.len(), 1);
+            assert!(texts[0].contains("Please review this"));
+            assert!(texts[0].contains("[Document: pinned.html (text/html)]"));
+            assert!(texts[0].contains("<h1>Pinned</h1>"));
+        }
+
+        {
+            let attachments = sink.dispatched_with_attachments.lock().expect("lock");
+            assert!(
+                attachments.is_empty(),
+                "text/html documents should not be sent as image attachments"
+            );
+        }
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
+    }
+
+    #[tokio::test]
+    async fn document_image_is_dispatched_as_attachment() {
+        use axum::{http::Method, routing::any};
+
+        async fn combined_handler(
+            method: Method,
+            State(state): State<MockTelegramApi>,
+            uri: Uri,
+            body: Bytes,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            if method == Method::GET {
+                return Bytes::from_static(b"fake-png-data").into_response();
+            }
+            telegram_api_handler(State(state), uri, body)
+                .await
+                .into_response()
+        }
+
+        let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
+        let mock_api = MockTelegramApi {
+            requests: Arc::clone(&recorded_requests),
+        };
+        let app = Router::new()
+            .route("/{*path}", any(combined_handler))
+            .with_state(mock_api);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve mock telegram api");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let api_url = reqwest::Url::parse(&format!("http://{addr}/")).expect("parse api url");
+        let bot = Bot::new("test-token").set_api_url(api_url);
+
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let outbound = Arc::new(TelegramOutbound {
+            accounts: Arc::clone(&accounts),
+        });
+        let sink = Arc::new(MockSink::default());
+        let account_id = "test-account";
+
+        {
+            let mut map = accounts.write().expect("accounts write lock");
+            map.insert(account_id.to_string(), AccountState {
+                bot: bot.clone(),
+                bot_username: Some("test_bot".into()),
+                account_id: account_id.to_string(),
+                config: TelegramAccountConfig {
+                    token: Secret::new("test-token".to_string()),
+                    dm_policy: DmPolicy::Open,
+                    ..Default::default()
+                },
+                outbound: Arc::clone(&outbound),
+                cancel: CancellationToken::new(),
+                message_log: None,
+                event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                otp: Mutex::new(OtpState::new(300)),
+            });
+        }
+
+        let msg: Message = serde_json::from_value(json!({
+            "message_id": 10,
+            "date": 1,
+            "chat": { "id": 42, "type": "private", "first_name": "Alice" },
+            "from": {
+                "id": 1001,
+                "is_bot": false,
+                "first_name": "Alice",
+                "username": "alice"
+            },
+            "caption": "What is in this image?",
+            "document": {
+                "file_id": "doc-image-file-id",
+                "file_unique_id": "doc-image-unique-id",
+                "file_name": "screenshot.png",
+                "mime_type": "image/png",
+                "file_size": 512
+            }
+        }))
+        .expect("deserialize document message");
+
+        handle_message_direct(msg, &bot, account_id, &accounts)
+            .await
+            .expect("handle message");
+
+        assert_eq!(
+            sink.dispatch_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "image documents should dispatch through attachment pathway"
+        );
+
+        {
+            let attachments = sink.dispatched_with_attachments.lock().expect("lock");
+            assert_eq!(attachments.len(), 1);
+            assert_eq!(attachments[0].text, "What is in this image?");
+            assert_eq!(attachments[0].media_types, vec!["image/png".to_string()]);
+            assert_eq!(attachments[0].sizes, vec![13]);
+        }
+
+        let _ = shutdown_tx.send(());
+        server.await.expect("server join");
     }
 
     #[tokio::test]
