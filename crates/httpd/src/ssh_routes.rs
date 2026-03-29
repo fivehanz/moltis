@@ -805,9 +805,11 @@ async fn inspect_imported_private_key(
 
     let mut public_command = Command::new("ssh-keygen");
     public_command.arg("-y");
-    if let Some(passphrase) = passphrase {
-        public_command.arg("-P").arg(passphrase);
-    }
+    let _public_askpass = if let Some(passphrase) = passphrase {
+        Some(configure_ssh_askpass(&mut public_command, passphrase)?)
+    } else {
+        None
+    };
     let public_output = public_command
         .arg("-f")
         .arg(&key_path)
@@ -827,17 +829,16 @@ async fn inspect_imported_private_key(
     }
 
     if let Some(passphrase) = passphrase {
-        let decrypt_output = Command::new("ssh-keygen")
+        let mut decrypt_command = Command::new("ssh-keygen");
+        decrypt_command
             .arg("-p")
-            .arg("-P")
-            .arg(passphrase)
             .arg("-N")
             .arg("")
             .arg("-f")
             .arg(&key_path)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .await?;
+            .stdin(std::process::Stdio::null());
+        let _decrypt_askpass = configure_ssh_askpass(&mut decrypt_command, passphrase)?;
+        let decrypt_output = decrypt_command.output().await?;
         if !decrypt_output.status.success() {
             anyhow::bail!("{}", String::from_utf8_lossy(&decrypt_output.stderr).trim());
         }
@@ -862,6 +863,28 @@ fn looks_like_passphrase_error(stderr: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+fn configure_ssh_askpass(
+    command: &mut Command,
+    passphrase: &str,
+) -> anyhow::Result<tempfile::TempDir> {
+    let dir = tempfile::tempdir()?;
+    let askpass_path = dir.path().join("askpass.sh");
+    let passphrase_path = dir.path().join("askpass.sh.pass");
+    std::fs::write(&passphrase_path, passphrase)?;
+    std::fs::write(&askpass_path, "#!/bin/sh\nexec cat \"$0.pass\"\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&passphrase_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(&askpass_path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    command
+        .env("SSH_ASKPASS", &askpass_path)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("DISPLAY", "moltis-askpass");
+    Ok(dir)
 }
 
 async fn ssh_keygen_fingerprint(path: &std::path::Path) -> anyhow::Result<String> {
