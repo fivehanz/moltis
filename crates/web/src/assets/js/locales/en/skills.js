@@ -5,7 +5,8 @@ export default {
 	title: "Skills",
 	refresh: "Refresh",
 	emergencyDisable: "Emergency Disable",
-	description: "SKILL.md-based skills discovered from project, personal, and installed paths.",
+	description:
+		"SKILL.md-based skills discovered from project, personal, and installed paths. Imported bundles stay quarantined until explicitly cleared.",
 	howToWriteSkill: "How to write a skill?",
 
 	// ── Emergency disable ───────────────────────────────────

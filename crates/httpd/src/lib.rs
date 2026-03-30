@@ -13,6 +13,7 @@ pub mod channel_webhook_middleware;
 pub mod env_routes;
 pub mod request_throttle;
 pub mod server;
+pub mod ssh_routes;
 pub mod tools_routes;
 pub mod upload_routes;
 pub mod ws;

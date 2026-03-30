@@ -1059,7 +1059,7 @@ async fn vault_recovery_handler(
     }
 }
 
-/// Migrate unencrypted env vars to encrypted after vault unseal.
+/// Migrate plaintext secrets to encrypted storage after vault unseal.
 #[cfg(feature = "vault")]
 async fn run_vault_env_migration(state: &AuthState) {
     if let Some(vault) = state.credential_store.vault() {
@@ -1071,6 +1071,15 @@ async fn run_vault_env_migration(state: &AuthState) {
             Ok(_) => {},
             Err(e) => {
                 tracing::warn!(error = %e, "env var migration failed");
+            },
+        }
+        match moltis_vault::migration::migrate_ssh_keys(vault, pool).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(count = n, "migrated ssh keys to encrypted");
+            },
+            Ok(_) => {},
+            Err(e) => {
+                tracing::warn!(error = %e, "ssh key migration failed");
             },
         }
     }

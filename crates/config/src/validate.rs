@@ -208,6 +208,7 @@ fn build_schema_map() -> KnownKeys {
             ("sandbox", sandbox()),
             ("host", Leaf),
             ("node", Leaf),
+            ("ssh_target", Leaf),
         ]))
     };
 
@@ -1283,7 +1284,7 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
     }
 
     // Unknown exec host
-    let valid_exec_hosts = ["local", "node"];
+    let valid_exec_hosts = ["local", "node", "ssh"];
     if !valid_exec_hosts.contains(&config.tools.exec.host.as_str()) {
         diagnostics.push(Diagnostic {
             severity: Severity::Warning,
@@ -1304,6 +1305,17 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
             category: "unknown-field",
             path: "tools.exec.node".into(),
             message: "tools.exec.host is \"node\" but no default node is specified; commands will fail unless a node connects".into(),
+        });
+    }
+
+    if config.tools.exec.host == "ssh" && config.tools.exec.ssh_target.is_none() {
+        diagnostics.push(Diagnostic {
+            severity: Severity::Warning,
+            category: "unknown-field",
+            path: "tools.exec.ssh_target".into(),
+            message:
+                "tools.exec.host is \"ssh\" but no SSH target is specified; commands will fail"
+                    .into(),
         });
     }
 
@@ -2027,6 +2039,38 @@ security_level = "paranoid"
             warning.is_some(),
             "expected warning for unknown security level"
         );
+    }
+
+    #[test]
+    fn ssh_exec_host_accepted() {
+        let toml = r#"
+[tools.exec]
+host = "ssh"
+ssh_target = "deploy@example"
+"#;
+        let result = validate_toml_str(toml);
+        let warning = result
+            .diagnostics
+            .iter()
+            .find(|d| d.path == "tools.exec.host");
+        assert!(
+            warning.is_none(),
+            "ssh should be accepted as a valid exec host"
+        );
+    }
+
+    #[test]
+    fn ssh_exec_host_without_target_warned() {
+        let toml = r#"
+[tools.exec]
+host = "ssh"
+"#;
+        let result = validate_toml_str(toml);
+        let warning = result
+            .diagnostics
+            .iter()
+            .find(|d| d.path == "tools.exec.ssh_target");
+        assert!(warning.is_some(), "expected warning for missing ssh target");
     }
 
     #[test]

@@ -2585,6 +2585,45 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         }),
     );
     reg.register(
+        "skills.repos.export",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .skills
+                    .repos_export(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
+        "skills.repos.import",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .skills
+                    .repos_import(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
+        "skills.repos.unquarantine",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .skills
+                    .repos_unquarantine(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
         "skills.emergency_disable",
         Box::new(|ctx| {
             Box::pin(async move {

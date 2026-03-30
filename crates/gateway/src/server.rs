@@ -4,7 +4,7 @@ use std::{
     io::Write,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
 };
 
 use secrecy::{ExposeSecret, Secret};
@@ -17,10 +17,11 @@ use moltis_providers::ProviderRegistry;
 
 use moltis_tools::{
     approval::{ApprovalManager, ApprovalMode, SecurityLevel},
+    checkpoints::{CheckpointRestoreTool, CheckpointsListTool},
     exec::EnvVarProvider,
     sessions_communicate::{
         SendToSessionFn, SendToSessionRequest, SessionsHistoryTool, SessionsListTool,
-        SessionsSendTool,
+        SessionsSearchTool, SessionsSendTool,
     },
     sessions_manage::{
         CreateSessionFn, CreateSessionRequest, DeleteSessionFn, DeleteSessionRequest,
@@ -2139,9 +2140,7 @@ pub async fn prepare_gateway_core(
             let deferred_for_build = Arc::clone(&deferred_state);
             // Mark the build as in-progress so the UI can show a banner
             // even if the WebSocket broadcast fires before the client connects.
-            sandbox_router
-                .building_flag
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            sandbox_router.building_flag.store(true, Ordering::Relaxed);
             let build_router = Arc::clone(&sandbox_router);
             tokio::spawn(async move {
                 // Broadcast build start event.
@@ -2166,9 +2165,7 @@ pub async fn prepare_gateway_core(
                             "sandbox image pre-build complete"
                         );
                         router.set_global_image(Some(result.tag.clone())).await;
-                        build_router
-                            .building_flag
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        build_router.building_flag.store(false, Ordering::Relaxed);
 
                         if let Some(state) = deferred_for_build.get() {
                             broadcast(
@@ -2191,15 +2188,11 @@ pub async fn prepare_gateway_core(
                         debug!(
                             "sandbox image pre-build: no-op (no packages or unsupported backend)"
                         );
-                        build_router
-                            .building_flag
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        build_router.building_flag.store(false, Ordering::Relaxed);
                     },
                     Err(e) => {
                         tracing::warn!("sandbox image pre-build failed: {e}");
-                        build_router
-                            .building_flag
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        build_router.building_flag.store(false, Ordering::Relaxed);
                         if let Some(state) = deferred_for_build.get() {
                             broadcast(
                                 state,
@@ -3065,6 +3058,11 @@ pub async fn prepare_gateway_core(
     );
     startup_mem_probe.checkpoint("gateway_state.created");
 
+    match credential_store.ssh_target_count().await {
+        Ok(count) => state.ssh_target_count.store(count, Ordering::Relaxed),
+        Err(error) => warn!(%error, "failed to load ssh target count"),
+    }
+
     // Store discovered hook info, disabled set, and config overrides in state for the web UI.
     {
         let mut inner = state.inner.write().await;
@@ -3254,11 +3252,14 @@ pub async fn prepare_gateway_core(
             let provider = Arc::new(crate::node_exec::GatewayNodeExecProvider::new(
                 Arc::clone(&state),
                 Arc::clone(&state.node_count),
+                Arc::clone(&state.ssh_target_count),
+                config.tools.exec.ssh_target.clone(),
+                config.tools.exec.max_output_bytes,
             ));
-            let default_node = if config.tools.exec.host == "node" {
-                config.tools.exec.node.clone()
-            } else {
-                None
+            let default_node = match config.tools.exec.host.as_str() {
+                "node" => config.tools.exec.node.clone(),
+                "ssh" => config.tools.exec.ssh_target.clone(),
+                _ => None,
             };
             exec_tool = exec_tool.with_node_provider(provider, default_node);
         }
@@ -3369,9 +3370,11 @@ pub async fn prepare_gateway_core(
 
         // Register node info tools (list, describe, select).
         {
-            let node_info_provider: Arc<dyn moltis_tools::nodes::NodeInfoProvider> = Arc::new(
-                crate::node_exec::GatewayNodeInfoProvider::new(Arc::clone(&state)),
-            );
+            let node_info_provider: Arc<dyn moltis_tools::nodes::NodeInfoProvider> =
+                Arc::new(crate::node_exec::GatewayNodeInfoProvider::new(
+                    Arc::clone(&state),
+                    config.tools.exec.ssh_target.clone(),
+                ));
             tool_registry.register(Box::new(moltis_tools::nodes::NodesListTool::new(
                 Arc::clone(&node_info_provider),
             )));
@@ -3482,6 +3485,10 @@ pub async fn prepare_gateway_core(
             Arc::clone(&session_store),
             Arc::clone(&session_metadata),
         )));
+        tool_registry.register(Box::new(SessionsSearchTool::new(
+            Arc::clone(&session_store),
+            Arc::clone(&session_metadata),
+        )));
 
         let state_for_session_send = Arc::clone(&state);
         let send_to_session: SendToSessionFn = Arc::new(move |req: SendToSessionRequest| {
@@ -3510,6 +3517,8 @@ pub async fn prepare_gateway_core(
             Arc::clone(&session_metadata),
             send_to_session,
         )));
+        tool_registry.register(Box::new(CheckpointsListTool::new(data_dir.clone())));
+        tool_registry.register(Box::new(CheckpointRestoreTool::new(data_dir.clone())));
 
         // Register shared task coordination tool for multi-agent workflows.
         tool_registry.register(Box::new(moltis_tools::task_list::TaskListTool::new(

@@ -306,6 +306,9 @@ mod tests {
                 installed_at_ms: 0,
                 commit_sha: None,
                 format: PluginFormat::Skill,
+                quarantined: false,
+                quarantine_reason: None,
+                provenance: None,
                 skills: vec![
                     SkillState {
                         name: "a".into(),
@@ -369,6 +372,9 @@ mod tests {
                     installed_at_ms: 0,
                     commit_sha: None,
                     format: PluginFormat::Skill,
+                    quarantined: false,
+                    quarantine_reason: None,
+                    provenance: None,
                     skills: vec![SkillState {
                         name: "my-skill".into(),
                         relative_path: "skill-repo".into(),
@@ -382,6 +388,9 @@ mod tests {
                     installed_at_ms: 0,
                     commit_sha: None,
                     format: PluginFormat::ClaudeCode,
+                    quarantined: false,
+                    quarantine_reason: None,
+                    provenance: None,
                     skills: vec![SkillState {
                         name: "test-plugin:helper".into(),
                         relative_path: "plugin-repo".into(),

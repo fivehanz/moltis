@@ -1142,6 +1142,10 @@
   -webkit-mask-image: url("../icons/masks/mask-a19898b61d24faac.svg");
   mask-image: url("../icons/masks/mask-a19898b61d24faac.svg");
 }
+.settings-nav-item[data-section="ssh"]::before {
+  -webkit-mask-image: url("../icons/masks/mask-882cc0c8c4c9754a.svg");
+  mask-image: url("../icons/masks/mask-882cc0c8c4c9754a.svg");
+}
 .settings-nav-item[data-section="tailscale"]::before {
   -webkit-mask-image: url("../icons/masks/mask-06addc3a60571644.svg");
   mask-image: url("../icons/masks/mask-06addc3a60571644.svg");
@@ -1165,6 +1169,10 @@
 .settings-nav-item[data-section="providers"]::before {
   -webkit-mask-image: url("../icons/masks/mask-9dc51b3e5cc77ae4.svg");
   mask-image: url("../icons/masks/mask-9dc51b3e5cc77ae4.svg");
+}
+.settings-nav-item[data-section="tools"]::before {
+  -webkit-mask-image: url("../icons/masks/mask-d1685f507bef1bcc.svg");
+  mask-image: url("../icons/masks/mask-d1685f507bef1bcc.svg");
 }
 .settings-nav-item[data-section="mcp"]::before {
   -webkit-mask-image: url("../icons/masks/mask-d579c16638bc3452.svg");

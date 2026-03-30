@@ -12,7 +12,7 @@ use {
     serde_json::{Value, json},
 };
 
-use crate::error::Error;
+use crate::{checkpoints::CheckpointManager, error::Error};
 
 const MAX_SIDECAR_FILES_PER_CALL: usize = 16;
 const MAX_SIDECAR_FILE_BYTES: usize = 128 * 1024;
@@ -21,11 +21,16 @@ const MAX_SIDECAR_TOTAL_BYTES: usize = 512 * 1024;
 /// Tool that creates a new personal skill in `<data_dir>/skills/`.
 pub struct CreateSkillTool {
     data_dir: PathBuf,
+    checkpoints: CheckpointManager,
 }
 
 impl CreateSkillTool {
     pub fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir }
+        let checkpoints = CheckpointManager::new(data_dir.clone());
+        Self {
+            data_dir,
+            checkpoints,
+        }
     }
 
     fn skills_dir(&self) -> PathBuf {
@@ -109,12 +114,17 @@ impl AgentTool for CreateSkillTool {
             .into());
         }
 
+        let checkpoint = self
+            .checkpoints
+            .checkpoint_path(&skill_dir, "create_skill")
+            .await?;
         let content = build_skill_md(name, description, body, &allowed_tools);
         write_skill(&skill_dir, &content).await?;
 
         Ok(json!({
             "created": true,
-            "path": skill_dir.display().to_string()
+            "path": skill_dir.display().to_string(),
+            "checkpointId": checkpoint.id,
         }))
     }
 }
@@ -122,11 +132,16 @@ impl AgentTool for CreateSkillTool {
 /// Tool that updates an existing personal skill in `<data_dir>/skills/`.
 pub struct UpdateSkillTool {
     data_dir: PathBuf,
+    checkpoints: CheckpointManager,
 }
 
 impl UpdateSkillTool {
     pub fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir }
+        let checkpoints = CheckpointManager::new(data_dir.clone());
+        Self {
+            data_dir,
+            checkpoints,
+        }
     }
 
     fn skills_dir(&self) -> PathBuf {
@@ -208,12 +223,17 @@ impl AgentTool for UpdateSkillTool {
             .into());
         }
 
+        let checkpoint = self
+            .checkpoints
+            .checkpoint_path(&skill_dir, "update_skill")
+            .await?;
         let content = build_skill_md(name, description, body, &allowed_tools);
         write_skill(&skill_dir, &content).await?;
 
         Ok(json!({
             "updated": true,
-            "path": skill_dir.display().to_string()
+            "path": skill_dir.display().to_string(),
+            "checkpointId": checkpoint.id,
         }))
     }
 }
@@ -221,11 +241,16 @@ impl AgentTool for UpdateSkillTool {
 /// Tool that deletes a personal skill from `<data_dir>/skills/`.
 pub struct DeleteSkillTool {
     data_dir: PathBuf,
+    checkpoints: CheckpointManager,
 }
 
 impl DeleteSkillTool {
     pub fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir }
+        let checkpoints = CheckpointManager::new(data_dir.clone());
+        Self {
+            data_dir,
+            checkpoints,
+        }
     }
 
     fn skills_dir(&self) -> PathBuf {
@@ -284,20 +309,32 @@ impl AgentTool for DeleteSkillTool {
             return Err(Error::message(format!("skill '{name}' not found")).into());
         }
 
+        let checkpoint = self
+            .checkpoints
+            .checkpoint_path(&skill_dir, "delete_skill")
+            .await?;
         tokio::fs::remove_dir_all(&skill_dir).await?;
 
-        Ok(json!({ "deleted": true }))
+        Ok(json!({
+            "deleted": true,
+            "checkpointId": checkpoint.id,
+        }))
     }
 }
 
 /// Tool that writes supplementary text files inside an existing personal skill.
 pub struct WriteSkillFilesTool {
     data_dir: PathBuf,
+    checkpoints: CheckpointManager,
 }
 
 impl WriteSkillFilesTool {
     pub fn new(data_dir: PathBuf) -> Self {
-        Self { data_dir }
+        let checkpoints = CheckpointManager::new(data_dir.clone());
+        Self {
+            data_dir,
+            checkpoints,
+        }
     }
 
     fn skills_dir(&self) -> PathBuf {
@@ -382,12 +419,17 @@ impl AgentTool for WriteSkillFilesTool {
             .into());
         }
 
+        let checkpoint = self
+            .checkpoints
+            .checkpoint_path(&skill_dir, "write_skill_files")
+            .await?;
         write_sidecar_files(&skill_dir, &validated).await?;
         audit_sidecar_file_write(&self.data_dir, name, &validated);
 
         Ok(json!({
             "written": true,
             "path": skill_dir.display().to_string(),
+            "checkpointId": checkpoint.id,
             "files_written": validated.len(),
             "files": validated.iter().map(|file| file.relative_path.display().to_string()).collect::<Vec<_>>(),
         }))
@@ -700,6 +742,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result["created"].as_bool().unwrap());
+        assert!(result["checkpointId"].as_str().is_some());
 
         let skill_md = tmp.path().join("skills/my-skill/SKILL.md");
         assert!(skill_md.exists());
@@ -781,7 +824,7 @@ mod tests {
             .await
             .unwrap();
 
-        update
+        let result = update
             .execute(json!({
                 "name": "my-skill",
                 "description": "updated",
@@ -789,6 +832,7 @@ mod tests {
             }))
             .await
             .unwrap();
+        assert!(result["checkpointId"].as_str().is_some());
 
         let content = std::fs::read_to_string(tmp.path().join("skills/my-skill/SKILL.md")).unwrap();
         assert!(content.contains("description: updated"));
@@ -827,6 +871,7 @@ mod tests {
 
         let result = delete.execute(json!({ "name": "my-skill" })).await.unwrap();
         assert!(result["deleted"].as_bool().unwrap());
+        assert!(result["checkpointId"].as_str().is_some());
         assert!(!tmp.path().join("skills/my-skill").exists());
     }
 
@@ -867,6 +912,7 @@ mod tests {
             .unwrap();
 
         assert!(result["written"].as_bool().unwrap());
+        assert!(result["checkpointId"].as_str().is_some());
         assert_eq!(result["files_written"].as_u64().unwrap(), 3);
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("skills/my-skill/script.sh")).unwrap(),
@@ -1056,6 +1102,63 @@ mod tests {
 
         delete.execute(json!({ "name": "my-skill" })).await.unwrap();
         assert!(!tmp.path().join("skills/my-skill").exists());
+    }
+
+    #[tokio::test]
+    async fn test_update_skill_checkpoint_can_restore_previous_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let create = CreateSkillTool::new(tmp.path().to_path_buf());
+        let update = UpdateSkillTool::new(tmp.path().to_path_buf());
+        let checkpoints = CheckpointManager::new(tmp.path().to_path_buf());
+
+        create
+            .execute(json!({
+                "name": "my-skill",
+                "description": "original",
+                "body": "original body"
+            }))
+            .await
+            .unwrap();
+
+        let result = update
+            .execute(json!({
+                "name": "my-skill",
+                "description": "updated",
+                "body": "new body"
+            }))
+            .await
+            .unwrap();
+        let checkpoint_id = result["checkpointId"].as_str().unwrap();
+
+        checkpoints.restore(checkpoint_id).await.unwrap();
+
+        let content = std::fs::read_to_string(tmp.path().join("skills/my-skill/SKILL.md")).unwrap();
+        assert!(content.contains("description: original"));
+        assert!(content.contains("original body"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_skill_checkpoint_can_restore_deleted_skill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let create = CreateSkillTool::new(tmp.path().to_path_buf());
+        let delete = DeleteSkillTool::new(tmp.path().to_path_buf());
+        let checkpoints = CheckpointManager::new(tmp.path().to_path_buf());
+
+        create
+            .execute(json!({
+                "name": "my-skill",
+                "description": "test",
+                "body": "body"
+            }))
+            .await
+            .unwrap();
+
+        let result = delete.execute(json!({ "name": "my-skill" })).await.unwrap();
+        let checkpoint_id = result["checkpointId"].as_str().unwrap();
+
+        checkpoints.restore(checkpoint_id).await.unwrap();
+
+        assert!(tmp.path().join("skills/my-skill/SKILL.md").exists());
     }
 
     #[cfg(unix)]

@@ -613,6 +613,9 @@ pub trait SkillsService: Send + Sync {
     /// Full repos list with per-skill details (for search). Heavyweight.
     async fn repos_list_full(&self) -> ServiceResult;
     async fn repos_remove(&self, params: Value) -> ServiceResult;
+    async fn repos_export(&self, params: Value) -> ServiceResult;
+    async fn repos_import(&self, params: Value) -> ServiceResult;
+    async fn repos_unquarantine(&self, params: Value) -> ServiceResult;
     async fn emergency_disable(&self) -> ServiceResult;
     async fn skill_enable(&self, params: Value) -> ServiceResult;
     async fn skill_disable(&self, params: Value) -> ServiceResult;
@@ -666,6 +669,18 @@ impl SkillsService for NoopSkillsStub {
     }
 
     async fn repos_remove(&self, _params: Value) -> ServiceResult {
+        Err("skills service not configured".into())
+    }
+
+    async fn repos_export(&self, _params: Value) -> ServiceResult {
+        Err("skills service not configured".into())
+    }
+
+    async fn repos_import(&self, _params: Value) -> ServiceResult {
+        Err("skills service not configured".into())
+    }
+
+    async fn repos_unquarantine(&self, _params: Value) -> ServiceResult {
         Err("skills service not configured".into())
     }
 

@@ -129,6 +129,57 @@ function doInstall(source) {
 	});
 }
 
+function doImportBundle(path) {
+	if (!(path && S.connected)) {
+		if (!S.connected) showToast("Not connected to gateway.", "error");
+		return Promise.resolve();
+	}
+	return sendRpc("skills.repos.import", { path: path }).then((res) => {
+		if (res?.ok) {
+			var p = res.payload || {};
+			showToast(
+				`Imported ${p.repo_name || p.source || "bundle"} (${p.skill_count || 0} skills, quarantined)`,
+				"success",
+			);
+			fetchAll();
+		} else {
+			showToast(`Failed: ${res?.error || "unknown error"}`, "error");
+		}
+	});
+}
+
+function doExportBundle(source, path) {
+	if (!(source && S.connected)) {
+		if (!S.connected) showToast("Not connected to gateway.", "error");
+		return Promise.resolve();
+	}
+	var params = { source: source };
+	if (path) params.path = path;
+	return sendRpc("skills.repos.export", params).then((res) => {
+		if (res?.ok) {
+			var p = res.payload || {};
+			showToast(`Exported ${source} to ${p.path || "bundle path"}`, "success");
+		} else {
+			showToast(`Failed: ${res?.error || "unknown error"}`, "error");
+		}
+	});
+}
+
+function doUnquarantine(source) {
+	if (!(source && S.connected)) {
+		if (!S.connected) showToast("Not connected to gateway.", "error");
+		return Promise.resolve();
+	}
+	return sendRpc("skills.repos.unquarantine", { source: source }).then((res) => {
+		if (res?.ok) {
+			showToast(`Cleared quarantine for ${source}`, "success");
+			fetchAll();
+		} else {
+			showToast(`Failed: ${res?.error || "unknown error"}`, "error");
+		}
+	});
+}
+
 // Debounced server-side search for skills within a repo
 function searchSkills(source, query) {
 	return fetch(`/api/skills/search?source=${encodeURIComponent(source)}&q=${encodeURIComponent(query)}`)
@@ -224,6 +275,31 @@ function InstallBox() {
   </div>`;
 }
 
+function BundleTransferBox() {
+	var importRef = useRef(null);
+	var importing = useSignal(false);
+
+	function onImport() {
+		var path = importRef.current?.value.trim();
+		if (!path) return;
+		importing.value = true;
+		doImportBundle(path).finally(() => {
+			importing.value = false;
+		});
+	}
+
+	function onKey(e) {
+		if (e.key === "Enter") onImport();
+	}
+
+	return html`<div class="skills-install-box">
+    <input ref=${importRef} type="text" placeholder="/path/to/skill-bundle.tar.gz" class="skills-install-input" onKeyDown=${onKey} />
+    <button class="provider-btn provider-btn-secondary" onClick=${onImport} disabled=${importing.value}>
+      ${importing.value ? "Importing\u2026" : "Import Bundle"}
+    </button>
+  </div>`;
+}
+
 var featuredSkills = [
 	{ repo: "openclaw/skills", desc: "Community skills from ClawdHub" },
 	{ repo: "anthropics/skills", desc: "Official Anthropic agent skills" },
@@ -291,6 +367,20 @@ function SkillMetadata(props) {
     ${d.commit_age_days != null && html`<span>Commit age: ${d.commit_age_days} day${d.commit_age_days === 1 ? "" : "s"}</span>`}
     ${d.homepage && html`<a href=${d.homepage} target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;font-size:.75rem">${d.homepage.replace(/^https?:\/\//, "")}</a>`}
     ${d.source_url && html`<a href=${d.source_url} target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;font-size:.75rem">View source</a>`}
+  </div>`;
+}
+
+function SkillProvenance(props) {
+	var d = props.detail;
+	var provenance = d.provenance;
+	if (!(d.quarantined || provenance?.original_source || provenance?.original_commit_sha || provenance?.imported_from))
+		return null;
+
+	return html`<div style="margin:0 0 10px;padding:10px 12px;border:1px solid var(--border);background:var(--surface2);border-radius:var(--radius-sm);font-size:.77rem;color:var(--text)">
+    ${d.quarantined && html`<div style="margin-bottom:6px;color:var(--warning, #c77d00);font-weight:600">Quarantined${d.quarantine_reason ? `: ${d.quarantine_reason}` : ""}</div>`}
+    ${provenance?.original_source && html`<div><strong>Original source:</strong> ${provenance.original_source}</div>`}
+    ${provenance?.original_commit_sha && html`<div><strong>Original commit:</strong> <code>${shortSha(provenance.original_commit_sha)}</code></div>`}
+    ${provenance?.imported_from && html`<div><strong>Imported from:</strong> <code>${provenance.imported_from}</code></div>`}
   </div>`;
 }
 
@@ -461,6 +551,7 @@ function SkillDetail(props) {
 	var isDisc = d.source === "personal" || d.source === "project";
 	var needsTrust = !isDisc && d.trusted === false;
 	var isProtected = isDisc && d.protected === true;
+	var needsUnquarantine = !isDisc && d.quarantined === true;
 
 	function doToggle() {
 		actionBusy.value = true;
@@ -482,6 +573,19 @@ function SkillDetail(props) {
 		if (actionBusy.value) return;
 		if (isProtected) {
 			showToast(`Skill ${d.name} is protected and cannot be deleted from UI`, "error");
+			return;
+		}
+		if (!d.enabled && needsUnquarantine) {
+			requestConfirm(`Clear quarantine for "${d.name}" from ${props.repoSource}?`, {
+				confirmLabel: "Clear Quarantine",
+			}).then((yes) => {
+				if (!yes) return;
+				actionBusy.value = true;
+				doUnquarantine(props.repoSource).then(() => {
+					actionBusy.value = false;
+					props.onReload?.();
+				});
+			});
 			return;
 		}
 		if (!d.enabled && needsTrust) {
@@ -529,6 +633,7 @@ function SkillDetail(props) {
         ${d.license && d.license_url && html`<a href=${d.license_url} target="_blank" rel="noopener noreferrer" style="font-size:.65rem;padding:1px 6px;border-radius:9999px;background:var(--surface2);color:var(--muted);text-decoration:none">${d.license}</a>`}
         ${d.license && !d.license_url && html`<span style="font-size:.65rem;padding:1px 6px;border-radius:9999px;background:var(--surface2);color:var(--muted)">${d.license}</span>`}
         ${eligibilityBadge(d)}
+        ${d.quarantined && html`<span style="font-size:.65rem;padding:1px 5px;border-radius:9999px;background:var(--warning, #c77d00);color:#fff;font-weight:500">quarantined</span>`}
         ${trustBadge(d)}
       </div>
       <div style="display:flex;align-items:center;gap:6px">
@@ -555,9 +660,11 @@ function SkillDetail(props) {
 							? "Protected"
 							: isDisc && d.enabled
 								? "Delete"
-								: d.enabled
-									? "Disable"
-									: "Enable"
+								: needsUnquarantine
+									? "Clear Quarantine"
+									: d.enabled
+										? "Disable"
+										: "Enable"
 				}</button>
         <button onClick=${onClose} style="background:none;border:none;color:var(--muted);font-size:.9rem;cursor:pointer;padding:2px 4px">\u2715</button>
       </div>
@@ -565,6 +672,7 @@ function SkillDetail(props) {
     <${SkillMetadata} detail=${d} />
     ${d.commit_age_days != null && d.commit_age_days <= 14 && html`<div style="margin:0 0 10px;padding:10px 12px;border:1px solid var(--warning, #c77d00);background:color-mix(in srgb, var(--warning, #c77d00) 14%, transparent);border-radius:var(--radius-sm);font-size:.8rem;color:var(--text)"><strong style="color:var(--warning, #c77d00)">Recent commit warning:</strong> This skill was updated ${d.commit_age_days} day${d.commit_age_days === 1 ? "" : "s"} ago. Treat recent updates as high risk and review diffs before trusting/enabling.</div>`}
     ${d.drifted && html`<div style="margin:0 0 8px;font-size:.75rem;color:var(--warning, #c77d00)">Source changed since last trust; review updates before enabling again.</div>`}
+    <${SkillProvenance} detail=${d} />
     ${d.description && html`<p style="margin:0 0 8px;font-size:.82rem;color:var(--text)">${d.description}</p>`}
     <${MissingDepsSection} detail=${d} onReload=${props.onReload} />
     ${d.compatibility && html`<div style="margin-bottom:8px;font-size:.75rem;color:var(--muted);font-style:italic">${d.compatibility}</div>`}
@@ -588,6 +696,7 @@ function SkillDetail(props) {
 }
 
 // ── Repo card with server-side search ────────────────────────
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: UI card coordinates search, provenance, and repo actions in one place
 function RepoCard(props) {
 	var repo = props.repo;
 	var expanded = useSignal(false);
@@ -599,6 +708,8 @@ function RepoCard(props) {
 	var detailLoading = useSignal(false);
 	var searchTimer = useRef(null);
 	var removingRepo = useSignal(false);
+	var exportingRepo = useSignal(false);
+	var unquarantiningRepo = useSignal(false);
 	var isOrphan = repo.orphaned === true || String(repo.source || "").startsWith("orphan:");
 	var sourceLabel = isOrphan ? repo.repo_name : repo.source;
 
@@ -663,6 +774,33 @@ function RepoCard(props) {
 		});
 	}
 
+	function exportRepo(e) {
+		e.stopPropagation();
+		if (!S.connected || exportingRepo.value || isOrphan) return;
+		var path = window.prompt(
+			`Export ${repo.source} to a bundle path. Leave blank to use the default export directory.`,
+			"",
+		);
+		exportingRepo.value = true;
+		doExportBundle(repo.source, path?.trim() || null).finally(() => {
+			exportingRepo.value = false;
+		});
+	}
+
+	function clearRepoQuarantine(e) {
+		e.stopPropagation();
+		if (!S.connected || unquarantiningRepo.value || !repo.quarantined) return;
+		requestConfirm(`Clear quarantine for ${repo.source}?`, {
+			confirmLabel: "Clear Quarantine",
+		}).then((yes) => {
+			if (!yes) return;
+			unquarantiningRepo.value = true;
+			doUnquarantine(repo.source).finally(() => {
+				unquarantiningRepo.value = false;
+			});
+		});
+	}
+
 	return html`<div class="skills-repo-card">
     <div class="skills-repo-header" onClick=${toggleExpand}>
       <div style="display:flex;align-items:center;gap:8px">
@@ -677,14 +815,28 @@ function RepoCard(props) {
 				}
         <span style="font-size:.72rem;color:var(--muted)">${repo.enabled_count}/${repo.skill_count} enabled</span>
 				${repo.commit_sha && html`<span style="font-size:.68rem;color:var(--muted)">sha ${shortSha(repo.commit_sha)}</span>`}
+				${repo.quarantined && html`<span style="font-size:.64rem;padding:1px 6px;border-radius:9999px;background:var(--warning, #c77d00);color:#fff;font-weight:500">quarantined</span>`}
 				${repo.drifted && html`<span style="font-size:.64rem;padding:1px 6px;border-radius:9999px;background:var(--warning, #c77d00);color:#fff;font-weight:500">source changed</span>`}
 				${isOrphan && html`<span style="font-size:.64rem;padding:1px 6px;border-radius:9999px;background:var(--warning, #c77d00);color:#fff;font-weight:500">orphaned on disk</span>`}
       </div>
-      <button class="provider-btn provider-btn-sm provider-btn-danger" disabled=${removingRepo.value} onClick=${removeRepo}>${removingRepo.value ? "Removing..." : "Remove"}</button>
+      <div style="display:flex;align-items:center;gap:6px">
+        ${!isOrphan && html`<button class="provider-btn provider-btn-sm provider-btn-secondary" disabled=${exportingRepo.value} onClick=${exportRepo}>${exportingRepo.value ? "Exporting..." : "Export"}</button>`}
+        ${repo.quarantined && html`<button class="provider-btn provider-btn-sm provider-btn-secondary" disabled=${unquarantiningRepo.value} onClick=${clearRepoQuarantine}>${unquarantiningRepo.value ? "Clearing..." : "Clear Quarantine"}</button>`}
+        <button class="provider-btn provider-btn-sm provider-btn-danger" disabled=${removingRepo.value} onClick=${removeRepo}>${removingRepo.value ? "Removing..." : "Remove"}</button>
+      </div>
     </div>
     ${
 			expanded.value &&
 			html`<div class="skills-repo-detail" style="display:block">
+      ${
+				(repo.quarantined || repo.provenance) &&
+				html`<div style="margin-bottom:10px;padding:10px 12px;border:1px solid var(--border);background:var(--surface2);border-radius:var(--radius-sm);font-size:.77rem;color:var(--text)">
+          ${repo.quarantined && html`<div style="margin-bottom:6px;color:var(--warning, #c77d00);font-weight:600">Quarantined${repo.quarantine_reason ? `: ${repo.quarantine_reason}` : ""}</div>`}
+          ${repo.provenance?.original_source && html`<div><strong>Original source:</strong> ${repo.provenance.original_source}</div>`}
+          ${repo.provenance?.original_commit_sha && html`<div><strong>Original commit:</strong> <code>${shortSha(repo.provenance.original_commit_sha)}</code></div>`}
+          ${repo.provenance?.imported_from && html`<div><strong>Imported from:</strong> <code>${repo.provenance.imported_from}</code></div>`}
+        </div>`
+			}
       <div style="margin-bottom:8px">
         <input type="text" placeholder=${isOrphan ? "Orphaned repo: reinstall to restore metadata" : `Search skills in ${repo.source}\u2026`} value=${searchQuery.value} disabled=${isOrphan}
           onInput=${onSearchInput}
@@ -705,6 +857,7 @@ function RepoCard(props) {
               </div>
               <div style="display:flex;align-items:center;gap:4px;flex-shrink:0;margin-left:8px">
                 ${skill.enabled && html`<span style="font-size:.6rem;padding:1px 5px;border-radius:9999px;background:var(--accent);color:#fff;font-weight:500">enabled</span>`}
+                ${skill.quarantined && html`<span style="font-size:.6rem;padding:1px 5px;border-radius:9999px;background:var(--warning, #c77d00);color:#fff;font-weight:500">quarantined</span>`}
                 ${skill.trusted === false && html`<span style="font-size:.6rem;padding:1px 5px;border-radius:9999px;background:var(--warning, #c77d00);color:#fff;font-weight:500">untrusted</span>`}
                 ${skill.drifted && html`<span style="font-size:.6rem;padding:1px 5px;border-radius:9999px;background:var(--warning, #c77d00);color:#fff;font-weight:500">source changed</span>`}
                 ${skill.eligible === false && html`<span style="font-size:.6rem;padding:1px 5px;border-radius:9999px;background:var(--error, #e55);color:#fff;font-weight:500">blocked</span>`}
@@ -759,6 +912,47 @@ function SourceBadge(props) {
 	var label = isType ? src.charAt(0).toUpperCase() + src.slice(1) : src;
 	var cls = isType ? "recommended-badge" : "tier-badge";
 	return html`<span class=${cls}>${label}</span>`;
+}
+
+function EnabledSkillRow(props) {
+	var skill = props.skill;
+	var discovered = props.discovered;
+	var pending = props.pending;
+	var buttonLabel = pending
+		? discovered
+			? "Deleting..."
+			: "Disabling..."
+		: discovered && skill.protected === true
+			? "Protected"
+			: discovered
+				? "Delete"
+				: "Disable";
+	var buttonClass = discovered
+		? "provider-btn provider-btn-sm provider-btn-danger"
+		: "provider-btn provider-btn-sm provider-btn-secondary";
+
+	return html`<tr class="cursor-pointer" style="border-bottom:1px solid var(--border)"
+		onClick=${props.onLoad}
+		onMouseEnter=${(e) => {
+			e.currentTarget.style.background = "var(--bg-hover)";
+		}}
+		onMouseLeave=${(e) => {
+			e.currentTarget.style.background = "";
+		}}>
+		<td style="padding:8px 12px;font-weight:500;color:var(--accent);font-family:var(--font-mono)">${skill.name}</td>
+		<td style="padding:8px 12px;color:var(--text)">${skill.description || "\u2014"}</td>
+		<td style="padding:8px 12px"><${SourceBadge} source=${skill.source} /></td>
+		<td style="padding:8px 12px;text-align:right">
+			<button
+				disabled=${(discovered && skill.protected === true) || pending}
+				class=${buttonClass}
+				onClick=${(e) => {
+					e.stopPropagation();
+					props.onDisable();
+				}}
+			>${buttonLabel}</button>
+		</td>
+	</tr>`;
 }
 
 function EnabledSkillsTable() {
@@ -845,38 +1039,18 @@ function EnabledSkillsTable() {
         </thead>
         <tbody>
           ${s.map(
-						(skill) => html`<tr key=${skill.name} class="cursor-pointer" style="border-bottom:1px solid var(--border)"
-              onClick=${() => {
+						(skill) => html`<${EnabledSkillRow}
+							key=${skill.name}
+							skill=${skill}
+							discovered=${isDiscovered(skill)}
+							pending=${pendingActionSkill.value === skill.name}
+							onLoad=${() => {
 								loadDetail(skill);
 							}}
-              onMouseEnter=${(e) => {
-								e.currentTarget.style.background = "var(--bg-hover)";
+							onDisable=${() => {
+								onDisable(skill);
 							}}
-              onMouseLeave=${(e) => {
-								e.currentTarget.style.background = "";
-							}}>
-              <td style="padding:8px 12px;font-weight:500;color:var(--accent);font-family:var(--font-mono)">${skill.name}</td>
-              <td style="padding:8px 12px;color:var(--text)">${skill.description || "\u2014"}</td>
-              <td style="padding:8px 12px"><${SourceBadge} source=${skill.source} /></td>
-              <td style="padding:8px 12px;text-align:right">
-                <button disabled=${(isDiscovered(skill) && skill.protected === true) || pendingActionSkill.value === skill.name} class=${isDiscovered(skill) ? "provider-btn provider-btn-sm provider-btn-danger" : "provider-btn provider-btn-sm provider-btn-secondary"} onClick=${(
-									e,
-								) => {
-									e.stopPropagation();
-									onDisable(skill);
-								}}>${
-									pendingActionSkill.value === skill.name
-										? isDiscovered(skill)
-											? "Deleting..."
-											: "Disabling..."
-										: isDiscovered(skill) && skill.protected === true
-											? "Protected"
-											: isDiscovered(skill)
-												? "Delete"
-												: "Disable"
-								}</button>
-              </td>
-            </tr>`,
+						/>`,
 					)}
         </tbody>
       </table>
@@ -934,6 +1108,7 @@ function SkillsPage() {
       <p class="text-sm text-[var(--muted)]">SKILL.md-based skills discovered from project, personal, and installed paths. <a href="https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview" target="_blank" rel="noopener noreferrer" class="text-[var(--accent)] no-underline hover:underline">How to write a skill?</a></p>
       <${SecurityWarning} />
       <${InstallBox} />
+      <${BundleTransferBox} />
       <${InstallProgressBar} />
       <${FeaturedSection} />
       <${ReposSection} />

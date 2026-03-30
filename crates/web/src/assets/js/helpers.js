@@ -403,8 +403,21 @@ export function updateCountdown(el, resetsAtMs) {
 export function toolCallSummary(name, args, executionMode) {
 	if (!args) return name || "tool";
 	switch (name) {
-		case "exec":
-			return args.command || "exec";
+		case "exec": {
+			var command = args.command || "exec";
+			var nodeRef = typeof args.node === "string" ? args.node.trim() : "";
+			if (!nodeRef) return command;
+			if (nodeRef.startsWith("ssh:target:")) {
+				return `${command} [SSH target]`;
+			}
+			if (nodeRef.startsWith("ssh:")) {
+				return `${command} [SSH: ${nodeRef.slice(4)}]`;
+			}
+			if (nodeRef.includes("@")) {
+				return `${command} [SSH: ${nodeRef}]`;
+			}
+			return `${command} [node: ${nodeRef}]`;
+		}
 		case "web_fetch":
 			return `web_fetch ${args.url || ""}`.trim();
 		case "web_search":

@@ -1786,11 +1786,14 @@ pub struct ExecConfig {
     pub security_level: String,
     pub allowlist: Vec<String>,
     pub sandbox: SandboxConfig,
-    /// Where to run commands: `"local"` (default) or `"node"`.
+    /// Where to run commands: `"local"` (default), `"node"`, or `"ssh"`.
     pub host: String,
     /// Default node id or display name for remote execution (when `host = "node"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// Default SSH target for remote execution (when `host = "ssh"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_target: Option<String>,
 }
 
 impl Default for ExecConfig {
@@ -1804,6 +1807,7 @@ impl Default for ExecConfig {
             sandbox: SandboxConfig::default(),
             host: "local".into(),
             node: None,
+            ssh_target: None,
         }
     }
 }

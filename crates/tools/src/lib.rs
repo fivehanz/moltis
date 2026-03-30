@@ -8,6 +8,7 @@
 
 pub mod approval;
 pub mod branch_session;
+pub mod checkpoints;
 #[cfg(test)]
 pub mod contract;
 

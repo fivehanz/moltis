@@ -5596,11 +5596,18 @@ fn is_path_in_agent_memory_scope(path: &Path, agent_id: &str) -> bool {
 struct AgentScopedMemoryWriter {
     manager: Arc<moltis_memory::manager::MemoryManager>,
     agent_id: String,
+    checkpoints: moltis_tools::checkpoints::CheckpointManager,
 }
 
 impl AgentScopedMemoryWriter {
     fn new(manager: Arc<moltis_memory::manager::MemoryManager>, agent_id: String) -> Self {
-        Self { manager, agent_id }
+        Self {
+            manager,
+            agent_id,
+            checkpoints: moltis_tools::checkpoints::CheckpointManager::new(
+                moltis_config::data_dir(),
+            ),
+        }
     }
 }
 
@@ -5625,6 +5632,10 @@ impl moltis_agents::memory_writer::MemoryWriter for AgentScopedMemoryWriter {
             tokio::fs::create_dir_all(parent).await?;
         }
 
+        let checkpoint = self
+            .checkpoints
+            .checkpoint_path(&path, "memory_write")
+            .await?;
         let final_content = if append && tokio::fs::try_exists(&path).await? {
             let existing = tokio::fs::read_to_string(&path).await?;
             format!("{existing}\n\n{content}")
@@ -5641,6 +5652,7 @@ impl moltis_agents::memory_writer::MemoryWriter for AgentScopedMemoryWriter {
         Ok(moltis_agents::memory_writer::MemoryWriteResult {
             location: path.to_string_lossy().into_owned(),
             bytes_written,
+            checkpoint_id: Some(checkpoint.id),
         })
     }
 }
@@ -5864,6 +5876,7 @@ impl AgentTool for AgentScopedMemorySaveTool {
             "saved": true,
             "path": file,
             "bytes_written": result.bytes_written,
+            "checkpointId": result.checkpoint_id,
         }))
     }
 }

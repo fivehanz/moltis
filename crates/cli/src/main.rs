@@ -214,6 +214,19 @@ enum SkillAction {
         /// Source in owner/repo format.
         source: String,
     },
+    /// Export an installed repo as a portable bundle.
+    Export {
+        /// Source in owner/repo format.
+        source: String,
+        /// Output file or directory. Defaults to ~/.moltis/skill-exports/.
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Import a portable skill bundle into the local registry in quarantine.
+    Import {
+        /// Path to a .tar.gz bundle created by `moltis skills export`.
+        path: String,
+    },
     /// Show details about a skill.
     Info {
         /// Skill name.
@@ -502,6 +515,34 @@ async fn handle_skills(action: SkillAction) -> anyhow::Result<()> {
             let install_dir = install::default_install_dir()?;
             install::remove_repo(&source, &install_dir).await?;
             println!("Removed repo '{source}' and all its skills.");
+        },
+        SkillAction::Export { source, output } => {
+            let install_dir = install::default_install_dir()?;
+            let exported = moltis_skills::portability::export_repo_bundle(
+                &source,
+                &install_dir,
+                output.as_deref().map(std::path::Path::new),
+            )
+            .await?;
+            println!(
+                "Exported repo '{}' to {}",
+                exported.repo.source,
+                exported.bundle_path.display()
+            );
+        },
+        SkillAction::Import { path } => {
+            let install_dir = install::default_install_dir()?;
+            let imported = moltis_skills::portability::import_repo_bundle(
+                std::path::Path::new(&path),
+                &install_dir,
+            )
+            .await?;
+            println!(
+                "Imported repo '{}' as '{}' ({} skills, quarantined)",
+                imported.source,
+                imported.repo_name,
+                imported.skills.len()
+            );
         },
         SkillAction::Info { name } => {
             let registry = InMemoryRegistry::from_discoverer(&discoverer).await?;

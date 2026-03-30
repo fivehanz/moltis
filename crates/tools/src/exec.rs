@@ -74,6 +74,9 @@ pub trait NodeExecProvider: Send + Sync {
     /// Whether any nodes are currently connected.  This is called from the
     /// sync `parameters_schema()` path so it must not block.
     fn has_connected_nodes(&self) -> bool;
+
+    /// Return the current default remote target, if one exists.
+    async fn default_node_ref(&self) -> Option<String>;
 }
 
 /// Result of a shell command execution.
@@ -371,7 +374,10 @@ impl AgentTool for ExecTool {
         //   the intended remote host is unavailable.
         let node_ref = if let Some(provider) = &self.node_provider {
             if provider.has_connected_nodes() {
-                model_node.or_else(|| self.default_node.clone())
+                match model_node.or_else(|| self.default_node.clone()) {
+                    Some(node_ref) => Some(node_ref),
+                    None => provider.default_node_ref().await,
+                }
             } else if let Some(ref dn) = self.default_node {
                 return Err(Error::message(format!(
                     "default node '{dn}' is configured but no nodes are currently connected"
@@ -1529,6 +1535,10 @@ mod tests {
 
         fn has_connected_nodes(&self) -> bool {
             false
+        }
+
+        async fn default_node_ref(&self) -> Option<String> {
+            None
         }
     }
 

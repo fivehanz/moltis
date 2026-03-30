@@ -71,7 +71,24 @@ pub struct RepoEntry {
     pub commit_sha: Option<String>,
     #[serde(default)]
     pub format: PluginFormat,
+    #[serde(default)]
+    pub quarantined: bool,
+    #[serde(default)]
+    pub quarantine_reason: Option<String>,
+    #[serde(default)]
+    pub provenance: Option<RepoProvenance>,
     pub skills: Vec<SkillState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoProvenance {
+    pub original_source: String,
+    #[serde(default)]
+    pub original_commit_sha: Option<String>,
+    #[serde(default)]
+    pub imported_from: Option<String>,
+    #[serde(default)]
+    pub exported_at_ms: Option<u64>,
 }
 
 /// Per-skill enabled state within a repo.

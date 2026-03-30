@@ -241,6 +241,12 @@ security_level = "allowlist"      # Security mode:
                                   #   "strict"     - Very restrictive
 allowlist = []                    # Command patterns to allow (when security_level = "allowlist")
                                   # Example: ["git *", "npm *", "cargo *"]
+host = "local"                    # Where to run commands:
+                                  #   "local" - Run on this machine (default)
+                                  #   "node"  - Run on a connected Moltis node
+                                  #   "ssh"   - Run through the system ssh client
+# node = "mac-mini"               # Default node id/display name when host = "node"
+# ssh_target = "deploy@box"       # SSH host alias or user@host when host = "ssh"
 
 # ── Sandbox Configuration ─────────────────────────────────────────────────────
 # Commands run inside isolated containers for security.

@@ -421,6 +421,8 @@ pub struct GatewayState {
     /// `GatewayNodeExecProvider` so `parameters_schema()` can check it
     /// without awaiting the inner lock.
     pub node_count: Arc<AtomicUsize>,
+    /// Count of configured SSH targets exposed as remote execution options.
+    pub ssh_target_count: Arc<AtomicUsize>,
 
     // ── Mutable runtime state (single lock) ─────────────────────────────────
     /// All mutable runtime state, behind a single lock.
@@ -511,6 +513,7 @@ impl GatewayState {
             seq: AtomicU64::new(0),
             tts_phrase_counter: AtomicUsize::new(0),
             node_count: Arc::new(AtomicUsize::new(0)),
+            ssh_target_count: Arc::new(AtomicUsize::new(0)),
             #[cfg(feature = "graphql")]
             graphql_broadcast: {
                 let (tx, _) = tokio::sync::broadcast::channel(256);

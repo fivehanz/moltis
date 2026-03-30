@@ -67,6 +67,7 @@ serde_json             = { workspace = true }
 sha2                   = { workspace = true }
 sqlx                   = { workspace = true }
 sysinfo                = { workspace = true }
+tempfile               = { workspace = true }
 thiserror              = { workspace = true }
 time                   = { workspace = true }
 tokio                  = { workspace = true }
@@ -146,7 +147,6 @@ web-ui = ["dep:include_dir", "dep:portable-pty", "dep:which", "moltis-chat/web-u
 whatsapp = ["dep:moltis-whatsapp", "dep:qrcode", "moltis-whatsapp/metrics"]
 
 [dev-dependencies]
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

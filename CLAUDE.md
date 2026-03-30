@@ -363,6 +363,20 @@ bd automatically syncs via Dolt:
 - Use `bd dolt push`/`bd dolt pull` for remote sync
 - No manual export/import needed!
 
+### Worktrees
+
+If you create a git worktree with plain `git worktree add`, Beads will not
+automatically share the main checkout's `.beads` state. For an existing
+worktree, run:
+
+```bash
+./scripts/bd-worktree-attach.sh
+```
+
+This writes `.beads/redirect` so the worktree uses the main repository's Beads
+database. If you create worktrees through `bd worktree create`, it should set
+up the redirect for you automatically.
+
 ### Important Rules
 
 - ✅ Use bd for ALL task tracking
