@@ -87,6 +87,51 @@ impl AnthropicProvider {
             body["max_tokens"] = serde_json::json!(budget_tokens + 4096);
         }
     }
+
+    async fn probe_request(&self) -> anyhow::Result<()> {
+        let (system_value, anthropic_messages) =
+            to_anthropic_messages(&[ChatMessage::user("ping")], false);
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            // Probe for reachability, not full extended-thinking behavior.
+            "max_tokens": 1,
+            "messages": anthropic_messages,
+        });
+
+        if let Some(ref sys) = system_value {
+            body["system"] = sys.clone();
+        }
+
+        debug!(model = %self.model, "anthropic probe request");
+        trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "anthropic probe request body");
+
+        let http_resp = self
+            .client
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("x-api-key", self.api_key.expose_secret())
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = http_resp.status();
+        if !status.is_success() {
+            let retry_after_ms = retry_after_ms_from_headers(http_resp.headers());
+            let body_text = http_resp.text().await.unwrap_or_default();
+            warn!(status = %status, body = %body_text, "anthropic probe API error");
+            anyhow::bail!(
+                "{}",
+                with_retry_after_marker(
+                    format!("Anthropic API error HTTP {status}: {body_text}"),
+                    retry_after_ms
+                )
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// Convert tool schemas from the generic format to Anthropic's tool format.
@@ -432,6 +477,10 @@ impl LlmProvider for AnthropicProvider {
         self.stream_with_tools(messages, vec![])
     }
 
+    async fn probe(&self) -> anyhow::Result<()> {
+        self.probe_request().await
+    }
+
     #[allow(clippy::collapsible_if)]
     fn stream_with_tools(
         &self,
@@ -623,7 +672,48 @@ impl LlmProvider for AnthropicProvider {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{Router, extract::Request, routing::post};
+
     use super::*;
+
+    #[derive(Default, Clone)]
+    struct CapturedRequest {
+        body: Option<serde_json::Value>,
+    }
+
+    async fn start_probe_mock() -> (String, Arc<Mutex<Vec<CapturedRequest>>>) {
+        let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move |req: Request| {
+                let cap = captured_clone.clone();
+                async move {
+                    let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap_or_default();
+                    let body: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
+                    cap.lock().unwrap().push(CapturedRequest { body });
+
+                    axum::response::Response::builder()
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from("{}"))
+                        .unwrap()
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (format!("http://{addr}"), captured)
+    }
 
     #[test]
     fn retry_after_ms_from_headers_parses_seconds() {
@@ -728,6 +818,23 @@ mod tests {
             Some(moltis_agents::model::ReasoningEffort::High)
         );
         assert_eq!(with_effort.id(), "claude-opus-4-5-20251101");
+    }
+
+    #[tokio::test]
+    async fn probe_request_caps_anthropic_output_to_one_token() {
+        let (base_url, captured) = start_probe_mock().await;
+        let provider = AnthropicProvider::new(
+            secrecy::Secret::new("test-key".into()),
+            "claude-sonnet-4-5-20250929".into(),
+            base_url,
+        );
+
+        provider.probe().await.expect("probe should succeed");
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let body = reqs[0].body.as_ref().expect("request should have a body");
+        assert_eq!(body["max_tokens"], 1);
     }
 
     #[test]

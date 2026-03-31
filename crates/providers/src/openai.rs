@@ -516,6 +516,139 @@ impl OpenAiProvider {
         }
     }
 
+    fn apply_probe_output_cap_chat(&self, body: &mut serde_json::Value) {
+        let raw = super::raw_model_id(&self.model).to_ascii_lowercase();
+        let capability = raw.rsplit('/').next().unwrap_or(raw.as_str());
+        let uses_max_completion_tokens = capability.starts_with("gpt-5")
+            || capability.starts_with("o1")
+            || capability.starts_with("o3")
+            || capability.starts_with("o4");
+        if uses_max_completion_tokens {
+            body["max_completion_tokens"] = serde_json::json!(1);
+        } else {
+            body["max_tokens"] = serde_json::json!(1);
+        }
+    }
+
+    async fn probe_chat_completions(&self) -> anyhow::Result<()> {
+        let messages = vec![ChatMessage::user("ping")];
+        let serialized_messages = self.serialize_messages_for_request(&messages);
+        let (mut openai_messages, system_prompt) =
+            self.prepare_request_messages(serialized_messages);
+        self.apply_openrouter_cache_control(&mut openai_messages);
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "messages": openai_messages,
+        });
+        // Probes only answer "can this model respond at all?".
+        // Keep them cheap instead of mirroring full reasoning budgets.
+        self.apply_probe_output_cap_chat(&mut body);
+
+        if let Some(system_prompt) = system_prompt {
+            body["system"] = serde_json::Value::String(system_prompt);
+        }
+
+        debug!(model = %self.model, "openai probe request");
+        trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "openai probe request body");
+
+        let http_resp = self
+            .client
+            .post(format!("{}/chat/completions", self.base_url))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = http_resp.status();
+        if !status.is_success() {
+            let retry_after_ms = super::retry_after_ms_from_headers(http_resp.headers());
+            let body_text = http_resp.text().await.unwrap_or_default();
+            if should_warn_on_api_error(status, &body_text) {
+                warn!(
+                    status = %status,
+                    model = %self.model,
+                    provider = %self.provider_name,
+                    body = %body_text,
+                    "openai probe API error"
+                );
+            } else {
+                debug!(
+                    status = %status,
+                    model = %self.model,
+                    provider = %self.provider_name,
+                    "openai probe model unsupported for chat/completions endpoint"
+                );
+            }
+            anyhow::bail!(
+                "{}",
+                super::with_retry_after_marker(
+                    format!("OpenAI API error HTTP {status}: {body_text}"),
+                    retry_after_ms,
+                )
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn probe_responses(&self) -> anyhow::Result<()> {
+        let messages = vec![ChatMessage::user("ping")];
+        let (instructions, input) = split_responses_instructions_and_input(messages);
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "input": input,
+            "max_output_tokens": 1,
+        });
+
+        if let Some(instructions) = instructions {
+            body["instructions"] = serde_json::Value::String(instructions);
+        }
+
+        self.apply_reasoning_effort_responses(&mut body);
+
+        debug!(model = %self.model, "openai responses probe request");
+        trace!(body = %serde_json::to_string(&body).unwrap_or_default(), "openai responses probe request body");
+
+        let url = self.responses_sse_url();
+        let http_resp = self
+            .client
+            .post(&url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.expose_secret()),
+            )
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = http_resp.status();
+        if !status.is_success() {
+            let retry_after_ms = super::retry_after_ms_from_headers(http_resp.headers());
+            let body_text = http_resp.text().await.unwrap_or_default();
+            warn!(
+                status = %status,
+                model = %self.model,
+                provider = %self.provider_name,
+                body = %body_text,
+                "openai responses probe API error"
+            );
+            anyhow::bail!(
+                "{}",
+                super::with_retry_after_marker(
+                    format!("OpenAI API error HTTP {status}: {body_text}"),
+                    retry_after_ms,
+                )
+            );
+        }
+
+        Ok(())
+    }
+
     fn requires_reasoning_content_on_tool_messages(&self) -> bool {
         self.provider_name.eq_ignore_ascii_case("moonshot")
             || self.base_url.contains("moonshot.ai")
@@ -1618,6 +1751,13 @@ impl LlmProvider for OpenAiProvider {
         self.stream_with_tools(messages, vec![])
     }
 
+    async fn probe(&self) -> anyhow::Result<()> {
+        match self.wire_api {
+            WireApi::Responses => self.probe_responses().await,
+            WireApi::ChatCompletions => self.probe_chat_completions().await,
+        }
+    }
+
     #[allow(clippy::collapsible_if)]
     fn stream_with_tools(
         &self,
@@ -1965,6 +2105,43 @@ mod tests {
             history.iter().all(|m| m["role"].as_str() != Some("system")),
             "no system role messages should be in the array (MiniMax error 2013)"
         );
+    }
+
+    #[tokio::test]
+    async fn probe_chat_request_caps_minimax_output_to_one_token() {
+        let (base_url, captured) = start_sse_mock("{}".to_string()).await;
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new("test-key".to_string()),
+            "MiniMax-M2.7".to_string(),
+            base_url,
+            "minimax".to_string(),
+        );
+
+        provider.probe().await.expect("probe should succeed");
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let body = reqs[0].body.as_ref().expect("request should have a body");
+        assert_eq!(body["max_tokens"], 1);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[tokio::test]
+    async fn probe_chat_request_uses_max_completion_tokens_for_gpt5() {
+        let (base_url, captured) = start_sse_mock("{}".to_string()).await;
+        let provider = OpenAiProvider::new(
+            Secret::new("test-key".to_string()),
+            "gpt-5.2".to_string(),
+            base_url,
+        );
+
+        provider.probe().await.expect("probe should succeed");
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let body = reqs[0].body.as_ref().expect("request should have a body");
+        assert_eq!(body["max_completion_tokens"], 1);
+        assert!(body.get("max_tokens").is_none());
     }
 
     #[tokio::test]
@@ -2648,6 +2825,25 @@ mod tests {
         );
         assert!(body.get("messages").is_none(), "should not have 'messages'");
         assert_eq!(body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn probe_responses_request_caps_output_tokens() {
+        let (base_url, captured) = start_responses_mock("{}".to_string()).await;
+        let provider = OpenAiProvider::new(
+            Secret::new("test-key".to_string()),
+            "gpt-5.2".to_string(),
+            base_url,
+        )
+        .with_wire_api(WireApi::Responses);
+
+        provider.probe().await.expect("probe should succeed");
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let body = reqs[0].body.as_ref().expect("request should have a body");
+        assert_eq!(body["max_output_tokens"], 1);
+        assert!(body.get("stream").is_none());
     }
 
     #[tokio::test]

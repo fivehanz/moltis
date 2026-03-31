@@ -100,9 +100,8 @@ export function SessionHeader({
 	var activeRunId = session?.activeRunId.value || null;
 
 	var isMain = currentKey === "main";
-	var isChannel = session?.channelBinding || currentKey.startsWith("telegram:") || currentKey.startsWith("msteams:");
 	var isCron = currentKey.startsWith("cron:");
-	var canRename = !(isMain || isChannel || isCron);
+	var canRename = !(isMain || isCron);
 	var canStop = !isCron && replying;
 	var currentAgentId = session?.agent_id || defaultAgentId || "main";
 	var currentNodeId = session?.node_id || "";

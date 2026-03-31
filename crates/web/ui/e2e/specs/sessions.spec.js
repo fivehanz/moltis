@@ -652,6 +652,49 @@ test.describe("Session management", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("channel-bound session can be renamed", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/");
+		await waitForWsConnected(page);
+
+		// Create a session with a channel-like key (telegram prefix triggers isChannel detection).
+		const channelKey = `telegram:bot:rename-test-${Date.now()}`;
+		await expectRpcOk(page, "sessions.switch", { key: channelKey });
+
+		// Give the session an initial display name before the rename step.
+		await expectRpcOk(page, "sessions.patch", { key: channelKey, label: "Telegram 1" });
+
+		// Switch to the channels tab so the session is visible.
+		const channelsTab = page.locator('#sessionTabBar .session-tab[data-tab="channels"]');
+		await expect(channelsTab).toBeVisible({ timeout: 5_000 });
+		await channelsTab.click();
+
+		// Click the channel session to select it.
+		const channelItem = page.locator(`#sessionList .session-item[data-session-key="${channelKey}"]`);
+		await expect(channelItem).toBeVisible({ timeout: 10_000 });
+		await channelItem.click();
+
+		// The session name should be visible and clickable for rename.
+		const sessionName = page.getByTitle("Click to rename");
+		await expect(sessionName).toBeVisible({ timeout: 5_000 });
+
+		// Click to start rename.
+		await sessionName.click();
+		const renameInput = page.getByRole("textbox");
+		await expect(renameInput).toBeVisible({ timeout: 5_000 });
+
+		// Type a new name and press Enter.
+		const newName = "My Discord Chat";
+		await renameInput.fill(newName);
+		await renameInput.press("Enter");
+
+		// Verify the rename stuck.
+		await expect(sessionName).toBeVisible({ timeout: 5_000 });
+		await expect(sessionName).toHaveText(newName);
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("cron session shows delete button in more controls", async ({ page }) => {
 		const pageErrors = await navigateAndWait(page, "/");
 		await waitForWsConnected(page);

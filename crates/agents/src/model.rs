@@ -1,6 +1,6 @@
-use std::{pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc, time::Duration};
 
-use {async_trait::async_trait, tokio_stream::Stream};
+use {async_trait::async_trait, futures::StreamExt, tokio_stream::Stream};
 
 use crate::multimodal::parse_data_uri;
 
@@ -433,6 +433,35 @@ pub trait LlmProvider: Send + Sync {
         _effort: ReasoningEffort,
     ) -> Option<Arc<dyn LlmProvider>> {
         None
+    }
+
+    /// Send the cheapest request available that proves the model can answer.
+    ///
+    /// The default implementation streams a tiny prompt and returns as soon as
+    /// the first text delta or terminal event arrives. Providers can override
+    /// this to use provider-specific low-cost probe requests.
+    async fn probe(&self) -> anyhow::Result<()> {
+        let probe = vec![ChatMessage::user("ping")];
+        let mut stream = self.stream(probe);
+
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            while let Some(event) = stream.next().await {
+                match event {
+                    StreamEvent::Delta(_) | StreamEvent::Done(_) => return Ok(()),
+                    StreamEvent::Error(err) => return Err(anyhow::anyhow!(err)),
+                    _ => continue,
+                }
+            }
+            Err(anyhow::anyhow!("stream ended without producing any output"))
+        })
+        .await;
+
+        drop(stream);
+
+        match result {
+            Ok(inner) => inner,
+            Err(_) => Err(anyhow::anyhow!("Connection timed out after 30 seconds")),
+        }
     }
 
     /// Fetch runtime model metadata from the provider API.

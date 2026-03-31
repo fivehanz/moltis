@@ -2224,8 +2224,6 @@ impl ProviderSetupService for LiveProviderSetupService {
     }
 
     async fn validate_key(&self, params: Value) -> ServiceResult {
-        use moltis_agents::model::ChatMessage;
-
         let provider_name = params
             .get("provider")
             .and_then(|v| v.as_str())
@@ -2513,7 +2511,6 @@ impl ProviderSetupService for LiveProviderSetupService {
 
         let total_probe_attempts = models.len().min(VALIDATION_MAX_MODEL_PROBES);
 
-        let probe = [ChatMessage::user("ping")];
         let mut probe_attempted = false;
         let mut unsupported_errors = Vec::new();
         let mut last_error: Option<String> = None;
@@ -2554,7 +2551,7 @@ impl ProviderSetupService for LiveProviderSetupService {
             .await;
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(VALIDATION_PROBE_TIMEOUT_SECS),
-                llm_provider.complete(&probe, &[]),
+                llm_provider.probe(),
             )
             .await;
 
@@ -2924,6 +2921,7 @@ fn reorder_models_for_validation(models: &mut [moltis_providers::ModelInfo]) {
     /// Known-fast model substrings, ordered by preference.
     /// These are small/cheap models that respond quickly on every major provider.
     const FAST_PATTERNS: &[&str] = &[
+        "highspeed",
         "gpt-4o-mini",
         "gpt-4.1-mini",
         "gpt-4.1-nano",
@@ -4774,6 +4772,23 @@ mod tests {
         assert_eq!(
             ids[2], "openrouter::gpt-4o-search-preview",
             "slow namespaced model should be last, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn reorder_models_for_validation_prefers_highspeed_variants() {
+        let mut models = vec![
+            make_model("minimax::MiniMax-M2.7"),
+            make_model("minimax::MiniMax-M2.7-highspeed"),
+            make_model("minimax::MiniMax-M2.5"),
+        ];
+
+        reorder_models_for_validation(&mut models);
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+
+        assert_eq!(
+            ids[0], "minimax::MiniMax-M2.7-highspeed",
+            "highspeed variant should probe first, got: {ids:?}"
         );
     }
 

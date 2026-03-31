@@ -224,6 +224,29 @@ Conventional commits: `feat|fix|docs|style|refactor|test|chore(scope): descripti
 - Use `./scripts/prepare-release.sh [YYYYMMDD.NN]` for release prep (auto-computes next version if omitted).
 - Deploy template tags updated automatically by CI — don't manually update.
 
+**Release workflow is two phases:**
+
+1. **Prepare & publish** (can be done in a session):
+   ```bash
+   ./scripts/prepare-release.sh          # generates changelog, syncs lockfile
+   git add -A && git commit -m "chore: prepare release YYYYMMDD.NN"
+   git tag YYYYMMDD.NN && git push --follow-tags
+   ```
+   CI then builds artifacts, generates checksums, Sigstore signatures, and creates the GitHub release. This takes time.
+
+2. **GPG-sign** (must happen later, after CI completes):
+   ```bash
+   ./scripts/gpg-sign-release.sh [VERSION]
+   ```
+   This downloads artifacts from the published release, verifies SHA256 checksums, signs each artifact with the maintainer's YubiKey-resident GPG key, and uploads `.asc` files back to the release. **Requires YubiKey tap.**
+
+   Users verify signatures with:
+   ```bash
+   ./scripts/verify-release.sh --version YYYYMMDD.NN
+   ```
+
+**Important:** When asked to create a release, complete phase 1 and remind the maintainer to run `gpg-sign-release.sh` after CI finishes. Do not attempt to run the signing script in the same session — the release artifacts won't exist yet.
+
 ### Lockfile
 
 - `cargo fetch` to sync (not `cargo update`). Verify with `cargo fetch --locked`. `local-validate.sh` auto-handles.

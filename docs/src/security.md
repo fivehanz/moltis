@@ -567,6 +567,20 @@ Run Moltis on a private network or behind a reverse proxy with:
 Subscribe to security advisories and update promptly when vulnerabilities are
 disclosed.
 
+## Release Signing and Verification
+
+All release artifacts are signed with two independent methods:
+
+1. **Sigstore keyless signing** (automated in CI) — proves the artifact was
+   built by the `moltis-org/moltis` GitHub Actions pipeline
+2. **GPG signing** (maintainer's YubiKey hardware key) — proves a specific
+   maintainer authorized the release
+
+Checksums (SHA-256 and SHA-512) are generated for every artifact.
+
+See [Release Verification](release-verification.md) for detailed verification
+instructions, artifact file extensions, and maintainer signing workflow.
+
 ## Reporting Security Issues
 
 Report security vulnerabilities privately to the maintainers. Do not open

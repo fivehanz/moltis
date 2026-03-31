@@ -642,9 +642,7 @@ async fn run_single_probe(
         };
     }
 
-    let probe = [ChatMessage::user("ping")];
-    let completion =
-        tokio::time::timeout(Duration::from_secs(20), provider.complete(&probe, &[])).await;
+    let completion = tokio::time::timeout(Duration::from_secs(20), provider.probe()).await;
 
     match completion {
         Ok(Ok(_)) => {
@@ -2222,33 +2220,8 @@ impl ModelService for LiveModelService {
         let started = Instant::now();
         info!(model_id, provider = provider.name(), "model probe started");
 
-        // Use streaming and return as soon as the first token arrives.
-        // Dropping the stream closes the HTTP connection, which tells the
-        // provider to stop generating — effectively max_tokens: 1.
-        let probe = vec![ChatMessage::user("ping")];
-        let mut stream = provider.stream(probe);
-
-        // Local LLM servers (llama.cpp, Ollama, etc.) may need significant
-        // time to load a model into memory before streaming the first token.
-        // 30 s accommodates slow cold-starts without penalising cloud providers.
-        let result = tokio::time::timeout(Duration::from_secs(30), async {
-            while let Some(event) = stream.next().await {
-                match event {
-                    StreamEvent::Delta(_) | StreamEvent::Done(_) => return Ok(()),
-                    StreamEvent::Error(err) => return Err(err),
-                    // Skip other events (tool calls, etc.) and keep waiting.
-                    _ => continue,
-                }
-            }
-            Err("stream ended without producing any output".to_string())
-        })
-        .await;
-
-        // Drop the stream early to cancel the request on the provider side.
-        drop(stream);
-
-        match result {
-            Ok(Ok(())) => {
+        match provider.probe().await {
+            Ok(()) => {
                 info!(
                     model_id,
                     provider = provider.name(),
@@ -2260,12 +2233,13 @@ impl ModelService for LiveModelService {
                     "modelId": model_id,
                 }))
             },
-            Ok(Err(err)) => {
-                let error_obj = parse_chat_error(&err, Some(provider.name()));
+            Err(err) => {
+                let error_text = err.to_string();
+                let error_obj = parse_chat_error(&error_text, Some(provider.name()));
                 let detail = error_obj
                     .get("detail")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(&err)
+                    .unwrap_or(&error_text)
                     .to_string();
 
                 warn!(
@@ -2276,15 +2250,6 @@ impl ModelService for LiveModelService {
                     "model probe failed"
                 );
                 Err(detail.into())
-            },
-            Err(_) => {
-                warn!(
-                    model_id,
-                    provider = provider.name(),
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "model probe timed out after 30s"
-                );
-                Err("Connection timed out after 30 seconds".into())
             },
         }
     }
