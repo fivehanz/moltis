@@ -598,9 +598,9 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 
 [channels]
 # Which channel types appear in the web UI's "+ Add Channel" menu.
-# Default: ["telegram", "discord", "slack"]
-# Add "whatsapp" or "msteams" to enable them in the UI.
-# offered = ["telegram", "discord", "slack", "whatsapp"]
+# Default: ["telegram", "msteams", "discord", "slack"]
+# Add "whatsapp" to enable it in the UI.
+# offered = ["telegram", "msteams", "discord", "slack", "whatsapp"]
 
 # WhatsApp linked-device accounts
 # [channels.whatsapp.my-bot]
@@ -629,8 +629,22 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # [channels.msteams.my-bot]
 # app_id = "..."                  # Azure Bot App ID
 # app_password = "..."            # Azure Bot App Password (client secret)
+# tenant_id = "botframework.com"  # Azure AD tenant ID (for JWT validation)
 # webhook_secret = "..."          # Optional query secret for webhook URL (?secret=...)
 # allowlist = []                  # User IDs allowed to DM (empty = all unless dm_policy=allowlist)
+# dm_policy = "allowlist"         # "open", "allowlist", or "disabled"
+# group_policy = "open"           # "open", "allowlist", or "disabled"
+# mention_mode = "mention"        # "mention", "always", or "none"
+# stream_mode = "edit_in_place"   # "edit_in_place" or "off"
+# edit_throttle_ms = 1500         # Min ms between streaming edits
+# text_chunk_limit = 4000         # Max chars per message chunk
+# reply_style = "top_level"       # "top_level" or "thread"
+# welcome_card = true             # Show welcome card in DMs
+# group_welcome_card = false      # Show welcome text in group chats
+# bot_name = "Moltis"             # Bot display name for welcome cards
+# prompt_starters = []            # Prompt starter buttons on welcome card
+# max_retries = 3                 # Max retry attempts for failed sends
+# history_limit = 50              # Max messages for thread context (Graph API)
 
 # Discord bots
 # [channels.discord.my-bot]

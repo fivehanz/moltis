@@ -588,6 +588,25 @@ pub async fn prepare_gateway(
                     let teams_plugin = Arc::clone(&teams_plugin_for_webhook);
                     let gw_state = Arc::clone(&state_for_teams_webhook);
                     async move {
+                        // JWT pre-validation: check Authorization header before
+                        // running the shared-secret verifier pipeline.
+                        if let Some(auth_header) = headers.get("authorization") {
+                            let jwt_validator = {
+                                let plugin = teams_plugin.read().await;
+                                plugin.jwt_validator(&account_id)
+                            };
+                            if let Some(validator) = jwt_validator {
+                                let header_str = auth_header.to_str().unwrap_or("");
+                                if !validator.validate(header_str).await {
+                                    return (
+                                        StatusCode::UNAUTHORIZED,
+                                        Json(serde_json::json!({ "ok": false, "error": "invalid JWT" })),
+                                    )
+                                        .into_response();
+                                }
+                            }
+                        }
+
                         // Get the verifier from the plugin.
                         let verifier = {
                             let plugin = teams_plugin.read().await;
@@ -629,7 +648,7 @@ pub async fn prepare_gateway(
                             )
                                 .into_response(),
                             Ok((verified, moltis_channels::ChannelWebhookDedupeResult::New)) => {
-                                // Parse verified body and dispatch.
+                                // Parse verified body.
                                 let payload: serde_json::Value =
                                     match serde_json::from_slice(&verified.body) {
                                         Ok(v) => v,
@@ -641,35 +660,30 @@ pub async fn prepare_gateway(
                                                 .into_response();
                                         },
                                     };
-                                let result = {
-                                    let plugin = teams_plugin.read().await;
-                                    plugin
-                                        .ingest_verified_activity(&account_id, payload)
+
+                                // Spawn processing asynchronously and return 202
+                                // immediately. This prevents Teams from retrying
+                                // when LLM processing takes longer than ~15 seconds.
+                                let account_id_owned = account_id.clone();
+                                let teams_plugin_for_spawn = Arc::clone(&teams_plugin);
+                                tokio::spawn(async move {
+                                    let plugin = teams_plugin_for_spawn.read().await;
+                                    if let Err(e) = plugin
+                                        .ingest_verified_activity(&account_id_owned, payload)
                                         .await
-                                };
-                                match result {
-                                    Ok(()) => (
-                                        StatusCode::OK,
-                                        Json(serde_json::json!({ "ok": true })),
-                                    )
-                                        .into_response(),
-                                    Err(e) => {
-                                        let msg = e.to_string();
-                                        if msg.contains("unknown Teams account") {
-                                            (
-                                                StatusCode::NOT_FOUND,
-                                                Json(serde_json::json!({ "ok": false, "error": msg })),
-                                            )
-                                                .into_response()
-                                        } else {
-                                            (
-                                                StatusCode::BAD_REQUEST,
-                                                Json(serde_json::json!({ "ok": false, "error": msg })),
-                                            )
-                                                .into_response()
-                                        }
-                                    },
-                                }
+                                    {
+                                        tracing::warn!(
+                                            account_id = account_id_owned,
+                                            "Teams webhook processing failed: {e}"
+                                        );
+                                    }
+                                });
+
+                                (
+                                    StatusCode::ACCEPTED,
+                                    Json(serde_json::json!({ "ok": true })),
+                                )
+                                    .into_response()
                             },
                         }
                     }

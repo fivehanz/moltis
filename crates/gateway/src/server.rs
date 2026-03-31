@@ -3314,6 +3314,25 @@ pub async fn prepare_gateway_core(
         tool_registry.register(Box::new(crate::channel_agent_tools::SendMessageTool::new(
             Arc::clone(&state.services.channel),
         )));
+        // Microsoft Teams Graph API tools (search, member info, pins, edit/delete, read).
+        {
+            let tp = Arc::clone(&msteams_webhook_plugin);
+            tool_registry.register(Box::new(
+                crate::teams_agent_tools::TeamsSearchMessagesTool::new(Arc::clone(&tp)),
+            ));
+            tool_registry.register(Box::new(
+                crate::teams_agent_tools::TeamsMemberInfoTool::new(Arc::clone(&tp)),
+            ));
+            tool_registry.register(Box::new(
+                crate::teams_agent_tools::TeamsPinMessageTool::new(Arc::clone(&tp)),
+            ));
+            tool_registry.register(Box::new(
+                crate::teams_agent_tools::TeamsEditMessageTool::new(Arc::clone(&tp)),
+            ));
+            tool_registry.register(Box::new(
+                crate::teams_agent_tools::TeamsReadMessageTool::new(Arc::clone(&tp)),
+            ));
+        }
         tool_registry.register(Box::new(
             moltis_tools::send_image::SendImageTool::new()
                 .with_sandbox_router(Arc::clone(&sandbox_router)),

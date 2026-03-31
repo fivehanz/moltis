@@ -595,35 +595,40 @@ function AddTeamsModal() {
 	    title="Connect Microsoft Teams">
 	    <div class="channel-form">
 	      <div class="channel-card">
-	        <div>
-	          <span class="text-xs font-medium text-[var(--text-strong)]">Microsoft Teams setup</span>
-	          <div class="text-xs text-[var(--muted)]">1. <a href="https://learn.microsoft.com/en-us/azure/bot-service/bot-service-quickstart-registration" target="_blank" class="text-[var(--accent)] underline">Create an Azure Bot registration</a> and copy the App ID + App Password.</div>
-	          <div class="text-xs text-[var(--muted)]">2. Use Bootstrap Teams below to generate the exact messaging endpoint.</div>
-	          <div class="text-xs text-[var(--muted)]">3. Optional CLI shortcut: <code>moltis channels teams bootstrap</code>.</div>
+	        <div class="flex flex-col gap-1">
+	          <span class="text-xs font-medium text-[var(--text-strong)]">How to create a Teams bot</span>
+	          <span class="text-xs font-medium text-[var(--text-strong)] opacity-70" style="font-size:10px">Option A: Teams Developer Portal (easiest)</span>
+	          <div class="text-xs text-[var(--muted)]">1. Open <a href="https://dev.teams.microsoft.com/bots" target="_blank" class="text-[var(--accent)] underline">Teams Developer Portal \u2192 Bot Management</a></div>
+	          <div class="text-xs text-[var(--muted)]">2. Click <strong>+ New Bot</strong>, give it a name, copy the <strong>Bot ID</strong> (App ID)</div>
+	          <div class="text-xs text-[var(--muted)]">3. Under <strong>Client secrets</strong>, add a secret and copy the value (App Password)</div>
+	          <span class="text-xs font-medium text-[var(--text-strong)] opacity-70" style="font-size:10px;margin-top:4px">Option B: Azure Portal</span>
+	          <div class="text-xs text-[var(--muted)]">1. <a href="https://portal.azure.com/#create/Microsoft.AzureBot" target="_blank" class="text-[var(--accent)] underline">Create an Azure Bot</a>, then find App ID in Configuration</div>
+	          <div class="text-xs text-[var(--muted)]">2. Click <strong>Manage Password</strong> \u2192 <strong>New client secret</strong> for the App Password</div>
+	          <div class="text-xs text-[var(--muted)]" style="margin-top:4px">Then generate the endpoint below and paste it as the <strong>Messaging endpoint</strong> in your bot settings. <a href="https://docs.moltis.org/teams.html" target="_blank" class="text-[var(--accent)] underline">Full guide \u2192</a></div>
 	        </div>
 	      </div>
 	      <${ConnectionModeHint} type="msteams" />
-	      <label class="text-xs text-[var(--muted)]">App ID / Account ID</label>
-	      <input data-field="accountId" type="text" placeholder="Azure App ID or alias"
+	      <label class="text-xs text-[var(--muted)]">App ID (Bot ID from Azure)</label>
+	      <input data-field="accountId" type="text" placeholder="e.g. 12345678-abcd-efgh-ijkl-000000000000"
 	        value=${accountDraft.value}
 	        onInput=${(e) => {
 						accountDraft.value = e.target.value;
 						refreshBootstrapEndpoint();
 					}}
 	        class="channel-input" />
-	      <label class="text-xs text-[var(--muted)]">App Password (client secret)</label>
-	      <input data-field="credential" type="password" placeholder="Azure client secret" class="channel-input"
+	      <label class="text-xs text-[var(--muted)]">App Password (client secret from Azure)</label>
+	      <input data-field="credential" type="password" placeholder="Client secret value" class="channel-input"
 	        autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false"
 	        name="teams_app_password" />
 	      <div>
-	        <label class="text-xs text-[var(--muted)]">Webhook Secret (optional)</label>
-	        <input type="text" placeholder="shared secret for ?secret=..." class="channel-input"
+	        <label class="text-xs text-[var(--muted)]">Webhook Secret <span class="opacity-60">(optional \u2014 auto-generated if blank)</span></label>
+	        <input type="text" placeholder="Leave blank to auto-generate" class="channel-input"
 	          value=${webhookSecret.value}
 	          onInput=${(e) => {
 							webhookSecret.value = e.target.value;
 							refreshBootstrapEndpoint();
 						}} />
-	        <label class="text-xs text-[var(--muted)] mt-2">Public Base URL (for Teams webhook)</label>
+	        <label class="text-xs text-[var(--muted)] mt-2">Public Base URL <span class="opacity-60">(your server\u2019s HTTPS address)</span></label>
 	        <input type="text" placeholder="https://bot.example.com" class="channel-input"
 	          value=${baseUrlDraft.value}
 	          onInput=${(e) => {
@@ -643,11 +648,12 @@ function AddTeamsModal() {
 	        </div>
 	        ${
 						bootstrapEndpoint.value &&
-						html`<div class="mt-2">
-	          <div class="text-xs text-[var(--muted)]">Messaging endpoint</div>
-	          <code class="text-xs block break-all">${bootstrapEndpoint.value}</code>
+						html`<div class="mt-2 rounded-md border border-[var(--border)] bg-[var(--surface2)] p-2">
+	          <div class="text-xs text-[var(--muted)] mb-1">Messaging endpoint \u2014 paste this into your bot\u2019s configuration:</div>
+	          <code class="text-xs block break-all select-all">${bootstrapEndpoint.value}</code>
 	        </div>`
 					}
+	        <div class="text-[10px] text-[var(--muted)] mt-1 opacity-70">Teams requires HTTPS. For local dev, use <a href="https://ngrok.com/" target="_blank" class="text-[var(--accent)] underline">ngrok</a> or <a href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/" target="_blank" class="text-[var(--accent)] underline">Cloudflare Tunnel</a>.</div>
 	      </div>
 	      <${SharedChannelFields} addModel=${addModel} allowlistItems=${allowlistItems} />
 	      ${error.value && html`<div class="text-xs text-[var(--error)] channel-error block">${error.value}</div>`}
@@ -1090,11 +1096,19 @@ function EditChannelModal() {
 	var allowlistItems = useSignal([]);
 	var editCredential = useSignal("");
 	var editWebhookSecret = useSignal("");
+	var editStreamMode = useSignal("edit_in_place");
+	var editReplyStyle = useSignal("top_level");
+	var editWelcomeCard = useSignal(true);
+	var editBotName = useSignal("");
 	useEffect(() => {
 		editModel.value = ch?.config?.model || "";
 		allowlistItems.value = ch?.config?.allowlist || [];
 		editCredential.value = "";
 		editWebhookSecret.value = ch?.config?.webhook_secret || "";
+		editStreamMode.value = ch?.config?.stream_mode || "edit_in_place";
+		editReplyStyle.value = ch?.config?.reply_style || "top_level";
+		editWelcomeCard.value = ch?.config?.welcome_card !== false;
+		editBotName.value = ch?.config?.bot_name || "";
 	}, [ch]);
 	if (!ch) return null;
 	var cfg = ch.config || {};
@@ -1132,6 +1146,12 @@ function EditChannelModal() {
 		}
 		addChannelCredentials(updateConfig);
 		addModelToConfig(updateConfig);
+		if (isTeams) {
+			updateConfig.stream_mode = editStreamMode.value;
+			updateConfig.reply_style = editReplyStyle.value;
+			updateConfig.welcome_card = editWelcomeCard.value;
+			if (editBotName.value.trim()) updateConfig.bot_name = editBotName.value.trim();
+		}
 		return updateConfig;
 	}
 
@@ -1184,6 +1204,45 @@ function EditChannelModal() {
 				          onInput=${(e) => {
 										editWebhookSecret.value = e.target.value;
 									}} />
+				      </div>
+				      <div class="flex gap-3">
+				        <div class="flex-1">
+				          <label class="text-xs text-[var(--muted)]">Streaming</label>
+				          <select class="channel-select" value=${editStreamMode.value}
+				            onChange=${(e) => {
+											editStreamMode.value = e.target.value;
+										}}>
+				            <option value="edit_in_place">Edit-in-place (live updates)</option>
+				            <option value="off">Off (send once complete)</option>
+				          </select>
+				        </div>
+				        <div class="flex-1">
+				          <label class="text-xs text-[var(--muted)]">Reply Style</label>
+				          <select class="channel-select" value=${editReplyStyle.value}
+				            onChange=${(e) => {
+											editReplyStyle.value = e.target.value;
+										}}>
+				            <option value="top_level">Top-level message</option>
+				            <option value="thread">Reply in thread</option>
+				          </select>
+				        </div>
+				      </div>
+				      <div class="flex gap-3 items-end">
+				        <div class="flex-1">
+				          <label class="text-xs text-[var(--muted)]">Bot Name (for welcome card)</label>
+				          <input type="text" class="channel-input" value=${editBotName.value}
+				            onInput=${(e) => {
+											editBotName.value = e.target.value;
+										}}
+				            placeholder="Moltis" />
+				        </div>
+				        <label class="flex items-center gap-2 text-xs text-[var(--muted)] pb-2 cursor-pointer">
+				          <input type="checkbox" checked=${editWelcomeCard.value}
+				            onChange=${(e) => {
+											editWelcomeCard.value = e.target.checked;
+										}} />
+				          Welcome card
+				        </label>
 				      </div>`
 				}
 	      ${

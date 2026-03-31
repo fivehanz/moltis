@@ -9,7 +9,7 @@ use {
     tokio::sync::Mutex,
 };
 
-use crate::{auth::CachedAccessToken, config::MsTeamsAccountConfig};
+use crate::{auth::CachedAccessToken, config::MsTeamsAccountConfig, jwt::BotFrameworkJwtValidator};
 
 /// Shared account state map.
 pub type AccountStateMap = Arc<RwLock<HashMap<String, AccountState>>>;
@@ -23,4 +23,8 @@ pub struct AccountState {
     pub http: Client,
     pub token_cache: Arc<Mutex<Option<CachedAccessToken>>>,
     pub service_urls: Arc<RwLock<HashMap<String, String>>>,
+    /// JWT validator for Bot Framework token verification.
+    pub jwt_validator: Option<Arc<BotFrameworkJwtValidator>>,
+    /// Tracks which conversations have received a welcome card/message.
+    pub welcomed_conversations: Arc<RwLock<std::collections::HashSet<String>>>,
 }

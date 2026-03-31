@@ -10,7 +10,7 @@ capabilities that control what features are available.
 |---------|-------------|--------------------|--------------------|
 | Telegram | Polling | No | Streaming, voice ingest, reactions, OTP, location |
 | Discord | Gateway (WebSocket) | No | Streaming, interactive messages, threads, reactions |
-| Microsoft Teams | Webhook | Yes | Streaming, interactive messages, threads |
+| Microsoft Teams | Webhook | Yes | Streaming, interactive messages, threads, reactions |
 | WhatsApp | Gateway (WebSocket) | No | Streaming, voice ingest, OTP, pairing, location |
 | Slack | Socket Mode | No | Streaming, interactive messages, threads, reactions |
 
@@ -84,8 +84,8 @@ dm_policy = "open"
 ```
 
 For detailed configuration, see the per-channel pages:
-[Telegram](telegram.md), [Discord](discord.md), [Slack](slack.md),
-[WhatsApp](whatsapp.md).
+[Telegram](telegram.md), [Microsoft Teams](teams.md), [Discord](discord.md),
+[Slack](slack.md), [WhatsApp](whatsapp.md).
 
 You can also use the web UI's **Channels** tab for guided setup with each platform.
 
