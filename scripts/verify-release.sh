@@ -19,6 +19,7 @@ set -euo pipefail
 #   ./scripts/verify-release.sh *.tar.gz *.deb
 
 GPG_KEY_URL="https://pen.so/gpg.asc"
+EXPECTED_FINGERPRINT="310320A8CC1C5BA86AD09040C0451BADF7649BBF"
 REPO="${MOLTIS_REPO:-moltis-org/moltis}"
 
 usage() {
@@ -79,6 +80,16 @@ if [[ "$SKIP_KEY" != true ]]; then
     echo "error: failed to fetch GPG key from $GPG_KEY_URL" >&2
     exit 1
   fi
+  # Verify fingerprint before importing into the real keyring
+  ACTUAL_FINGERPRINT="$(echo "$KEY_DATA" | gpg --with-colons --import-options show-only --import 2>/dev/null \
+    | awk -F: '/^fpr/ { print $10; exit }')"
+  if [[ "$ACTUAL_FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]]; then
+    echo "error: fetched key fingerprint does not match expected maintainer key" >&2
+    echo "  expected: $EXPECTED_FINGERPRINT" >&2
+    echo "  actual:   $ACTUAL_FINGERPRINT" >&2
+    exit 1
+  fi
+
   echo "$KEY_DATA" | gpg --import 2>&1 || true
   echo ""
 fi

@@ -37,9 +37,18 @@ sha256sum --check moltis-VERSION-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 #### 2. Verify GPG signature
 
+The maintainer's GPG key fingerprint is:
+
+```
+3103 20A8 CC1C 5BA8 6AD0  9040 C045 1BAD F764 9BBF
+```
+
 ```bash
 # Import the maintainer's public key (one-time)
 curl -fsSL https://pen.so/gpg.asc | gpg --import
+
+# Confirm the fingerprint matches
+gpg --fingerprint F7649BBF
 
 # Download the detached signature
 curl -LO https://github.com/moltis-org/moltis/releases/download/VERSION/moltis-VERSION-x86_64-unknown-linux-gnu.tar.gz.asc
