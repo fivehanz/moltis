@@ -422,11 +422,11 @@ function SendersTab() {
 }
 
 // ── Tag-style allowlist input ────────────────────────────────
-function AllowlistInput({ value, onChange }) {
+function AllowlistInput({ value, onChange, preserveAt }) {
 	var input = useSignal("");
 
 	function addTag(raw) {
-		var tag = raw.trim().replace(/^@/, "");
+		var tag = preserveAt ? raw.trim() : raw.trim().replace(/^@/, "");
 		if (tag && !value.includes(tag)) onChange([...value, tag]);
 		input.value = "";
 	}
@@ -1268,11 +1268,11 @@ function AddMatrixModal() {
 					}}
 	        placeholder=${defaultPlaceholder} />
 	      <label class="text-xs text-[var(--muted)]">DM Allowlist (Matrix user IDs)</label>
-	      <${AllowlistInput} value=${userAllowlistItems.value} onChange=${(items) => {
+	      <${AllowlistInput} value=${userAllowlistItems.value} preserveAt=${true} onChange=${(items) => {
 					userAllowlistItems.value = items;
 				}} />
 	      <label class="text-xs text-[var(--muted)]">Room Allowlist (room IDs or aliases)</label>
-	      <${AllowlistInput} value=${roomAllowlistItems.value} onChange=${(items) => {
+	      <${AllowlistInput} value=${roomAllowlistItems.value} preserveAt=${true} onChange=${(items) => {
 					roomAllowlistItems.value = items;
 				}} />
 	      <${AdvancedConfigPatchField} value=${advancedConfigPatch.value} onInput=${(value) => {
@@ -1731,14 +1731,14 @@ function EditChannelModal() {
 				}}
         placeholder=${defaultPlaceholder} />
       <label class="text-xs text-[var(--muted)]">DM Allowlist</label>
-      <${AllowlistInput} value=${allowlistItems.value} onChange=${(v) => {
+      <${AllowlistInput} value=${allowlistItems.value} preserveAt=${isMatrix} onChange=${(v) => {
 				allowlistItems.value = v;
 			}} />
       ${
 				isMatrix &&
 				html`
         <label class="text-xs text-[var(--muted)]">Room Allowlist</label>
-        <${AllowlistInput} value=${roomAllowlistItems.value} onChange=${(v) => {
+        <${AllowlistInput} value=${roomAllowlistItems.value} preserveAt=${true} onChange=${(v) => {
 					roomAllowlistItems.value = v;
 				}} />
       `

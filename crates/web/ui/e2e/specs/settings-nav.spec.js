@@ -658,6 +658,16 @@ test.describe("Settings navigation", () => {
 		await page.locator('input[data-field="userId"]').fill("@bot:example.com");
 		await page.locator('input[data-field="credential"]').fill("correct horse battery staple");
 		await page.locator('select[data-field="autoJoin"]').selectOption("allowlist");
+		const matrixDmAllowlistInput = page
+			.getByText("DM Allowlist (Matrix user IDs)", { exact: true })
+			.locator("xpath=following-sibling::div[1]//input");
+		const matrixRoomAllowlistInput = page
+			.getByText("Room Allowlist (room IDs or aliases)", { exact: true })
+			.locator("xpath=following-sibling::div[1]//input");
+		await matrixDmAllowlistInput.fill("@alice:example.com");
+		await matrixDmAllowlistInput.press("Enter");
+		await matrixRoomAllowlistInput.fill("@ops:example.com");
+		await matrixRoomAllowlistInput.press("Enter");
 		await page.evaluate(() => {
 			const submitButton = Array.from(document.querySelectorAll(".modal-box button.provider-btn")).find(
 				(button) => button.textContent?.trim() === "Connect Matrix",
@@ -680,6 +690,8 @@ test.describe("Settings navigation", () => {
 			auto_join: "allowlist",
 			otp_self_approval: true,
 			otp_cooldown_secs: 300,
+			user_allowlist: ["@alice:example.com"],
+			room_allowlist: ["@ops:example.com"],
 		});
 		expect(sentRequest.config).not.toHaveProperty("access_token");
 		expect(pageErrors).toEqual([]);
