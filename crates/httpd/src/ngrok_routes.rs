@@ -130,9 +130,17 @@ async fn save_config_handler(
     }
 
     let updated = moltis_config::discover_and_load();
-    if let Some(controller) = state.ngrok_controller.upgrade()
-        && let Err(error) = controller.apply(&updated.ngrok).await
-    {
+    let Some(controller) = state.ngrok_controller.upgrade() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ngrok_error(
+                NGROK_APPLY_FAILED,
+                "ngrok controller is not available in this build context",
+            )),
+        )
+            .into_response();
+    };
+    if let Err(error) = controller.apply(&updated.ngrok).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -149,4 +157,68 @@ async fn save_config_handler(
         "status": status_payload(&state).await,
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Weak};
+
+    use {
+        axum::{Json, body::to_bytes, extract::State},
+        moltis_gateway::{
+            auth, methods::MethodRegistry, services::GatewayServices, state::GatewayState,
+        },
+    };
+
+    use crate::server::NgrokRuntimeStatus;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn save_config_returns_error_when_ngrok_controller_is_unavailable() {
+        let tempdir = tempfile::tempdir().unwrap();
+        moltis_config::set_config_dir(tempdir.path().to_path_buf());
+        moltis_config::set_data_dir(tempdir.path().to_path_buf());
+
+        let state = AppState {
+            gateway: GatewayState::new(auth::resolve_auth(None, None), GatewayServices::noop()),
+            methods: Arc::new(MethodRegistry::new()),
+            request_throttle: Arc::new(crate::request_throttle::RequestThrottle::new()),
+            webauthn_registry: None,
+            ngrok_controller_owner: None,
+            ngrok_controller: Weak::new(),
+            ngrok_runtime: Arc::new(tokio::sync::RwLock::new(Some(NgrokRuntimeStatus {
+                public_url: "https://existing.ngrok.app".to_string(),
+                passkey_warning: None,
+            }))),
+            #[cfg(feature = "push-notifications")]
+            push_service: None,
+            #[cfg(feature = "graphql")]
+            graphql_schema: crate::graphql_routes::build_graphql_schema(GatewayState::new(
+                auth::resolve_auth(None, None),
+                GatewayServices::noop(),
+            )),
+        };
+
+        let response = save_config_handler(
+            State(state),
+            Json(SaveNgrokConfigRequest {
+                enabled: true,
+                authtoken: Some("test-token".to_string()),
+                clear_authtoken: false,
+                domain: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], NGROK_APPLY_FAILED);
+        assert_eq!(
+            payload["error"],
+            "ngrok controller is not available in this build context"
+        );
+    }
 }

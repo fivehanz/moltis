@@ -270,6 +270,8 @@ pub struct AppState {
     pub request_throttle: Arc<crate::request_throttle::RequestThrottle>,
     pub webauthn_registry: Option<SharedWebAuthnRegistry>,
     #[cfg(feature = "ngrok")]
+    pub ngrok_controller_owner: Option<Arc<NgrokController>>,
+    #[cfg(feature = "ngrok")]
     pub ngrok_controller: Weak<NgrokController>,
     #[cfg(feature = "ngrok")]
     pub ngrok_runtime: Arc<tokio::sync::RwLock<Option<NgrokRuntimeStatus>>>,
@@ -465,6 +467,8 @@ fn build_gateway_base_internal(
         request_throttle: Arc::new(crate::request_throttle::RequestThrottle::new()),
         webauthn_registry: webauthn_registry.clone(),
         #[cfg(feature = "ngrok")]
+        ngrok_controller_owner: None,
+        #[cfg(feature = "ngrok")]
         ngrok_controller: Arc::downgrade(&ngrok_controller),
         #[cfg(feature = "ngrok")]
         ngrok_runtime,
@@ -505,8 +509,12 @@ pub fn build_gateway_base(
     webauthn_registry: Option<SharedWebAuthnRegistry>,
 ) -> (Router<AppState>, AppState) {
     #[cfg(feature = "ngrok")]
-    let (router, app_state, _) =
+    let (router, mut app_state, ngrok_controller) =
         build_gateway_base_internal(state, methods, push_service, webauthn_registry);
+    #[cfg(feature = "ngrok")]
+    {
+        app_state.ngrok_controller_owner = Some(ngrok_controller);
+    }
     #[cfg(not(feature = "ngrok"))]
     let (router, app_state) =
         build_gateway_base_internal(state, methods, push_service, webauthn_registry);
@@ -563,6 +571,8 @@ fn build_gateway_base_internal(
         request_throttle: Arc::new(crate::request_throttle::RequestThrottle::new()),
         webauthn_registry: webauthn_registry.clone(),
         #[cfg(feature = "ngrok")]
+        ngrok_controller_owner: None,
+        #[cfg(feature = "ngrok")]
         ngrok_controller: Arc::downgrade(&ngrok_controller),
         #[cfg(feature = "ngrok")]
         ngrok_runtime,
@@ -601,7 +611,12 @@ pub fn build_gateway_base(
     webauthn_registry: Option<SharedWebAuthnRegistry>,
 ) -> (Router<AppState>, AppState) {
     #[cfg(feature = "ngrok")]
-    let (router, app_state, _) = build_gateway_base_internal(state, methods, webauthn_registry);
+    let (router, mut app_state, ngrok_controller) =
+        build_gateway_base_internal(state, methods, webauthn_registry);
+    #[cfg(feature = "ngrok")]
+    {
+        app_state.ngrok_controller_owner = Some(ngrok_controller);
+    }
     #[cfg(not(feature = "ngrok"))]
     let (router, app_state) = build_gateway_base_internal(state, methods, webauthn_registry);
     (router, app_state)
@@ -2831,5 +2846,22 @@ mod tests {
             "enter this code to set your password or register a passkey",
             "",
         ]);
+    }
+
+    #[cfg(feature = "ngrok")]
+    #[test]
+    fn public_build_gateway_base_keeps_ngrok_controller_alive() {
+        let state = GatewayState::new(
+            auth::resolve_auth(None, None),
+            moltis_gateway::services::GatewayServices::noop(),
+        );
+        let methods = Arc::new(MethodRegistry::new());
+        #[cfg(feature = "push-notifications")]
+        let (_router, app_state) = build_gateway_base(state, methods, None, None);
+        #[cfg(not(feature = "push-notifications"))]
+        let (_router, app_state) = build_gateway_base(state, methods, None);
+
+        assert!(app_state.ngrok_controller_owner.is_some());
+        assert!(app_state.ngrok_controller.upgrade().is_some());
     }
 }
