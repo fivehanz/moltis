@@ -2767,6 +2767,33 @@ impl LiveChatService {
         "main".to_string()
     }
 
+    /// Resolve the effective session key for chat operations.
+    ///
+    /// Precedence is:
+    /// 1. Internal `_session_key` overrides used by runtime-owned callers.
+    /// 2. Public `sessionKey` / `session_key` request parameters.
+    /// 3. Connection-scoped active session derived from `_conn_id`.
+    /// 4. The default `"main"` session.
+    async fn resolve_session_key_from_params(&self, params: &Value) -> String {
+        if let Some(session_key) = params
+            .get("_session_key")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+        {
+            return session_key.to_string();
+        }
+        if let Some(session_key) = params
+            .get("sessionKey")
+            .or_else(|| params.get("session_key"))
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+        {
+            return session_key.to_string();
+        }
+        let conn_id = params.get("_conn_id").and_then(|v| v.as_str());
+        self.session_key_for(conn_id).await
+    }
+
     /// Resolve the project context prompt section for a session.
     async fn resolve_project_context(
         &self,
@@ -2902,11 +2929,8 @@ impl ChatService for LiveChatService {
             "send() mode decision"
         );
 
-        // Resolve session key: explicit override (used by cron callbacks) or connection-scoped lookup.
-        let session_key = match params.get("_session_key").and_then(|v| v.as_str()) {
-            Some(sk) => sk.to_string(),
-            None => self.session_key_for(conn_id.as_deref()).await,
-        };
+        // Resolve session key from explicit overrides, public request params, or connection context.
+        let session_key = self.resolve_session_key_from_params(&params).await;
         let queued_replay = params
             .get("_queued_replay")
             .and_then(|v| v.as_bool())
@@ -4271,11 +4295,7 @@ impl ChatService for LiveChatService {
     }
 
     async fn history(&self, params: Value) -> ServiceResult {
-        let conn_id = params
-            .get("_conn_id")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let session_key = self.session_key_for(conn_id.as_deref()).await;
+        let session_key = self.resolve_session_key_from_params(&params).await;
         let messages = self
             .session_store
             .read(&session_key)
@@ -4295,15 +4315,7 @@ impl ChatService for LiveChatService {
     }
 
     async fn clear(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
-            sk.to_string()
-        } else {
-            let conn_id = params
-                .get("_conn_id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            self.session_key_for(conn_id.as_deref()).await
-        };
+        let session_key = self.resolve_session_key_from_params(&params).await;
 
         self.session_store
             .clear(&session_key)
@@ -4339,15 +4351,7 @@ impl ChatService for LiveChatService {
     }
 
     async fn compact(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
-            sk.to_string()
-        } else {
-            let conn_id = params
-                .get("_conn_id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            self.session_key_for(conn_id.as_deref()).await
-        };
+        let session_key = self.resolve_session_key_from_params(&params).await;
         let session_entry = self.session_metadata.get(&session_key).await;
         let session_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
 
@@ -4514,15 +4518,7 @@ impl ChatService for LiveChatService {
     }
 
     async fn context(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
-            sk.to_string()
-        } else {
-            let conn_id = params
-                .get("_conn_id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            self.session_key_for(conn_id.as_deref()).await
-        };
+        let session_key = self.resolve_session_key_from_params(&params).await;
 
         // Session info
         let message_count = self.session_store.count(&session_key).await.unwrap_or(0);
@@ -4767,15 +4763,7 @@ impl ChatService for LiveChatService {
     }
 
     async fn raw_prompt(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
-            sk.to_string()
-        } else {
-            let conn_id = params
-                .get("_conn_id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            self.session_key_for(conn_id.as_deref()).await
-        };
+        let session_key = self.resolve_session_key_from_params(&params).await;
 
         let conn_id = params
             .get("_conn_id")
@@ -4890,15 +4878,7 @@ impl ChatService for LiveChatService {
     /// Return the **full messages array** that would be sent to the LLM on the
     /// next call — system prompt + conversation history — in OpenAI format.
     async fn full_context(&self, params: Value) -> ServiceResult {
-        let session_key = if let Some(sk) = params.get("_session_key").and_then(|v| v.as_str()) {
-            sk.to_string()
-        } else {
-            let conn_id = params
-                .get("_conn_id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            self.session_key_for(conn_id.as_deref()).await
-        };
+        let session_key = self.resolve_session_key_from_params(&params).await;
 
         let conn_id = params
             .get("_conn_id")
@@ -8926,6 +8906,7 @@ mod tests {
         channel_status_log: Mutex<HashMap<String, Vec<String>>>,
         channel_outbound: Option<Arc<dyn moltis_channels::ChannelOutbound>>,
         channel_stream_outbound: Option<Arc<dyn moltis_channels::ChannelStreamOutbound>>,
+        active_sessions: HashMap<String, String>,
         tts: moltis_service_traits::NoopTtsService,
         project: moltis_service_traits::NoopProjectService,
         mcp: moltis_service_traits::NoopMcpService,
@@ -8938,10 +8919,17 @@ mod tests {
                 channel_status_log: Mutex::new(HashMap::new()),
                 channel_outbound: None,
                 channel_stream_outbound: None,
+                active_sessions: HashMap::new(),
                 tts: moltis_service_traits::NoopTtsService,
                 project: moltis_service_traits::NoopProjectService,
                 mcp: moltis_service_traits::NoopMcpService,
             }
+        }
+
+        fn with_active_session(mut self, conn_id: &str, session_key: &str) -> Self {
+            self.active_sessions
+                .insert(conn_id.to_string(), session_key.to_string());
+            self
         }
 
         fn with_channel_outbound(
@@ -9020,8 +9008,8 @@ mod tests {
 
         async fn set_run_error(&self, _run_id: &str, _error: String) {}
 
-        async fn active_session_key(&self, _conn_id: &str) -> Option<String> {
-            None
+        async fn active_session_key(&self, conn_id: &str) -> Option<String> {
+            self.active_sessions.get(conn_id).cloned()
         }
 
         async fn active_project_id(&self, _conn_id: &str) -> Option<String> {
@@ -12188,6 +12176,169 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["active"], false);
+    }
+
+    #[tokio::test]
+    async fn history_prefers_public_session_key_over_connection_active_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        store
+            .append(
+                "public-session",
+                &serde_json::json!({ "role": "assistant", "content": "public history" }),
+            )
+            .await
+            .expect("seed public session history");
+        store
+            .append(
+                "conn-session",
+                &serde_json::json!({ "role": "assistant", "content": "connection history" }),
+            )
+            .await
+            .expect("seed connection session history");
+
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(ProviderRegistry::empty())),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new().with_active_session("conn-1", "conn-session")),
+            Arc::clone(&store),
+            metadata,
+        );
+
+        let history = service
+            .history(serde_json::json!({
+                "sessionKey": "public-session",
+                "_conn_id": "conn-1",
+            }))
+            .await
+            .expect("chat.history should succeed");
+
+        assert_eq!(history.as_array().map(Vec::len), Some(1));
+        assert_eq!(history[0]["content"], "public history");
+    }
+
+    #[tokio::test]
+    async fn history_internal_session_key_overrides_public_session_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        store
+            .append(
+                "internal-session",
+                &serde_json::json!({ "role": "assistant", "content": "internal history" }),
+            )
+            .await
+            .expect("seed internal session history");
+        store
+            .append(
+                "public-session",
+                &serde_json::json!({ "role": "assistant", "content": "public history" }),
+            )
+            .await
+            .expect("seed public session history");
+
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(ProviderRegistry::empty())),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new()),
+            Arc::clone(&store),
+            metadata,
+        );
+
+        let history = service
+            .history(serde_json::json!({
+                "_session_key": "internal-session",
+                "sessionKey": "public-session",
+            }))
+            .await
+            .expect("chat.history should succeed");
+
+        assert_eq!(history.as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            history[0]["content"], "internal history",
+            "_session_key must take priority over public sessionKey"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_prefers_public_session_key_over_connection_active_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "test::auto-compact".to_string(),
+                provider: "test".to_string(),
+                display_name: "Auto Compact Test".to_string(),
+                created_at: None,
+                recommended: false,
+            },
+            Arc::new(AutoCompactRegressionProvider {
+                context_window: 100,
+            }),
+        );
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new().with_active_session("conn-1", "conn-session")),
+            Arc::clone(&store),
+            metadata,
+        );
+
+        let send_result = chat
+            .send(serde_json::json!({
+                "text": "ping",
+                "sessionKey": "public-session",
+                "_conn_id": "conn-1",
+            }))
+            .await
+            .expect("chat.send should succeed");
+        assert!(
+            send_result
+                .get("runId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        );
+
+        let public_history = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let messages = store.read("public-session").await.unwrap_or_default();
+                if messages
+                    .iter()
+                    .any(|msg| msg.get("role").and_then(Value::as_str) == Some("assistant"))
+                {
+                    return messages;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("assistant turn should be persisted in public session");
+
+        let conn_history = store
+            .read("conn-session")
+            .await
+            .expect("read connection session history");
+
+        assert!(
+            public_history
+                .iter()
+                .any(|msg| msg.get("role").and_then(Value::as_str) == Some("assistant")),
+            "assistant reply should be written to the public session"
+        );
+        assert!(
+            conn_history.is_empty(),
+            "connection-scoped active session should not override an explicit public sessionKey"
+        );
     }
 
     #[tokio::test]
