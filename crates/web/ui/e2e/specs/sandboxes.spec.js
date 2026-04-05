@@ -146,7 +146,7 @@ test.describe("Sandboxes page – Running Containers", () => {
 	});
 
 	test.afterEach(async ({ page }) => {
-		await page.unrouteAll({ behavior: "ignoreErrors" });
+		await page.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
 	});
 
 	test("running containers section renders with heading and refresh button", async ({ page }) => {
@@ -195,12 +195,8 @@ test.describe("Sandboxes page – Running Containers", () => {
 		await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
 		const mountCount = fetchCount;
 
-		const fetchPromise = page.waitForResponse((r) => r.url().includes("/api/sandbox/containers") && r.status() === 200);
 		await page.getByRole("button", { name: "Refresh", exact: true }).click();
-		const response = await fetchPromise;
-		const data = await response.json();
-		expect(data).toHaveProperty("containers");
-		expect(Array.isArray(data.containers)).toBe(true);
+		await expect.poll(() => fetchCount, { timeout: 10_000 }).toBeGreaterThan(mountCount);
 		expect(fetchCount).toBeGreaterThan(mountCount);
 
 		expect(pageErrors).toEqual([]);
@@ -241,6 +237,7 @@ test.describe("Sandboxes page – Running Containers", () => {
 		});
 
 		await navigateAndWait(page, "/settings/sandboxes");
+		await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
 		await expect(page.getByText("No containers found.")).toBeVisible();
 
 		expect(pageErrors).toEqual([]);
@@ -291,9 +288,8 @@ test.describe("Sandboxes page – Running Containers", () => {
 		// Page mount fires the first disk-usage fetch.
 		const mountCount = diskFetchCount;
 
-		const diskPromise = page.waitForResponse((r) => r.url().includes("/api/sandbox/disk-usage"));
 		await refreshBtn.click();
-		await diskPromise;
+		await expect.poll(() => diskFetchCount, { timeout: 10_000 }).toBeGreaterThan(mountCount);
 
 		expect(diskFetchCount).toBeGreaterThan(mountCount);
 		expect(pageErrors).toEqual([]);

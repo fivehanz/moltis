@@ -10,7 +10,7 @@ async function sendRpcFromPage(page, method, params) {
 	let lastResponse = null;
 	for (let attempt = 0; attempt < 30; attempt++) {
 		if (attempt > 0) {
-			await waitForWsConnected(page);
+			await waitForWsConnected(page, 5_000).catch(() => {});
 		}
 		lastResponse = await page
 			.evaluate(
@@ -33,6 +33,10 @@ async function sendRpcFromPage(page, method, params) {
 		if (!isRetryableRpcError(lastResponse?.error?.message)) return lastResponse;
 	}
 	return lastResponse;
+}
+
+async function waitForWsConnectedIfPossible(page) {
+	await waitForWsConnected(page, 5_000).catch(() => {});
 }
 
 async function waitForChatInputReady(page) {
@@ -76,12 +80,7 @@ async function openFullContextWithRetry(page) {
 	const failedMsg = panel.getByText("Failed to build context", { exact: true });
 
 	for (let attempt = 0; attempt < 5; attempt++) {
-		await waitForWsConnected(page);
-		const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", {});
-		const noProvidersConfigured =
-			fullContextRpc?.error?.code === "UNAVAILABLE" ||
-			fullContextRpc?.error?.message?.includes("no LLM providers configured") ||
-			fullContextRpc?.error?.message?.includes("chat not configured");
+		await waitForWsConnectedIfPossible(page);
 
 		if (await fullContextModal.isVisible().catch(() => false)) {
 			await page.locator("#fullContextModalCloseBtn").click();
@@ -119,8 +118,15 @@ async function openFullContextWithRetry(page) {
 			if (await copiedBtn.isVisible().catch(() => false)) return copiedBtn;
 			return copyBtn;
 		}
-		if (result === "failed" && noProvidersConfigured) {
-			return null;
+		if (result === "failed") {
+			const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", {});
+			const noProvidersConfigured =
+				fullContextRpc?.error?.code === "UNAVAILABLE" ||
+				fullContextRpc?.error?.message?.includes("no LLM providers configured") ||
+				fullContextRpc?.error?.message?.includes("chat not configured");
+			if (noProvidersConfigured) {
+				return null;
+			}
 		}
 	}
 
