@@ -4671,6 +4671,7 @@ mod tests {
             provider: "test".to_string(),
             display_name: id.to_string(),
             created_at: None,
+            recommended: false,
         }
     }
 

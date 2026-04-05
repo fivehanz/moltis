@@ -180,6 +180,7 @@ const WRITE_METHODS: &[&str] = &[
     "channels.add",
     "channels.remove",
     "channels.update",
+    "channels.retry_ownership",
     "channels.senders.approve",
     "channels.senders.deny",
     "sessions.switch",

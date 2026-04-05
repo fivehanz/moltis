@@ -46,9 +46,14 @@ impl From<&str> for ServiceError {
 
 impl From<ServiceError> for moltis_protocol::ErrorShape {
     fn from(err: ServiceError) -> Self {
+        // INTERNAL is correct here: ServiceError represents application-level failures
+        // (validation errors, probe failures, noop-service "not configured" errors).
+        // Transient UNAVAILABLE codes are emitted directly by gateway/state.rs,
+        // methods/node.rs, and client-side WS checks — they do not flow through
+        // ServiceError and are unaffected by this mapping.
         let code = match &err {
             ServiceError::Forbidden { .. } => moltis_protocol::error_codes::FORBIDDEN,
-            _ => moltis_protocol::error_codes::UNAVAILABLE,
+            _ => moltis_protocol::error_codes::INTERNAL,
         };
         Self::new(code, err.to_string())
     }
@@ -191,6 +196,7 @@ pub trait ChannelService: Send + Sync {
     async fn add(&self, params: Value) -> ServiceResult;
     async fn remove(&self, params: Value) -> ServiceResult;
     async fn update(&self, params: Value) -> ServiceResult;
+    async fn retry_ownership(&self, params: Value) -> ServiceResult;
     async fn senders_list(&self, params: Value) -> ServiceResult;
     async fn sender_approve(&self, params: Value) -> ServiceResult;
     async fn sender_deny(&self, params: Value) -> ServiceResult;
@@ -221,6 +227,10 @@ impl ChannelService for NoopChannelService {
     }
 
     async fn update(&self, _p: Value) -> ServiceResult {
+        Err("no channel service configured".into())
+    }
+
+    async fn retry_ownership(&self, _p: Value) -> ServiceResult {
         Err("no channel service configured".into())
     }
 

@@ -109,6 +109,9 @@ export default {
 		configurationTimedOut: "Configuration timed out. Please try again.",
 		configurationFailed: "Configuration failed",
 	},
+	preferred: "Pr\u00e9f\u00e9r\u00e9",
+	showAllModels: "Afficher {{count}} mod\u00e8les suppl\u00e9mentaires\u2026",
+	showFewerModels: "Afficher moins de mod\u00e8les",
 	badges: {
 		apiKey: "API Key",
 		oauth: "OAuth",

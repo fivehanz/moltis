@@ -319,7 +319,12 @@ impl GatewayInner {
             cached_location: moltis_config::load_user().and_then(|u| u.location),
             channel_status_log: HashMap::new(),
             channel_command_mode_sessions: HashSet::new(),
-            channels_offered: vec!["telegram".into()],
+            channels_offered: vec![
+                "telegram".into(),
+                "discord".into(),
+                "slack".into(),
+                "matrix".into(),
+            ],
             passkey_host_update_pending: HashSet::new(),
             shiki_cdn_url: None,
         }
@@ -952,6 +957,18 @@ mod tests {
             negotiated_protocol: moltis_protocol::PROTOCOL_VERSION,
         };
         (client, rx)
+    }
+
+    #[tokio::test]
+    async fn default_channels_offered_include_matrix() {
+        let state = test_state();
+        let inner = state.inner.read().await;
+        assert_eq!(inner.channels_offered, vec![
+            "telegram".to_owned(),
+            "discord".to_owned(),
+            "slack".to_owned(),
+            "matrix".to_owned(),
+        ]);
     }
 
     #[tokio::test]

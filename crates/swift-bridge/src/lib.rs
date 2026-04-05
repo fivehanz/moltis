@@ -502,6 +502,7 @@ struct BridgeModelInfo {
     provider: String,
     display_name: String,
     created_at: Option<i64>,
+    recommended: bool,
 }
 
 #[derive(Deserialize)]
@@ -1538,6 +1539,7 @@ pub extern "C" fn moltis_list_models() -> *mut c_char {
                 provider: m.provider.clone(),
                 display_name: m.display_name.clone(),
                 created_at: m.created_at,
+                recommended: m.recommended,
             })
             .collect();
         emit_log("INFO", "bridge", &format!("Listed {} models", models.len()));

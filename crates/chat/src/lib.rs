@@ -1495,6 +1495,12 @@ pub struct LiveModelService {
     state: Arc<OnceCell<Arc<dyn ChatRuntime>>>,
     detect_gate: Arc<Semaphore>,
     priority_models: Arc<RwLock<Vec<String>>>,
+    show_legacy_models: bool,
+    /// Provider config for runtime model rediscovery.
+    providers_config: moltis_config::schema::ProvidersConfig,
+    /// Environment variable overrides for runtime model rediscovery.
+    /// Shared so the gateway can update it after loading UI-stored keys.
+    env_overrides: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl LiveModelService {
@@ -1509,7 +1515,34 @@ impl LiveModelService {
             state: Arc::new(OnceCell::new()),
             detect_gate: Arc::new(Semaphore::new(1)),
             priority_models: Arc::new(RwLock::new(priority_models)),
+            show_legacy_models: false,
+            providers_config: moltis_config::schema::ProvidersConfig::default(),
+            env_overrides: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn with_show_legacy_models(mut self, show: bool) -> Self {
+        self.show_legacy_models = show;
+        self
+    }
+
+    /// Set the provider config and initial env overrides used for runtime
+    /// model rediscovery when "Detect All Models" is triggered.
+    pub fn with_discovery_config(
+        mut self,
+        providers_config: moltis_config::schema::ProvidersConfig,
+        env_overrides: HashMap<String, String>,
+    ) -> Self {
+        self.providers_config = providers_config;
+        self.env_overrides = Arc::new(RwLock::new(env_overrides));
+        self
+    }
+
+    /// Shared handle to the env overrides. Pass this to code that needs to
+    /// update the overrides after construction (e.g. when runtime UI-stored
+    /// API keys are loaded from the credential store).
+    pub fn env_overrides_handle(&self) -> Arc<RwLock<HashMap<String, String>>> {
+        Arc::clone(&self.env_overrides)
     }
 
     /// Shared handle to the priority models list. Pass this to services
@@ -1730,6 +1763,21 @@ impl ModelService for LiveModelService {
         let disabled = self.disabled.read().await;
         let order = self.priority_order().await;
         let all_models = reg.list_models_with_reasoning_variants();
+
+        // Hide models older than 1 year from the chat selector unless the
+        // user opted in via `providers.show_legacy_models`.  Preferred models
+        // and models without a timestamp are never hidden.
+        let legacy_cutoff: Option<i64> = if self.show_legacy_models {
+            None
+        } else {
+            let one_year_ago = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+                - 365 * 24 * 60 * 60;
+            Some(one_year_ago)
+        };
+
         let prioritized = Self::prioritize_models(
             &order,
             all_models
@@ -1738,10 +1786,20 @@ impl ModelService for LiveModelService {
                 .filter(|m| !disabled.is_disabled(&m.id))
                 .filter(|m| disabled.unsupported_info(&m.id).is_none()),
         );
-        info!(model_count = prioritized.len(), "models.list response");
+        debug!(model_count = prioritized.len(), "models.list response");
         let models: Vec<_> = prioritized
             .iter()
             .copied()
+            .filter(|m| {
+                let preferred = Self::priority_rank(&order, m) != usize::MAX;
+                if preferred {
+                    return true;
+                }
+                match (legacy_cutoff, m.created_at) {
+                    (Some(cutoff), Some(ts)) => ts >= cutoff,
+                    _ => true, // no cutoff or no timestamp → keep
+                }
+            })
             .map(|m| {
                 let supports_tools = reg.get(&m.id).is_some_and(|p| p.supports_tools());
                 let preferred = Self::priority_rank(&order, m) != usize::MAX;
@@ -1751,6 +1809,7 @@ impl ModelService for LiveModelService {
                     "displayName": m.display_name,
                     "supportsTools": supports_tools,
                     "preferred": preferred,
+                    "recommended": m.recommended,
                     "createdAt": m.created_at,
                     "unsupported": false,
                     "unsupportedReason": Value::Null,
@@ -1779,12 +1838,15 @@ impl ModelService for LiveModelService {
             .copied()
             .map(|m| {
                 let supports_tools = reg.get(&m.id).is_some_and(|p| p.supports_tools());
+                let preferred = Self::priority_rank(&order, m) != usize::MAX;
                 let unsupported = disabled.unsupported_info(&m.id);
                 serde_json::json!({
                     "id": m.id,
                     "provider": m.provider,
                     "displayName": m.display_name,
                     "supportsTools": supports_tools,
+                    "preferred": preferred,
+                    "recommended": m.recommended,
                     "createdAt": m.created_at,
                     "disabled": disabled.is_disabled(&m.id),
                     "unsupported": unsupported.is_some(),
@@ -1883,6 +1945,36 @@ impl ModelService for LiveModelService {
         };
 
         let state = self.state.get().cloned();
+
+        // Phase 0: re-discover models from provider APIs so that newly
+        // added models (e.g. a model loaded into llama.cpp after startup)
+        // are found before probing.
+        //
+        // HTTP fetches and Ollama `/api/show` probes run outside the
+        // registry lock; only the fast in-memory registration takes it.
+        {
+            let env_snapshot = self.env_overrides.read().await.clone();
+            let result = moltis_providers::fetch_discoverable_models(
+                &self.providers_config,
+                &env_snapshot,
+                provider_filter.as_deref(),
+            )
+            .await;
+            if !result.is_empty() {
+                let mut reg = self.providers.write().await;
+                let new_count = reg.register_rediscovered_models(
+                    &self.providers_config,
+                    &env_snapshot,
+                    &result,
+                );
+                if new_count > 0 {
+                    tracing::info!(
+                        new_models = new_count,
+                        "rediscovery registered new models before probe"
+                    );
+                }
+            }
+        }
 
         // Phase 1: notify clients to refresh and show the full current model list first.
         if let Some(state) = state.as_ref() {
@@ -9969,6 +10061,7 @@ mod tests {
                 provider: "test".to_string(),
                 display_name: "Auto Compact Test".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(AutoCompactRegressionProvider {
                 context_window: 100,
@@ -10888,18 +10981,21 @@ mod tests {
             provider: "openai-codex".into(),
             display_name: "GPT 5.2".into(),
             created_at: None,
+            recommended: false,
         };
         let m2 = moltis_providers::ModelInfo {
             id: "anthropic::claude-opus-4-5".into(),
             provider: "anthropic".into(),
             display_name: "Claude Opus 4.5".into(),
             created_at: None,
+            recommended: false,
         };
         let m3 = moltis_providers::ModelInfo {
             id: "google::gemini-3-flash".into(),
             provider: "gemini".into(),
             display_name: "Gemini 3 Flash".into(),
             created_at: None,
+            recommended: false,
         };
 
         let order =
@@ -10917,18 +11013,21 @@ mod tests {
             provider: "openai-codex".into(),
             display_name: "GPT-5.2".into(),
             created_at: None,
+            recommended: false,
         };
         let m2 = moltis_providers::ModelInfo {
             id: "anthropic::claude-sonnet-4-5-20250929".into(),
             provider: "anthropic".into(),
             display_name: "Claude Sonnet 4.5".into(),
             created_at: None,
+            recommended: false,
         };
         let m3 = moltis_providers::ModelInfo {
             id: "google::gemini-3-flash".into(),
             provider: "gemini".into(),
             display_name: "Gemini 3 Flash".into(),
             created_at: None,
+            recommended: false,
         };
 
         let order =
@@ -10946,18 +11045,21 @@ mod tests {
             provider: "openai".into(),
             display_name: "GPT-5.2".into(),
             created_at: None,
+            recommended: false,
         };
         let m2 = moltis_providers::ModelInfo {
             id: "openai-codex::gpt-5.2".into(),
             provider: "openai-codex".into(),
             display_name: "GPT-5.2".into(),
             created_at: None,
+            recommended: false,
         };
         let m3 = moltis_providers::ModelInfo {
             id: "anthropic::claude-sonnet-4-5-20250929".into(),
             provider: "anthropic".into(),
             display_name: "Claude Sonnet 4.5".into(),
             created_at: None,
+            recommended: false,
         };
 
         let order = LiveModelService::build_priority_order(&[]);
@@ -10976,12 +11078,14 @@ mod tests {
             provider: "openai".into(),
             display_name: "GPT-5.2".into(),
             created_at: None,
+            recommended: false,
         };
         let m2 = moltis_providers::ModelInfo {
             id: "openai-codex::gpt-5.2".into(),
             provider: "openai-codex".into(),
             display_name: "GPT-5.2".into(),
             created_at: None,
+            recommended: false,
         };
 
         let order = LiveModelService::build_priority_order(&["openai::gpt-5.2".into()]);
@@ -10997,18 +11101,21 @@ mod tests {
             provider: "anthropic".into(),
             display_name: "Claude Opus 4.5".into(),
             created_at: None,
+            recommended: false,
         };
         let m2 = moltis_providers::ModelInfo {
             id: "openai-codex::gpt-5.2".into(),
             provider: "openai-codex".into(),
             display_name: "GPT 5.2".into(),
             created_at: None,
+            recommended: false,
         };
         let m3 = moltis_providers::ModelInfo {
             id: "google::gemini-3-flash".into(),
             provider: "google".into(),
             display_name: "Gemini 3 Flash".into(),
             created_at: None,
+            recommended: false,
         };
 
         let patterns: Vec<String> = vec!["opus".into()];
@@ -11024,6 +11131,7 @@ mod tests {
             provider: "anthropic".into(),
             display_name: "Claude Opus 4.5".into(),
             created_at: None,
+            recommended: false,
         };
         assert!(model_matches_allowlist(&m, &[]));
     }
@@ -11035,6 +11143,7 @@ mod tests {
             provider: "anthropic".into(),
             display_name: "Claude Opus 4.5".into(),
             created_at: None,
+            recommended: false,
         };
 
         // Uppercase pattern matches lowercase model key.
@@ -11053,6 +11162,7 @@ mod tests {
             provider: "openai-codex".into(),
             display_name: "GPT-5.2".into(),
             created_at: None,
+            recommended: false,
         };
 
         let patterns = vec![normalize_model_key("gpt 5.2")];
@@ -11069,12 +11179,14 @@ mod tests {
             provider: "openai".into(),
             display_name: "GPT-5.2".into(),
             created_at: None,
+            recommended: false,
         };
         let extended = moltis_providers::ModelInfo {
             id: "openai::gpt-5.2-chat-latest".into(),
             provider: "openai".into(),
             display_name: "GPT-5.2 Chat Latest".into(),
             created_at: None,
+            recommended: false,
         };
         let patterns = vec![normalize_model_key("gpt 5.2")];
 
@@ -11089,6 +11201,7 @@ mod tests {
             provider: "anthropic".into(),
             display_name: "Claude Sonnet 4.5".into(),
             created_at: None,
+            recommended: false,
         };
         let patterns = vec![normalize_model_key("sonnet 4.5")];
 
@@ -11102,12 +11215,14 @@ mod tests {
             provider: "local-llm".into(),
             display_name: "Qwen2.5 Coder 7B".into(),
             created_at: None,
+            recommended: false,
         };
         let ollama = moltis_providers::ModelInfo {
             id: "ollama::llama3.1:8b".into(),
             provider: "ollama".into(),
             display_name: "Llama 3.1 8B".into(),
             created_at: None,
+            recommended: false,
         };
         let patterns = vec![normalize_model_key("opus")];
 
@@ -11122,6 +11237,7 @@ mod tests {
             provider: "local-ai".into(),
             display_name: "Llama 3.1 8B".into(),
             created_at: None,
+            recommended: false,
         };
         let patterns = vec![normalize_model_key("opus")];
 
@@ -11141,6 +11257,7 @@ mod tests {
                 provider: "anthropic".to_string(),
                 display_name: "Claude Opus 4.5".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "anthropic".to_string(),
@@ -11153,6 +11270,7 @@ mod tests {
                 provider: "openai-codex".to_string(),
                 display_name: "GPT 5.2".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "openai-codex".to_string(),
@@ -11165,6 +11283,7 @@ mod tests {
                 provider: "google".to_string(),
                 display_name: "Gemini 3 Flash".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "google".to_string(),
@@ -11201,13 +11320,21 @@ mod tests {
 
     #[tokio::test]
     async fn list_includes_created_at_in_response() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let recent_gpt = now - 10 * 24 * 60 * 60; // 10 days ago
+        let recent_babbage = now - 30 * 24 * 60 * 60; // 30 days ago
+
         let mut registry = ProviderRegistry::empty();
         registry.register(
             moltis_providers::ModelInfo {
                 id: "openai::gpt-5.3".to_string(),
                 provider: "openai".to_string(),
                 display_name: "GPT-5.3".to_string(),
-                created_at: Some(1700000000),
+                created_at: Some(recent_gpt),
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "openai".to_string(),
@@ -11219,7 +11346,8 @@ mod tests {
                 id: "openai::babbage-002".to_string(),
                 provider: "openai".to_string(),
                 display_name: "babbage-002".to_string(),
-                created_at: Some(1600000000),
+                created_at: Some(recent_babbage),
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "openai".to_string(),
@@ -11232,6 +11360,7 @@ mod tests {
                 provider: "anthropic".to_string(),
                 display_name: "Claude Opus".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "anthropic".to_string(),
@@ -11248,13 +11377,13 @@ mod tests {
 
         // Verify createdAt is present and correct.
         let gpt = arr.iter().find(|m| m["id"] == "openai::gpt-5.3").unwrap();
-        assert_eq!(gpt["createdAt"], 1700000000);
+        assert_eq!(gpt["createdAt"], recent_gpt);
 
         let babbage = arr
             .iter()
             .find(|m| m["id"] == "openai::babbage-002")
             .unwrap();
-        assert_eq!(babbage["createdAt"], 1600000000);
+        assert_eq!(babbage["createdAt"], recent_babbage);
 
         let claude = arr
             .iter()
@@ -11269,7 +11398,7 @@ mod tests {
             .iter()
             .find(|m| m["id"] == "openai::gpt-5.3")
             .unwrap();
-        assert_eq!(gpt_all["createdAt"], 1700000000);
+        assert_eq!(gpt_all["createdAt"], recent_gpt);
     }
 
     #[tokio::test]
@@ -11281,6 +11410,7 @@ mod tests {
                 provider: "openai-codex".to_string(),
                 display_name: "GPT 5.2".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "openai-codex".to_string(),
@@ -11293,6 +11423,7 @@ mod tests {
                 provider: "local-ai".to_string(),
                 display_name: "Llama 3.1 8B".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "ollama".to_string(),
@@ -11391,6 +11522,7 @@ mod tests {
                 provider: "unit-test-provider".to_string(),
                 display_name: "Unit Test Model".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "unit-test-provider".to_string(),
@@ -11423,6 +11555,11 @@ mod tests {
             all_entry.get("disabled").and_then(|v| v.as_bool()),
             Some(true)
         );
+        assert_eq!(
+            all_entry.get("preferred").and_then(|v| v.as_bool()),
+            Some(false),
+            "list_all should include preferred field",
+        );
 
         let visible = service.list().await.expect("models.list should succeed");
         let visible_models = visible
@@ -11434,6 +11571,119 @@ mod tests {
                 .all(|m| m.get("id").and_then(|v| v.as_str())
                     != Some("unit-test-provider::unit-test-model")),
             "disabled model should be hidden from models.list",
+        );
+    }
+
+    #[tokio::test]
+    async fn list_hides_legacy_models_by_default() {
+        let mut registry = ProviderRegistry::empty();
+        let two_years_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            - 2 * 365 * 24 * 60 * 60;
+        let recent = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            - 30 * 24 * 60 * 60;
+
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "old-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Old Model".to_string(),
+                created_at: Some(two_years_ago),
+                recommended: false,
+            },
+            Arc::new(StaticProvider {
+                name: "test".to_string(),
+                id: "old-model".to_string(),
+            }),
+        );
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "new-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "New Model".to_string(),
+                created_at: Some(recent),
+                recommended: false,
+            },
+            Arc::new(StaticProvider {
+                name: "test".to_string(),
+                id: "new-model".to_string(),
+            }),
+        );
+
+        let disabled = Arc::new(RwLock::new(DisabledModelsStore::default()));
+        let service = LiveModelService::new(Arc::new(RwLock::new(registry)), disabled, vec![]);
+
+        let result = service.list().await.expect("models.list should succeed");
+        let models = result.as_array().expect("should be array");
+        let ids: Vec<_> = models
+            .iter()
+            .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            ids.contains(&"test::new-model"),
+            "recent model should be visible",
+        );
+        assert!(
+            !ids.contains(&"test::old-model"),
+            "legacy model should be hidden from chat selector",
+        );
+
+        // list_all still shows everything
+        let all = service.list_all().await.expect("list_all should succeed");
+        let all_ids: Vec<_> = all
+            .as_array()
+            .expect("should be array")
+            .iter()
+            .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            all_ids.contains(&"test::old-model"),
+            "legacy model should still appear in list_all",
+        );
+    }
+
+    #[tokio::test]
+    async fn list_shows_legacy_models_when_configured() {
+        let mut registry = ProviderRegistry::empty();
+        let two_years_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            - 2 * 365 * 24 * 60 * 60;
+
+        registry.register(
+            moltis_providers::ModelInfo {
+                id: "old-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Old Model".to_string(),
+                created_at: Some(two_years_ago),
+                recommended: false,
+            },
+            Arc::new(StaticProvider {
+                name: "test".to_string(),
+                id: "old-model".to_string(),
+            }),
+        );
+
+        let disabled = Arc::new(RwLock::new(DisabledModelsStore::default()));
+        let service = LiveModelService::new(Arc::new(RwLock::new(registry)), disabled, vec![])
+            .with_show_legacy_models(true);
+
+        let result = service.list().await.expect("models.list should succeed");
+        let ids: Vec<_> = result
+            .as_array()
+            .expect("should be array")
+            .iter()
+            .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            ids.contains(&"test::old-model"),
+            "legacy model should be visible when show_legacy_models is true",
         );
     }
 
@@ -11497,6 +11747,7 @@ mod tests {
                 provider: "openai".to_string(),
                 display_name: "GPT 5.2 Codex".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "openai".to_string(),
@@ -11509,6 +11760,7 @@ mod tests {
                 provider: "openai".to_string(),
                 display_name: "GPT 5".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "openai".to_string(),
@@ -11568,6 +11820,7 @@ mod tests {
                 provider: "test-provider".to_string(),
                 display_name: "Test Model".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StaticProvider {
                 name: "test-provider".to_string(),
@@ -12113,6 +12366,7 @@ mod tests {
                 provider: "abort-then-continue".to_string(),
                 display_name: "Abort Then Continue".to_string(),
                 created_at: None,
+                recommended: false,
             },
             provider.clone(),
         );
@@ -12197,6 +12451,7 @@ mod tests {
                 provider: "streaming-text-tool".to_string(),
                 display_name: "Streaming Text Tool".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(StreamingTextToolProvider),
         );
@@ -12416,6 +12671,7 @@ mod tests {
                 provider: "local".to_string(),
                 display_name: "Slow Model".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(SlowStartProvider {
                 name: "local".to_string(),
@@ -12451,6 +12707,7 @@ mod tests {
                 provider: "local".to_string(),
                 display_name: "Stuck Model".to_string(),
                 created_at: None,
+                recommended: false,
             },
             Arc::new(SlowStartProvider {
                 name: "local".to_string(),

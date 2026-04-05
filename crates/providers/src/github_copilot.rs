@@ -262,10 +262,7 @@ async fn fetch_valid_copilot_token_with_fallback(
 }
 
 pub fn default_model_catalog() -> Vec<super::DiscoveredModel> {
-    COPILOT_MODELS
-        .iter()
-        .map(|(id, name)| super::DiscoveredModel::new(*id, *name))
-        .collect()
+    super::catalog_to_discovered(COPILOT_MODELS, 3)
 }
 
 fn normalize_display_name(model_id: &str, display_name: Option<&str>) -> String {

@@ -1877,6 +1877,10 @@
     -webkit-mask-image: url("./icons/masks/mask-cdc2f9ff608bed4b.svg");
     mask-image: url("./icons/masks/mask-cdc2f9ff608bed4b.svg");
   }
+  .icon-matrix {
+    -webkit-mask-image: url("./icons/masks/mask-matrix.svg");
+    mask-image: url("./icons/masks/mask-matrix.svg");
+  }
   .icon-cron {
     -webkit-mask-image: url("./icons/masks/mask-47feaf85cf1fb335.svg");
     mask-image: url("./icons/masks/mask-47feaf85cf1fb335.svg");

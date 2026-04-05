@@ -216,6 +216,10 @@ impl moltis_service_traits::ChannelService for MockChannel {
         self.0.call("channels.update", p)
     }
 
+    async fn retry_ownership(&self, p: Value) -> ServiceResult {
+        self.0.call("channels.retry_ownership", p)
+    }
+
     async fn senders_list(&self, p: Value) -> ServiceResult {
         self.0.call("channels.senders.list", p)
     }

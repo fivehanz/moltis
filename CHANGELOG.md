@@ -19,6 +19,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260405.01] - 2026-04-05
+### Added
+- [providers] Add zai-code provider for Z.AI Coding plan
+- [tools] Add cross-session search recall
+- [tools] Add automatic edit checkpoints
+- [projects] Harden context loading
+- [skills] Add portable bundle quarantine flow
+- [exec] Add ssh remote routing
+- [web] Add skills bundle ui and ssh target visibility
+- [web] Clarify ssh execution targets
+- [ssh] Add managed deploy keys and targets
+- [nodes] Add remote exec doctor panel
+- [ssh] Harden managed targets and host pinning
+- [nodes] Repair active ssh host pins from doctor
+- [ssh] Add actionable runtime failure hints
+- [web] Add tools overview to settings
+- [web] Allow renaming channel-bound sessions
+- [security] Add GPG signing for release artifacts
+- [security] Add release verification script
+- [gateway] Add channel settings agent tool
+- [providers] Collapse model lists, hide legacy models, add recommended flag
+- [web] Add live remote access settings
+- [remote] Improve onboarding public access flow
+- [tools] Add Firecrawl integration for web scraping and search
+- [web] Add recommended provider tier in onboarding and docs guide
+- [config] Add upstream_proxy for application-level HTTP proxy support
+- [channels] Add Matrix channel integration
+- [matrix] Complete channel parity and web ui coverage
+- [matrix] Add encrypted chat support and vault-backed channel secrets
+- [matrix] Add account ownership mode
+- [matrix] Harden ownership recovery flow
+- [matrix] Add generic channel location fallback
+
+
+### Changed
+- [ssh] Use secrecy for imported key material
+- Replace vendored sqlx-sqlite with git dependency
+
+
+### Removed
+- [web] Remove unused gon import
+
+
+### Fixed
+- [providers] Address PR review comments for zai-code
+- [vault] Allow unencrypted session history while sealed
+- [vault] Address PR review comments
+- [security] Address PR review feedback
+- [ssh] Tighten timeout and warning handling
+- [ssh] Address latest review follow-ups
+- [gateway] Collapse legacy ssh node lookup
+- [auth] Guard ssh key deletion race
+- [httpd] Satisfy ssh route lint
+- [ssh] Reject option-like targets
+- [ssh] Hide import passphrases from argv
+- [ssh] Quote known hosts path
+- [web] Use browser location port for node join URL
+- [web] Guard e2e assertion for default-port case
+- [e2e] Use sidebar selector for sealed-vault session visibility test
+- [web] Fall back to getRandomValues for session UUID on plain HTTP
+- [web] Address PR review feedback
+- [providers] Speed up model probes
+- [security] Address PR review feedback for GPG signing
+- [security] Prevent gpg --import grep from aborting verify script
+- [security] Show GPG signer identity and failure diagnostics
+- [security] Pin GPG key fingerprint to prevent TOFU attacks
+- [voice] Surface elevenlabs stt failures
+- [gateway] Address channel settings PR feedback
+- [voice] Handle empty stt transcripts
+- [web] Show unsupported model reason inline instead of tooltip-only
+- [web] Show probe error inline in model selector cards
+- [web] Show probe error inline in preferred models selector
+- [web] Preserve server error message for model probes
+- [web] Sort and collapse onboarding model selector like settings
+- [web] Sort models by version number when no date available
+- [httpd] Harden ngrok controller lifecycle
+- [httpd] Retain ngrok controller after startup
+- [ngrok] Harden loopback tunnel handling
+- [ngrok] Avoid fatal startup on tunnel errors
+- [ngrok] Clarify defaults and warnings
+- Update local setup and ElevenLabs error logging
+- [web] Localize toggle button in onboarding and fix JSDoc comment
+- [chat] Use relative timestamps in created_at test
+- [tools] Address firecrawl PR review feedback
+- [tools] Resolve firecrawl web_search registration and timeout race
+- [agents] Stabilize prompt cache and compact tool results
+- [web] Stabilize send-document e2e test
+- [mcp] Address PR review comments for streamable HTTP transport
+- [mcp] Update template docs and log messages for streamable HTTP
+- [providers] Default to vision support for unknown models (#556)
+- [providers] Also exempt gpt-4-vision from denylist
+- [providers] Surface real error on provider probe failure
+- [web] Apply serverMessage pattern to validateProviderConnection
+- [web] Allow multi-model selection during provider setup
+- [web] Scope Select All to visible models, check save_models response
+- [config] Wrap upstream_proxy in Secret<String> and redact credentials in logs
+- [proxy] Use rfind for @ redaction, warn on parse failure, document Slack gap
+- [providers] Rediscover models from /v1/models before probing
+- [providers] Address PR review — move Ollama probes outside lock, use runtime env
+- [providers] Check total model count in RediscoveryResult::is_empty
+- [matrix] Address review feedback
+- [matrix] Address latest review feedback
+- [matrix] Set reply thread ids after main merge
+- [matrix] Gate DM invites through dm_policy instead of room_policy
+- [matrix] Gate poll responses through access control
+- [voice] Use inspect_err in elevenlabs stt
+- [web] Preserve @ in matrix allowlists
+- [matrix] Unify otp approval flow and sender visibility
+- [web] Default matrix setup to password auth
+- [matrix] Improve ownership recovery UX
+- [graphql] Implement retry ownership in test mock
+- [e2e] Correct username assertion in matrix senders test
+- [web] Satisfy biome hook and lint checks
+
 ## [20260328.03] - 2026-03-28
 ### Fixed
 - [telegram] Route forum-topic replies to correct thread

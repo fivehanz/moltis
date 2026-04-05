@@ -10,6 +10,7 @@
 - [Installation](installation.md)
 - [Comparison](comparison.md)
 - [Configuration](configuration.md)
+  - [Upstream Proxy](upstream-proxy.md)
 - [Local Validation](local-validation.md)
 - [End-to-End Testing](e2e-testing.md)
 
@@ -18,6 +19,7 @@
 # Features
 
 - [LLM Providers](providers.md)
+  - [Choosing a Provider](choosing-a-provider.md)
   - [Anthropic OAuth (FAQ)](anthropic-oauth.md)
 - [MCP Servers](mcp.md)
 - [Memory](memory.md)
@@ -32,6 +34,7 @@
   - [Microsoft Teams](teams.md)
   - [Discord](discord.md)
   - [Slack](slack.md)
+  - [Matrix](matrix.md)
   - [WhatsApp](whatsapp.md)
 - [Browser Automation](browser-automation.md)
 - [CalDAV (Calendars)](caldav.md)

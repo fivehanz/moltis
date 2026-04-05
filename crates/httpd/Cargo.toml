@@ -27,6 +27,7 @@ moltis-config         = { workspace = true }
 moltis-cron           = { workspace = true }
 moltis-gateway        = { workspace = true }
 moltis-graphql        = { optional = true, workspace = true }
+moltis-matrix         = { optional = true, workspace = true }
 moltis-metrics        = { optional = true, workspace = true }
 moltis-msteams        = { workspace = true }
 moltis-protocol       = { workspace = true }
@@ -60,6 +61,7 @@ webauthn-rs           = { features = ["danger-allow-state-serialisation"], works
 [features]
 default = [
   "graphql",
+  "matrix",
   "mdns",
   "metrics",
   "prometheus",
@@ -77,6 +79,7 @@ graphql = [
   "dep:moltis-graphql",
   "moltis-gateway/graphql",
 ]
+matrix = ["dep:moltis-matrix", "moltis-gateway/matrix"]
 mdns = ["moltis-gateway/mdns"]
 metrics = ["dep:moltis-metrics", "moltis-gateway/metrics"]
 ngrok = ["dep:ngrok"]

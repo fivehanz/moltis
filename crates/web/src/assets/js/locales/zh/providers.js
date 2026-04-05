@@ -107,6 +107,9 @@ export default {
 		configurationTimedOut: "配置超时。请重试。",
 		configurationFailed: "配置失败",
 	},
+	preferred: "首选",
+	showAllModels: "显示其余 {{count}} 个模型\u2026",
+	showFewerModels: "收起模型列表",
 	badges: {
 		apiKey: "API 密钥",
 		oauth: "OAuth",

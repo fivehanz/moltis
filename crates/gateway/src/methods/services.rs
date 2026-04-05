@@ -1344,6 +1344,19 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         }),
     );
     reg.register(
+        "channels.retry_ownership",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .channel
+                    .retry_ownership(ctx.params.clone())
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
         "channels.logout",
         Box::new(|ctx| {
             Box::pin(async move {

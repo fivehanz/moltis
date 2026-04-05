@@ -25,6 +25,11 @@ use futures::StreamExt;
 
 /// Fallback loop limit when config is missing or invalid.
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 25;
+const TOOL_RESULT_COMPACTION_RATIO_PERCENT: usize = 75;
+const PREEMPTIVE_OVERFLOW_RATIO_PERCENT: usize = 90;
+const TOOL_RESULT_COMPACTION_PLACEHOLDER: &str =
+    "[tool result compacted to preserve context budget]";
+const TOOL_RESULT_COMPACTION_MIN_BYTES: usize = 200;
 
 fn resolve_agent_max_iterations(configured: usize) -> usize {
     if configured == 0 {
@@ -122,6 +127,122 @@ fn streaming_tool_call_message_content(
     } else {
         None
     }
+}
+
+#[must_use]
+fn estimate_prompt_text_tokens(text: &str) -> usize {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    trimmed.len().div_ceil(4).max(1)
+}
+
+#[must_use]
+fn estimate_message_tokens(message: &ChatMessage) -> usize {
+    estimate_prompt_text_tokens(&message.to_openai_value().to_string())
+}
+
+#[must_use]
+fn estimate_prompt_tokens(messages: &[ChatMessage], tool_schemas: &[serde_json::Value]) -> usize {
+    let message_tokens: usize = messages.iter().map(estimate_message_tokens).sum();
+    let tool_tokens: usize = tool_schemas
+        .iter()
+        .map(|schema| estimate_prompt_text_tokens(&schema.to_string()))
+        .sum();
+    message_tokens.saturating_add(tool_tokens)
+}
+
+#[must_use]
+fn has_tool_result_messages(messages: &[ChatMessage]) -> bool {
+    messages
+        .iter()
+        .any(|message| matches!(message, ChatMessage::Tool { .. }))
+}
+
+fn compact_tool_results_newest_first_in_place(
+    messages: &mut [ChatMessage],
+    tokens_needed: usize,
+) -> usize {
+    if tokens_needed == 0 {
+        return 0;
+    }
+
+    let mut reduced = 0;
+    for message in messages.iter_mut().rev() {
+        if reduced >= tokens_needed {
+            break;
+        }
+
+        let ChatMessage::Tool {
+            tool_call_id,
+            content,
+        } = message
+        else {
+            continue;
+        };
+        if content == TOOL_RESULT_COMPACTION_PLACEHOLDER
+            || content.len() < TOOL_RESULT_COMPACTION_MIN_BYTES
+        {
+            continue;
+        }
+
+        let tool_call_id = tool_call_id.clone();
+        let original = content.clone();
+        let before = estimate_message_tokens(&ChatMessage::tool(&tool_call_id, &original));
+        *content = TOOL_RESULT_COMPACTION_PLACEHOLDER.to_string();
+        let after = estimate_message_tokens(&ChatMessage::tool(
+            &tool_call_id,
+            TOOL_RESULT_COMPACTION_PLACEHOLDER,
+        ));
+        let saved = before.saturating_sub(after);
+        if saved == 0 {
+            *content = original;
+            continue;
+        }
+
+        reduced = reduced.saturating_add(saved);
+    }
+
+    reduced
+}
+
+fn enforce_tool_result_context_budget(
+    messages: &mut [ChatMessage],
+    tool_schemas: &[serde_json::Value],
+    context_window: u32,
+) -> Result<(), AgentRunError> {
+    let context_window = context_window as usize;
+    if context_window == 0 || !has_tool_result_messages(messages) {
+        return Ok(());
+    }
+
+    let compaction_budget =
+        context_window.saturating_mul(TOOL_RESULT_COMPACTION_RATIO_PERCENT) / 100;
+    let overflow_budget = context_window.saturating_mul(PREEMPTIVE_OVERFLOW_RATIO_PERCENT) / 100;
+    let current_tokens = estimate_prompt_tokens(messages, tool_schemas);
+
+    if current_tokens > compaction_budget {
+        let needed = current_tokens.saturating_sub(compaction_budget);
+        let reduced = compact_tool_results_newest_first_in_place(messages, needed);
+        debug!(
+            current_tokens,
+            compaction_budget,
+            overflow_budget,
+            needed,
+            reduced,
+            "compacted newest tool results to preserve prompt budget"
+        );
+    }
+
+    let post_compaction_tokens = estimate_prompt_tokens(messages, tool_schemas);
+    if post_compaction_tokens > overflow_budget {
+        return Err(AgentRunError::ContextWindowExceeded(format!(
+            "preemptive context overflow: estimated prompt size {post_compaction_tokens} tokens exceeds {overflow_budget} token budget after tool-result compaction"
+        )));
+    }
+
+    Ok(())
 }
 
 /// Error patterns that indicate the context window has been exceeded.
@@ -743,12 +864,17 @@ pub async fn run_agent_loop_with_context(
         }
 
         // Re-compute schemas each iteration so activated tools appear immediately.
-        let tool_schemas = tools.list_schemas();
         let schemas_for_api = if native_tools {
-            &tool_schemas
+            tools.list_schemas()
         } else {
-            &vec![]
+            vec![]
         };
+
+        enforce_tool_result_context_budget(
+            &mut messages,
+            &schemas_for_api,
+            provider.context_window(),
+        )?;
 
         if let Some(cb) = on_event {
             cb(RunnerEvent::Iteration(iterations));
@@ -795,7 +921,7 @@ pub async fn run_agent_loop_with_context(
         }
 
         let mut response: CompletionResponse =
-            match provider.complete(&messages, schemas_for_api).await {
+            match provider.complete(&messages, &schemas_for_api).await {
                 Ok(r) => r,
                 Err(e) => {
                     let msg = e.to_string();
@@ -1306,6 +1432,12 @@ pub async fn run_agent_loop_streaming(
         } else {
             vec![]
         };
+
+        enforce_tool_result_context_budget(
+            &mut messages,
+            &schemas_for_api,
+            provider.context_window(),
+        )?;
 
         if let Some(cb) = on_event {
             cb(RunnerEvent::Iteration(iterations));
@@ -2202,6 +2334,35 @@ mod tests {
         }
     }
 
+    struct LargeResultTool {
+        tool_name: &'static str,
+        payload: String,
+    }
+
+    #[async_trait]
+    impl crate::tool_registry::AgentTool for LargeResultTool {
+        fn name(&self) -> &str {
+            self.tool_name
+        }
+
+        fn description(&self) -> &str {
+            "Returns a large payload"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+            })
+        }
+
+        async fn execute(&self, _params: serde_json::Value) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({
+                "stdout": self.payload,
+            }))
+        }
+    }
+
     /// A tool that actually runs shell commands (test-only, mirrors ExecTool).
     struct TestExecTool;
 
@@ -2237,6 +2398,146 @@ mod tests {
                 "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
                 "exit_code": output.status.code().unwrap_or(-1),
             }))
+        }
+    }
+
+    struct PreemptiveOverflowProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for PreemptiveOverflowProvider {
+        fn name(&self) -> &str {
+            "mock-overflow"
+        }
+
+        fn id(&self) -> &str {
+            "mock-overflow-model"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        fn context_window(&self) -> u32 {
+            120
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                Ok(CompletionResponse {
+                    text: Some("reasoning ".repeat(80)),
+                    tool_calls: vec![ToolCall {
+                        id: "overflow_call".into(),
+                        name: "overflow_tool".into(),
+                        arguments: serde_json::json!({}),
+                    }],
+                    usage: Usage::default(),
+                })
+            } else {
+                bail!("second provider call should not happen")
+            }
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    struct StreamingNewestFirstCompactionProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+        observed_tool_contents: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StreamingNewestFirstCompactionProvider {
+        fn name(&self) -> &str {
+            "mock-stream-compaction"
+        }
+
+        fn id(&self) -> &str {
+            "mock-stream-compaction-model"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        fn context_window(&self) -> u32 {
+            700
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            bail!("complete() should not be used in streaming compaction test")
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+
+        fn stream_with_tools(
+            &self,
+            messages: Vec<ChatMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::ToolCallStart {
+                        id: "call_a".into(),
+                        name: "tool_a".into(),
+                        index: 0,
+                    },
+                    StreamEvent::ToolCallArgumentsDelta {
+                        index: 0,
+                        delta: "{}".into(),
+                    },
+                    StreamEvent::ToolCallComplete { index: 0 },
+                    StreamEvent::ToolCallStart {
+                        id: "call_b".into(),
+                        name: "tool_b".into(),
+                        index: 1,
+                    },
+                    StreamEvent::ToolCallArgumentsDelta {
+                        index: 1,
+                        delta: "{}".into(),
+                    },
+                    StreamEvent::ToolCallComplete { index: 1 },
+                    StreamEvent::Done(Usage::default()),
+                ]))
+            } else {
+                let tool_contents = messages
+                    .iter()
+                    .filter_map(|message| match message {
+                        ChatMessage::Tool { content, .. } => Some(content.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                *self.observed_tool_contents.lock().unwrap() = tool_contents;
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta("Done!".into()),
+                    StreamEvent::Done(Usage::default()),
+                ]))
+            }
         }
     }
 
@@ -6105,6 +6406,114 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(retry_events.len(), 2, "expected two retry events");
         assert!(retry_events.iter().all(|delay| *delay >= 1));
+    }
+
+    #[test]
+    fn test_compact_tool_results_newest_first() {
+        let older = format!("older {}", "q".repeat(800));
+        let newer = format!("newer {}", "r".repeat(800));
+        let mut messages = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("hello"),
+            ChatMessage::tool("call_a", &older),
+            ChatMessage::tool("call_b", &newer),
+        ];
+
+        let reduced = compact_tool_results_newest_first_in_place(&mut messages, 1);
+        assert!(reduced > 0, "expected compaction to save prompt tokens");
+
+        let tool_contents: Vec<String> = messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatMessage::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(tool_contents[0], older);
+        assert_eq!(tool_contents[1], TOOL_RESULT_COMPACTION_PLACEHOLDER);
+    }
+
+    #[tokio::test]
+    async fn test_preemptive_overflow_fires_before_second_non_streaming_llm_call() {
+        let provider = Arc::new(PreemptiveOverflowProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(LargeResultTool {
+            tool_name: "overflow_tool",
+            payload: format!("tool {}", "z".repeat(2_000)),
+        }));
+
+        let err = run_agent_loop(
+            provider_dyn,
+            &tools,
+            "sys",
+            &UserContent::text("hello"),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            AgentRunError::ContextWindowExceeded(message) => {
+                assert!(message.contains("preemptive context overflow"));
+            },
+            other => panic!("expected context overflow, got: {other:?}"),
+        }
+
+        assert_eq!(
+            provider
+                .call_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "expected the guard to stop the second LLM call",
+        );
+    }
+
+    #[tokio::test]
+    async fn test_streaming_loop_compacts_newest_tool_result_first_before_next_llm_call() {
+        let observed_tool_contents = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let provider = Arc::new(StreamingNewestFirstCompactionProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+            observed_tool_contents: Arc::clone(&observed_tool_contents),
+        });
+        let provider_dyn: Arc<dyn LlmProvider> = provider;
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(LargeResultTool {
+            tool_name: "tool_a",
+            payload: format!("older {}", "q".repeat(900)),
+        }));
+        tools.register(Box::new(LargeResultTool {
+            tool_name: "tool_b",
+            payload: format!("newer {}", "r".repeat(900)),
+        }));
+
+        let result = run_agent_loop_streaming(
+            provider_dyn,
+            &tools,
+            "sys",
+            &UserContent::text("hello"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.text, "Done!");
+
+        let tool_contents = observed_tool_contents.lock().unwrap().clone();
+        assert_eq!(tool_contents.len(), 2);
+        assert!(
+            tool_contents[0].contains("older"),
+            "oldest tool result should stay intact: {:?}",
+            tool_contents
+        );
+        assert_eq!(tool_contents[1], TOOL_RESULT_COMPACTION_PLACEHOLDER);
     }
 
     // ── sanitize_tool_name ────────────────────────────────────────────

@@ -69,7 +69,10 @@ const DEFAULT_OPENAI_MODELS: &[ModelCatalogEntry] = &[
 pub fn default_model_catalog() -> Vec<super::DiscoveredModel> {
     DEFAULT_OPENAI_MODELS
         .iter()
-        .map(|entry| super::DiscoveredModel::new(entry.id, entry.display_name))
+        .map(|entry| {
+            super::DiscoveredModel::new(entry.id, entry.display_name)
+                .with_recommended(is_recommended_openai_model(entry.id))
+        })
         .collect()
 }
 
@@ -181,9 +184,20 @@ fn parse_model_entry(entry: &serde_json::Value) -> Option<super::DiscoveredModel
 
     let created_at = obj.get("created").and_then(serde_json::Value::as_i64);
 
+    let recommended = is_recommended_openai_model(model_id);
     Some(
         super::DiscoveredModel::new(model_id, normalize_display_name(model_id, display_name))
-            .with_created_at(created_at),
+            .with_created_at(created_at)
+            .with_recommended(recommended),
+    )
+}
+
+/// Known OpenAI flagship model IDs (latest generation, no date suffix).
+/// These are the models most users care about.
+fn is_recommended_openai_model(model_id: &str) -> bool {
+    matches!(
+        model_id,
+        "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.4-pro" | "o4-mini" | "o3"
     )
 }
 
@@ -344,7 +358,7 @@ pub async fn fetch_models_from_api(
     let client = crate::shared_http_client();
     let response = client
         .get(models_endpoint(&base_url))
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(15))
         .header(
             "Authorization",
             format!("Bearer {}", api_key.expose_secret()),

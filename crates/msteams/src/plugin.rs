@@ -617,7 +617,7 @@ impl ChannelPlugin for MsTeamsPlugin {
             ));
         }
 
-        let http = reqwest::Client::new();
+        let http = moltis_common::http_client::build_default_http_client();
 
         // Create JWT validator if tenant_id is configured.
         let jwt_validator = if !cfg.app_id.is_empty() {
@@ -810,12 +810,14 @@ impl ChannelStatus for MsTeamsPlugin {
                 connected: true,
                 account_id: state.account_id.clone(),
                 details: Some(details),
+                extra: None,
             })
         } else {
             Ok(ChannelHealthSnapshot {
                 connected: false,
                 account_id: account_id.to_string(),
                 details: Some("account not started".into()),
+                extra: None,
             })
         }
     }

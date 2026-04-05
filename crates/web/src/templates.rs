@@ -71,6 +71,7 @@ pub(crate) struct GonData {
     deploy_platform: Option<String>,
     channels_offered: Vec<String>,
     channel_descriptors: Vec<moltis_channels::ChannelDescriptor>,
+    channel_storage_db_path: String,
     update: moltis_gateway::update_check::UpdateAvailability,
     sandbox: SandboxGonInfo,
     routes: SpaRoutes,
@@ -442,6 +443,10 @@ pub(crate) async fn build_gon_data(gw: &GatewayState) -> GonData {
         deploy_platform: gw.deploy_platform.clone(),
         channels_offered,
         channel_descriptors,
+        channel_storage_db_path: moltis_config::data_dir()
+            .join("moltis.db")
+            .display()
+            .to_string(),
         update: gw.inner.read().await.update.clone(),
         sandbox,
         routes: SPA_ROUTES.clone(),

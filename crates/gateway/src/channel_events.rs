@@ -470,12 +470,13 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
     async fn request_sender_approval(
         &self,
-        _channel_type: &str,
+        channel_type: &str,
         account_id: &str,
         identifier: &str,
     ) {
         if let Some(state) = self.state.get() {
             let params = serde_json::json!({
+                "type": channel_type,
                 "account_id": account_id,
                 "identifier": identifier,
             });

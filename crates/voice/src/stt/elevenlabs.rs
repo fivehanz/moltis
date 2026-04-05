@@ -188,9 +188,8 @@ impl SttProvider for ElevenLabsStt {
             .multipart(form)
             .send()
             .await
-            .map_err(|error| {
-                log_send_error(&error, &self.model, request.format, audio_len);
-                error
+            .inspect_err(|error| {
+                log_send_error(error, &self.model, request.format, audio_len);
             })
             .context("failed to send ElevenLabs transcription request")?;
 
