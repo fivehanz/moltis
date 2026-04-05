@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260405.03] - 2026-04-05
+### Fixed
+- [web] Restore matrix onboarding icon
+
 ## [20260405.02] - 2026-04-05
 ### Added
 - [providers] Add zai-code provider for Z.AI Coding plan
