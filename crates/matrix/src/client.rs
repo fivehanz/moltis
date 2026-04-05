@@ -188,23 +188,50 @@ async fn ensure_moltis_owned_encryption_state(
 
     bootstrap_cross_signing_with_password(client, user_id, password.expose_secret()).await?;
 
+    if !cross_signing_is_complete(client).await {
+        force_take_over_existing_identity(client, account_id, user_id, password.expose_secret())
+            .await?;
+    }
+
     match client.encryption().recovery().state() {
         RecoveryState::Disabled => {
-            client
-                .encryption()
-                .recovery()
-                .enable()
-                .await
-                .map_err(|error| ChannelError::external("matrix recovery enable", error))?;
-            info!(account_id, "matrix ownership recovery enabled");
+            enable_password_backed_recovery(client, password.expose_secret()).await?;
+            info!(
+                account_id,
+                "matrix ownership recovery enabled with password-backed secret storage"
+            );
         },
         RecoveryState::Enabled => {
             info!(account_id, "matrix ownership recovery already enabled");
         },
         RecoveryState::Incomplete => {
-            return Err(ChannelError::invalid_input(
-                "matrix account already has incomplete secret storage; switch to user-managed mode or repair the account in Element",
-            ));
+            match client
+                .encryption()
+                .recovery()
+                .recover(password.expose_secret())
+                .await
+            {
+                Ok(()) => {
+                    info!(
+                        account_id,
+                        "matrix ownership recovered existing secret storage with account password"
+                    );
+                },
+                Err(error) => {
+                    warn!(
+                        account_id,
+                        error = %error,
+                        "matrix ownership could not recover existing secret storage with account password"
+                    );
+                    force_take_over_existing_identity(
+                        client,
+                        account_id,
+                        user_id,
+                        password.expose_secret(),
+                    )
+                    .await?;
+                },
+            }
         },
         RecoveryState::Unknown => {
             warn!(
@@ -213,6 +240,101 @@ async fn ensure_moltis_owned_encryption_state(
             );
         },
     }
+
+    ensure_own_device_is_cross_signed(client).await?;
+
+    if !cross_signing_is_complete(client).await {
+        return Err(ChannelError::invalid_input(
+            "matrix ownership bootstrap completed but cross-signing is still incomplete",
+        ));
+    }
+
+    Ok(())
+}
+
+async fn enable_password_backed_recovery(client: &Client, password: &str) -> ChannelResult<String> {
+    client
+        .encryption()
+        .recovery()
+        .enable()
+        .wait_for_backups_to_upload()
+        .with_passphrase(password)
+        .await
+        .map_err(|error| ChannelError::external("matrix recovery enable", error))
+}
+
+async fn ensure_own_device_is_cross_signed(client: &Client) -> ChannelResult<()> {
+    let Some(own_device) = client
+        .encryption()
+        .get_own_device()
+        .await
+        .map_err(|error| ChannelError::external("matrix own device lookup", error))?
+    else {
+        return Ok(());
+    };
+
+    if own_device.is_cross_signed_by_owner() {
+        return Ok(());
+    }
+
+    own_device
+        .verify()
+        .await
+        .map_err(|error| ChannelError::external("matrix own device self-sign", error))
+}
+
+async fn cross_signing_is_complete(client: &Client) -> bool {
+    client
+        .encryption()
+        .cross_signing_status()
+        .await
+        .is_some_and(|status| status.is_complete())
+}
+
+#[instrument(skip(client, password), fields(account_id))]
+async fn force_take_over_existing_identity(
+    client: &Client,
+    account_id: &str,
+    user_id: &str,
+    password: &str,
+) -> ChannelResult<()> {
+    let maybe_handle = client
+        .encryption()
+        .recovery()
+        .reset_identity()
+        .await
+        .map_err(|error| ChannelError::external("matrix recovery reset identity", error))?;
+
+    if let Some(handle) = maybe_handle {
+        match handle.auth_type() {
+            matrix_sdk::encryption::CrossSigningResetAuthType::Uiaa(uiaa) => {
+                let mut auth = Password::new(
+                    UserIdentifier::UserIdOrLocalpart(user_id.to_owned()),
+                    password.to_owned(),
+                );
+                auth.session = uiaa.session.clone();
+                handle
+                    .reset(Some(AuthData::Password(auth)))
+                    .await
+                    .map_err(|error| {
+                        ChannelError::external("matrix recovery reset identity auth", error)
+                    })?;
+            },
+            matrix_sdk::encryption::CrossSigningResetAuthType::OAuth(info) => {
+                return Err(ChannelError::invalid_input(format!(
+                    "matrix account requires browser approval to reset cross-signing at {}; complete that in Element or switch to user-managed mode",
+                    info.approval_url
+                )));
+            },
+        }
+    }
+
+    let _recovery_key = enable_password_backed_recovery(client, password).await?;
+
+    info!(
+        account_id,
+        "matrix ownership forcibly reset existing recovery state and bootstrapped fresh Moltis-managed recovery"
+    );
 
     Ok(())
 }
@@ -344,10 +466,11 @@ pub(crate) fn register_event_handlers(
     );
 }
 
-#[instrument(skip(client, cancel), fields(account_id))]
+#[instrument(skip(client, accounts, cancel), fields(account_id))]
 pub(crate) async fn sync_once_and_spawn_loop(
     client: &Client,
     account_id: &str,
+    accounts: &AccountStateMap,
     cancel: CancellationToken,
 ) -> ChannelResult<()> {
     info!(account_id, "performing initial sync...");
@@ -355,6 +478,12 @@ pub(crate) async fn sync_once_and_spawn_loop(
         .sync_once(SyncSettings::default())
         .await
         .map_err(|error| ChannelError::external("matrix initial sync", error))?;
+    {
+        let guard = accounts.read().unwrap_or_else(|error| error.into_inner());
+        if let Some(state) = guard.get(account_id) {
+            state.mark_initial_sync_complete();
+        }
+    }
     info!(
         account_id,
         "initial sync complete, starting continuous sync"
@@ -409,6 +538,13 @@ fn resolved_device_id(account_id: &str, configured_device_id: Option<&str>) -> S
         .filter(|device_id| !device_id.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| format!("moltis_{}", account_store_component(account_id)))
+}
+
+fn configured_device_id(configured_device_id: Option<&str>) -> Option<String> {
+    configured_device_id
+        .map(str::trim)
+        .filter(|device_id| !device_id.is_empty())
+        .map(str::to_string)
 }
 
 #[instrument(skip(client, config), fields(account_id))]
@@ -532,9 +668,10 @@ async fn login_with_password(
         .map(|secret| secret.expose_secret())
         .ok_or_else(|| ChannelError::invalid_input("password is required"))?;
 
-    let device_id = resolved_device_id(account_id, config.device_id.as_deref());
     let mut login = client.matrix_auth().login_username(user_id, password);
-    login = login.device_id(&device_id);
+    if let Some(device_id) = configured_device_id(config.device_id.as_deref()) {
+        login = login.device_id(&device_id);
+    }
     if let Some(display_name) = config
         .device_display_name
         .as_deref()
@@ -685,6 +822,16 @@ mod tests {
             resolved_device_id("matrix:org/test bot", None),
             "moltis_matrix-org-test-bot"
         );
+    }
+
+    #[test]
+    fn configured_device_id_ignores_blank_values() {
+        assert_eq!(
+            configured_device_id(Some("MOLTISBOT")),
+            Some("MOLTISBOT".into())
+        );
+        assert_eq!(configured_device_id(Some("   ")), None);
+        assert_eq!(configured_device_id(None), None);
     }
 
     #[test]

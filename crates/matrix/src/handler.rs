@@ -48,6 +48,13 @@ use crate::{
 
 const UTD_NOTICE_COOLDOWN: Duration = Duration::from_secs(300);
 
+fn should_ignore_initial_sync_history(accounts: &AccountStateMap, account_id: &str) -> bool {
+    let guard = accounts.read().unwrap_or_else(|error| error.into_inner());
+    guard
+        .get(account_id)
+        .is_some_and(|state| !state.initial_sync_complete())
+}
+
 #[tracing::instrument(skip(ev, room, accounts, bot_user_id), fields(account_id, room = %room.room_id()))]
 pub async fn handle_room_message(
     ev: OriginalSyncRoomMessageEvent,
@@ -57,6 +64,13 @@ pub async fn handle_room_message(
     bot_user_id: OwnedUserId,
 ) {
     if ev.sender == bot_user_id {
+        return;
+    }
+    if should_ignore_initial_sync_history(&accounts, &account_id) {
+        debug!(
+            account_id,
+            "ignoring Matrix history during initial sync catch-up"
+        );
         return;
     }
 
@@ -348,6 +362,14 @@ pub async fn handle_room_encrypted_event(
     if ev.sender == bot_user_id {
         return;
     }
+    if should_ignore_initial_sync_history(&accounts, &account_id) {
+        debug!(
+            account_id,
+            room = %room.room_id(),
+            "ignoring Matrix encrypted history during initial sync catch-up"
+        );
+        return;
+    }
 
     let room_id = room.room_id().to_string();
     let sender_id = ev.sender.to_string();
@@ -400,6 +422,13 @@ pub async fn handle_poll_response(
     let Some(callback_data) = callback_data else {
         return;
     };
+    if should_ignore_initial_sync_history(&accounts, &account_id) {
+        debug!(
+            account_id,
+            "ignoring Matrix poll response during initial sync catch-up"
+        );
+        return;
+    }
 
     let room_id = room.room_id().to_string();
     let (config, event_sink, bot_user_id) = {
@@ -1159,14 +1188,16 @@ mod tests {
         super::{
             audio_format_from_metadata, checked_chat_type, first_selection, infer_audio_kind,
             infer_chat_type, is_bot_mentioned, location_dispatch_body, otp_request_message,
-            parse_geo_uri, saved_audio_filename, should_auto_join_invite, update_utd_notice_window,
-            utd_notice_message,
+            parse_geo_uri, saved_audio_filename, should_auto_join_invite,
+            should_ignore_initial_sync_history, update_utd_notice_window, utd_notice_message,
         },
         crate::{
             access,
             config::{AutoJoinPolicy, MatrixAccountConfig},
+            state::{AccountState, AccountStateMap},
         },
         matrix_sdk::{
+            Client,
             encryption::VerificationState,
             ruma::{
                 events::room::message::{
@@ -1185,8 +1216,10 @@ mod tests {
         serde_json::json,
         std::{
             collections::HashMap,
+            sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
             time::{Duration, Instant},
         },
+        tokio_util::sync::CancellationToken,
     };
 
     fn message_event(value: serde_json::Value) -> OriginalSyncRoomMessageEvent {
@@ -1194,6 +1227,37 @@ mod tests {
             .unwrap_or_else(|error| panic!("raw event: {error}"))
             .deserialize()
             .unwrap_or_else(|error| panic!("message event: {error}"))
+    }
+
+    fn account_state_map(initial_sync_complete: bool) -> AccountStateMap {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|error| panic!("matrix test runtime should build: {error}"));
+        let client = runtime
+            .block_on(
+                Client::builder()
+                    .homeserver_url("https://matrix.example.com")
+                    .build(),
+            )
+            .unwrap_or_else(|error| panic!("matrix test client should build: {error}"));
+
+        let mut accounts = HashMap::new();
+        accounts.insert("test".into(), AccountState {
+            account_id: "test".into(),
+            config: MatrixAccountConfig::default(),
+            client,
+            message_log: None,
+            event_sink: None,
+            cancel: CancellationToken::new(),
+            bot_user_id: "@bot:example.org".into(),
+            ownership_startup_error: None,
+            initial_sync_complete: AtomicBool::new(initial_sync_complete),
+            otp: Mutex::new(moltis_channels::otp::OtpState::new(300)),
+            verification: Mutex::new(Default::default()),
+        });
+
+        Arc::new(RwLock::new(accounts))
     }
 
     #[test]
@@ -1258,6 +1322,18 @@ mod tests {
         }));
 
         assert!(is_bot_mentioned(&event, &bot_user_id, "@room hello"));
+    }
+
+    #[test]
+    fn initial_sync_history_is_ignored_until_catch_up_finishes() {
+        let pending_accounts = account_state_map(false);
+        let live_accounts = account_state_map(true);
+
+        assert!(should_ignore_initial_sync_history(
+            &pending_accounts,
+            "test"
+        ));
+        assert!(!should_ignore_initial_sync_history(&live_accounts, "test"));
     }
 
     #[test]

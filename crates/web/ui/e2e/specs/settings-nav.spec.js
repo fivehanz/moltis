@@ -589,7 +589,9 @@ test.describe("Settings navigation", () => {
 		await expect(page.locator('input[data-field="homeserver"]')).toHaveValue("https://matrix.org");
 		await expect(page.locator('input[data-field="homeserver"]')).toHaveAttribute("placeholder", "https://matrix.org");
 		await expect(page.getByText("Encrypted Matrix chats require Password auth.", { exact: false })).toBeVisible();
-		await expect(page.getByText("Password is the default because it supports encrypted Matrix chats.", { exact: false })).toBeVisible();
+		await expect(
+			page.getByText("Password is the default because it supports encrypted Matrix chats.", { exact: false }),
+		).toBeVisible();
 		await expect(page.getByText("verify yes", { exact: false })).toBeVisible();
 		await expect(page.getByRole("link", { name: "Matrix setup docs", exact: true })).toHaveAttribute(
 			"href",
@@ -832,12 +834,206 @@ test.describe("Settings navigation", () => {
 		await expect(page.getByText("Encryption device state: unverified", { exact: false })).toBeVisible();
 		await expect(page.getByText("Managed by Moltis", { exact: true })).toBeVisible();
 		await expect(page.getByText("Device not yet verified by owner", { exact: true })).toBeVisible();
+		await expect(page.getByText("MOLTISBOT", { exact: true })).toBeHidden();
+		const matrixDetails = page.getByText("Matrix account details", { exact: true });
+		await expect(matrixDetails).toBeVisible();
+		await matrixDetails.click();
 		await expect(page.getByText("@moltis-testbot:matrix.org", { exact: true })).toBeVisible();
 		await expect(page.getByText("MOLTISBOT", { exact: true })).toBeVisible();
 		await expect(page.getByText("Verification pending", { exact: true })).toBeVisible();
 		await expect(page.getByText("With @alice:matrix.org", { exact: true })).toBeVisible();
 		await expect(page.getByText("verify yes", { exact: false })).toBeVisible();
 		await expect(page.getByText("verify show", { exact: false })).toBeVisible();
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("channels page shows blocked Matrix ownership state for incomplete secret storage", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/channels");
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app.js script not found");
+			const appUrl = new URL(appScript.src, window.location.origin).href;
+			const marker = "js/app.js";
+			const markerIdx = appUrl.indexOf(marker);
+			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
+			const prefix = appUrl.slice(0, markerIdx);
+			const state = await import(`${prefix}js/state.js`);
+			const channelsPage = await import(`${prefix}js/page-channels.js`);
+			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
+			state.setWs({
+				readyState: wsOpen,
+				send(raw) {
+					const req = JSON.parse(raw || "{}");
+					const resolver = state.pending[req.id];
+					if (!resolver) return;
+					if (req.method === "channels.status") {
+						resolver({
+							ok: true,
+							payload: {
+								channels: [
+									{
+										type: "matrix",
+										account_id: "moltis-testbot",
+										name: "Matrix (moltis-testbot)",
+										status: "connected",
+										details: "@moltis-testbot:matrix.org on https://matrix.org",
+										sessions: [],
+										extra: {
+											matrix: {
+												verification_state: "unverified",
+												ownership_mode: "moltis_owned",
+												auth_mode: "password",
+												user_id: "@moltis-testbot:matrix.org",
+												device_id: "MOLTISBOT",
+												cross_signing_complete: false,
+												device_verified_by_owner: false,
+												recovery_state: "incomplete",
+												ownership_error:
+													"invalid channel input: matrix account already has incomplete secret storage that this password could not unlock; repair the account in Element or switch to user-managed mode",
+												pending_verifications: [],
+											},
+										},
+									},
+								],
+							},
+						});
+					} else if (req.method === "channels.senders.list") {
+						resolver({ ok: true, payload: { senders: [] } });
+					} else {
+						resolver({
+							ok: false,
+							error: { message: `unexpected rpc in blocked matrix ownership test: ${req.method}` },
+						});
+					}
+					delete state.pending[req.id];
+				},
+			});
+			state.setConnected(true);
+			channelsPage.prefetchChannels();
+		});
+
+		await expect(page.getByText("Moltis ownership blocked", { exact: true })).toBeVisible();
+		await expect(
+			page.getByText(
+				"This account already has partial Matrix secure-backup state. Finish or repair it in Element, or switch this channel to user-managed mode.",
+				{ exact: true },
+			),
+		).toBeVisible();
+		await expect(page.getByText("Ownership setup needs attention", { exact: true })).toBeVisible();
+		await expect(
+			page.getByText("matrix account already has incomplete secret storage that this password could not unlock", {
+				exact: false,
+			}),
+		).toBeVisible();
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("channels page shows Matrix ownership approval guidance for existing accounts", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/channels");
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app.js script not found");
+			const appUrl = new URL(appScript.src, window.location.origin).href;
+			const marker = "js/app.js";
+			const markerIdx = appUrl.indexOf(marker);
+			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
+			const prefix = appUrl.slice(0, markerIdx);
+			const state = await import(`${prefix}js/state.js`);
+			const channelsPage = await import(`${prefix}js/page-channels.js`);
+			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
+			state.setWs({
+				readyState: wsOpen,
+				send(raw) {
+					const req = JSON.parse(raw || "{}");
+					const resolver = state.pending[req.id];
+					if (!resolver) return;
+					if (req.method === "channels.status") {
+						resolver({
+							ok: true,
+							payload: {
+								channels: [
+									{
+										type: "matrix",
+										account_id: "moltis-testbot",
+										name: "Matrix (moltis-testbot)",
+										status: "connected",
+										details: "@moltis-testbot:matrix.org on https://matrix.org",
+										sessions: [],
+										extra: {
+											matrix: {
+												verification_state: "unverified",
+												ownership_mode: "moltis_owned",
+												auth_mode: "password",
+												user_id: "@moltis-testbot:matrix.org",
+												device_id: "GT7YDd8CWl",
+												cross_signing_complete: false,
+												device_verified_by_owner: false,
+												recovery_state: "disabled",
+												ownership_error:
+													"invalid channel input: matrix account requires browser approval to reset cross-signing at https://account.matrix.org/account/?action=org.matrix.cross_signing_reset; complete that in Element or switch to user-managed mode",
+												pending_verifications: [],
+											},
+										},
+									},
+								],
+							},
+						});
+					} else if (req.method === "channels.senders.list") {
+						resolver({ ok: true, payload: { senders: [] } });
+					} else if (req.method === "channels.update") {
+						window.__matrixOwnershipRetryRequest = req.params;
+						resolver({ ok: true, payload: { ok: true } });
+					} else {
+						resolver({
+							ok: false,
+							error: { message: `unexpected rpc in matrix ownership approval test: ${req.method}` },
+						});
+					}
+					delete state.pending[req.id];
+				},
+			});
+			state.setConnected(true);
+			channelsPage.prefetchChannels();
+		});
+
+		await expect(page.getByText("Ownership approval required", { exact: true })).toBeVisible();
+		await expect(
+			page.getByText(
+				"This existing Matrix account can already chat, but Matrix needs one browser approval before Moltis can take over encryption ownership. Open the approval page, approve the reset, then retry ownership setup.",
+				{ exact: true },
+			),
+		).toBeVisible();
+		await expect(page.getByText("Browser approval pending", { exact: true })).toBeVisible();
+		const approvalLink = page.getByRole("link", {
+			name: "Open approval page for @moltis-testbot:matrix.org",
+			exact: true,
+		});
+		await expect(approvalLink).toHaveAttribute(
+			"href",
+			"https://account.matrix.org/account/?action=org.matrix.cross_signing_reset",
+		);
+		await expect(approvalLink).toHaveClass(/provider-btn/);
+		await expect(approvalLink).not.toHaveClass(/provider-btn-secondary/);
+		const retryButton = page.getByRole("button", {
+			name: "Click here once you reset the account",
+			exact: true,
+		});
+		await expect(retryButton).toBeVisible();
+		const approvalNote = approvalLink.locator("xpath=../following-sibling::div[1]");
+		await expect(approvalNote).toContainText("Make sure the browser page is signed into");
+		await expect(approvalNote).toContainText("@moltis-testbot:matrix.org");
+		await retryButton.click();
+		await expect.poll(() => page.evaluate(() => window.__matrixOwnershipRetryRequest)).not.toBeNull();
+		const retryRequest = await page.evaluate(() => window.__matrixOwnershipRetryRequest);
+		expect(retryRequest).toEqual({
+			type: "matrix",
+			account_id: "moltis-testbot",
+			config: {},
+		});
 		expect(pageErrors).toEqual([]);
 	});
 

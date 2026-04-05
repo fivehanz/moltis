@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, atomic::AtomicBool},
 };
 
 use {
@@ -50,6 +50,28 @@ fn ownership_mode_label(mode: MatrixOwnershipMode) -> &'static str {
     }
 }
 
+fn effective_recovery_state(
+    cached_state: RecoveryState,
+    secret_storage_enabled: bool,
+    cross_signing_complete: bool,
+    backups_enabled: bool,
+) -> RecoveryState {
+    if !secret_storage_enabled {
+        return if matches!(cached_state, RecoveryState::Unknown) {
+            RecoveryState::Unknown
+        } else {
+            RecoveryState::Disabled
+        };
+    }
+
+    if cross_signing_complete && (backups_enabled || matches!(cached_state, RecoveryState::Enabled))
+    {
+        RecoveryState::Enabled
+    } else {
+        RecoveryState::Incomplete
+    }
+}
+
 struct MatrixStatusSnapshot {
     client: matrix_sdk::Client,
     config: MatrixAccountConfig,
@@ -59,12 +81,21 @@ struct MatrixStatusSnapshot {
 
 async fn matrix_status_extra(snapshot: MatrixStatusSnapshot) -> serde_json::Value {
     let verification_state = snapshot.client.encryption().verification_state().get();
+    let cached_recovery_state = snapshot.client.encryption().recovery().state();
     let cross_signing_complete = snapshot
         .client
         .encryption()
         .cross_signing_status()
         .await
         .is_some_and(|status| status.is_complete());
+    let secret_storage_enabled = snapshot
+        .client
+        .encryption()
+        .secret_storage()
+        .is_enabled()
+        .await
+        .unwrap_or(false);
+    let backups_enabled = snapshot.client.encryption().backups().are_enabled().await;
     let device_verified_by_owner = snapshot
         .client
         .encryption()
@@ -73,6 +104,12 @@ async fn matrix_status_extra(snapshot: MatrixStatusSnapshot) -> serde_json::Valu
         .ok()
         .flatten()
         .is_some_and(|device| device.is_cross_signed_by_owner());
+    let recovery_state = effective_recovery_state(
+        cached_recovery_state,
+        secret_storage_enabled,
+        cross_signing_complete,
+        backups_enabled,
+    );
     serde_json::json!({
         "matrix": {
             "verification_state": verification_state_label(verification_state),
@@ -92,7 +129,7 @@ async fn matrix_status_extra(snapshot: MatrixStatusSnapshot) -> serde_json::Valu
             "device_display_name": snapshot.config.device_display_name,
             "cross_signing_complete": cross_signing_complete,
             "device_verified_by_owner": device_verified_by_owner,
-            "recovery_state": recovery_state_label(snapshot.client.encryption().recovery().state()),
+            "recovery_state": recovery_state_label(recovery_state),
             "ownership_error": snapshot.startup_error,
         }
     })
@@ -270,13 +307,15 @@ impl ChannelPlugin for MatrixPlugin {
                 cancel: cancel.clone(),
                 bot_user_id: bot_user_id.to_string(),
                 ownership_startup_error: authenticated.ownership_startup_error,
+                initial_sync_complete: AtomicBool::new(false),
                 otp: std::sync::Mutex::new(OtpState::new(otp_cooldown)),
                 verification: std::sync::Mutex::new(Default::default()),
             });
         }
 
         client::register_event_handlers(&client, account_id, &self.accounts, &bot_user_id);
-        client::sync_once_and_spawn_loop(&client, account_id, cancel.clone()).await?;
+        client::sync_once_and_spawn_loop(&client, account_id, &self.accounts, cancel.clone())
+            .await?;
 
         Ok(())
     }
@@ -431,10 +470,13 @@ mod tests {
             client,
             client::AuthMode,
             config::{AutoJoinPolicy, MatrixAccountConfig},
+            plugin::effective_recovery_state,
             state::{AccountState, VerificationPrompt},
         },
+        matrix_sdk::encryption::recovery::RecoveryState,
         moltis_channels::{ChannelPlugin, ChannelStatus, ChannelType, InboundMode, otp::OtpState},
         secrecy::{ExposeSecret, Secret},
+        std::sync::atomic::AtomicBool,
         tokio_util::sync::CancellationToken,
     };
 
@@ -466,6 +508,7 @@ mod tests {
             cancel,
             bot_user_id: "@moltis:example.com".into(),
             ownership_startup_error: None,
+            initial_sync_complete: AtomicBool::new(true),
             otp: std::sync::Mutex::new(OtpState::new(300)),
             verification: std::sync::Mutex::new(Default::default()),
         }
@@ -568,6 +611,34 @@ mod tests {
         assert_eq!(extra["matrix"]["device_id"], "MOLTISBOT");
         assert_eq!(extra["matrix"]["device_display_name"], "Moltis Matrix Bot");
         assert_eq!(extra["matrix"]["ownership_error"], "ownership setup failed");
+    }
+
+    #[test]
+    fn effective_recovery_state_reports_enabled_once_live_crypto_is_ready() {
+        assert_eq!(
+            effective_recovery_state(RecoveryState::Incomplete, true, true, true),
+            RecoveryState::Enabled
+        );
+        assert_eq!(
+            effective_recovery_state(RecoveryState::Enabled, true, true, false),
+            RecoveryState::Enabled
+        );
+    }
+
+    #[test]
+    fn effective_recovery_state_keeps_incomplete_when_crypto_is_only_half_alive() {
+        assert_eq!(
+            effective_recovery_state(RecoveryState::Incomplete, true, false, true),
+            RecoveryState::Incomplete
+        );
+        assert_eq!(
+            effective_recovery_state(RecoveryState::Incomplete, true, true, false),
+            RecoveryState::Incomplete
+        );
+        assert_eq!(
+            effective_recovery_state(RecoveryState::Disabled, false, true, true),
+            RecoveryState::Disabled
+        );
     }
 
     #[test]

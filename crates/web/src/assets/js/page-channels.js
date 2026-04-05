@@ -148,41 +148,142 @@ function MatrixInfoRow({ label, value, copyLabel = null }) {
 }
 
 function MatrixOwnershipCard({ channel, matrixStatus }) {
+	var retryingOwnership = useSignal(false);
+	var retryOwnershipError = useSignal("");
 	var ownershipMode = normalizeMatrixOwnershipMode(matrixStatus?.ownership_mode);
 	var authMode = normalizeMatrixAuthMode(matrixStatus?.auth_mode);
 	var recoveryState = String(matrixStatus?.recovery_state || "unknown");
 	var deviceVerified = !!matrixStatus?.device_verified_by_owner;
 	var ownershipError = String(matrixStatus?.ownership_error || "").trim();
-	var modeTitle = ownershipMode === "moltis_owned" ? "Managed by Moltis" : "User-managed in Element";
+	var approvalMatch = ownershipError.match(/https?:\/\/\S+/);
+	var ownershipIssue =
+		ownershipMode !== "moltis_owned" || ownershipError.length === 0
+			? "none"
+			: ownershipError.includes("requires browser approval to reset cross-signing")
+				? "approval_required"
+				: ownershipError.includes("incomplete secret storage")
+					? "incomplete_secret_storage"
+					: "generic_blocked";
+	var modeTitle =
+		ownershipIssue === "approval_required"
+			? "Ownership approval required"
+			: ownershipIssue !== "none"
+				? "Moltis ownership blocked"
+				: ownershipMode === "moltis_owned"
+					? "Managed by Moltis"
+					: "User-managed in Element";
 	var modeText =
-		authMode === "password"
-			? matrixOwnershipModeGuidance(authMode, ownershipMode)
-			: "Access token auth is always user-managed. If you want encrypted Matrix chats, reconnect this channel with password auth so Moltis can create its own device.";
+		ownershipIssue === "approval_required"
+			? "This existing Matrix account can already chat, but Matrix needs one browser approval before Moltis can take over encryption ownership. Open the approval page, approve the reset, then retry ownership setup."
+			: ownershipIssue === "incomplete_secret_storage"
+				? "This account already has partial Matrix secure-backup state. Finish or repair it in Element, or switch this channel to user-managed mode."
+				: ownershipIssue === "generic_blocked"
+					? "Moltis could not take ownership of this Matrix account automatically. Repair the account in Element or switch this channel to user-managed mode."
+					: authMode === "password"
+						? matrixOwnershipModeGuidance(authMode, ownershipMode)
+						: "Access token auth is always user-managed. If you want encrypted Matrix chats, reconnect this channel with password auth so Moltis can create its own device.";
+	var detailTitle =
+		ownershipIssue === "approval_required"
+			? "Browser approval pending"
+			: ownershipError
+				? "Ownership setup needs attention"
+				: "";
+	var detailText =
+		ownershipIssue === "approval_required"
+			? `Approve the reset while signed into ${matrixStatus?.user_id || "this Matrix account"} in the browser, then reconnect the Matrix channel so Moltis can finish taking ownership.`
+			: ownershipError;
+	var approvalUrl = approvalMatch ? approvalMatch[0].replace(/[;),.]+$/, "") : "";
 	var verificationText = deviceVerified ? "Device verified by owner" : "Device not yet verified by owner";
+	var hasAccountDetails =
+		!!String(channel.config?.homeserver || "").trim() ||
+		!!String(matrixStatus?.user_id || "").trim() ||
+		!!String(matrixStatus?.device_id || "").trim() ||
+		!!String(matrixStatus?.device_display_name || channel.config?.device_display_name || "").trim();
+
+	function retryOwnershipSetup() {
+		retryingOwnership.value = true;
+		retryOwnershipError.value = "";
+		sendRpc("channels.update", {
+			type: channelType(channel.type),
+			account_id: channel.account_id,
+			config: {},
+		}).then((res) => {
+			retryingOwnership.value = false;
+			if (res?.ok) {
+				showToast("Retrying Matrix ownership setup");
+				loadChannels();
+				return;
+			}
+			retryOwnershipError.value =
+				(res?.error && (res.error.message || res.error.detail)) || "Failed to retry Matrix ownership setup.";
+		});
+	}
+
 	return html`<div class="rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-100">
 		<div class="flex items-center gap-2">
 			<div class="font-medium text-sky-50">${modeTitle}</div>
 			<span class="provider-item-badge ${deviceVerified ? "configured" : "oauth"}">${verificationText}</span>
 		</div>
 		<div class="mt-1 text-sky-100/90">${modeText}</div>
-		<div class="mt-2 grid gap-2">
-			<${MatrixInfoRow} label="Homeserver" value=${channel.config?.homeserver || ""} copyLabel="Homeserver copied" />
-			<${MatrixInfoRow} label="Matrix user" value=${matrixStatus?.user_id || ""} copyLabel="Matrix user ID copied" />
-			<${MatrixInfoRow} label="Device ID" value=${matrixStatus?.device_id || ""} copyLabel="Matrix device ID copied" />
-			<${MatrixInfoRow}
-				label="Device name"
-				value=${matrixStatus?.device_display_name || channel.config?.device_display_name || ""}
-				copyLabel="Matrix device name copied" />
-		</div>
 		<div class="mt-2 text-sky-100/90">
 			Cross-signing: <span class="font-medium">${matrixStatus?.cross_signing_complete ? "ready" : "not ready"}</span>.
 			Recovery: <span class="font-medium">${recoveryState}</span>.
 		</div>
 		${
-			ownershipError &&
+			hasAccountDetails &&
+			html`<details class="mt-2 rounded-md border border-sky-500/20 bg-sky-500/5 px-3 py-2">
+				<summary class="cursor-pointer text-[11px] font-medium uppercase tracking-wide text-sky-100/80">
+					Matrix account details
+				</summary>
+				<div class="mt-2 grid gap-2">
+					<${MatrixInfoRow} label="Homeserver" value=${channel.config?.homeserver || ""} copyLabel="Homeserver copied" />
+					<${MatrixInfoRow} label="Matrix user" value=${matrixStatus?.user_id || ""} copyLabel="Matrix user ID copied" />
+					<${MatrixInfoRow} label="Device ID" value=${matrixStatus?.device_id || ""} copyLabel="Matrix device ID copied" />
+					<${MatrixInfoRow}
+						label="Device name"
+						value=${matrixStatus?.device_display_name || channel.config?.device_display_name || ""}
+						copyLabel="Matrix device name copied" />
+				</div>
+			</details>`
+		}
+		${
+			ownershipIssue === "approval_required" &&
+			approvalUrl &&
+			html`<div class="mt-2">
+				<div class="flex flex-wrap gap-2">
+					<a
+						href=${approvalUrl}
+						target="_blank"
+						rel="noreferrer"
+						class="provider-btn provider-btn-sm"
+						aria-label=${`Open approval page for ${matrixStatus?.user_id || "this Matrix account"}`}>
+						Open approval page for ${matrixStatus?.user_id || "this account"}
+					</a>
+					<button
+						type="button"
+						class="provider-btn provider-btn-sm"
+						onClick=${retryOwnershipSetup}
+						disabled=${retryingOwnership.value}>
+						${retryingOwnership.value ? "Retrying ownership setup..." : "Click here once you reset the account"}
+					</button>
+				</div>
+				<div class="mt-2 text-[11px] text-sky-100/80">
+					Make sure the browser page is signed into{" "}
+					<span class="font-mono text-sky-50">${matrixStatus?.user_id || "the Matrix bot account"}</span>.
+				</div>
+				${
+					retryOwnershipError.value &&
+					html`<div class="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-amber-100">
+						${retryOwnershipError.value}
+					</div>`
+				}
+			</div>`
+		}
+		${
+			detailTitle &&
 			html`<div class="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-amber-100">
-				<div class="font-medium text-amber-50">Ownership setup needs attention</div>
-				<div class="mt-1">${ownershipError}</div>
+				<div class="font-medium text-amber-50">${detailTitle}</div>
+				<div class="mt-1">${detailText}</div>
 			</div>`
 		}
 	</div>`;

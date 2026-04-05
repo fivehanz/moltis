@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -24,10 +27,21 @@ pub struct AccountState {
     pub cancel: CancellationToken,
     pub bot_user_id: String,
     pub ownership_startup_error: Option<String>,
+    pub initial_sync_complete: AtomicBool,
     /// In-memory OTP challenges (std::sync::Mutex — never held across .await).
     pub otp: Mutex<OtpState>,
     /// In-memory Matrix verification flow state.
     pub verification: Mutex<VerificationRuntimeState>,
+}
+
+impl AccountState {
+    pub fn initial_sync_complete(&self) -> bool {
+        self.initial_sync_complete.load(Ordering::Relaxed)
+    }
+
+    pub fn mark_initial_sync_complete(&self) {
+        self.initial_sync_complete.store(true, Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
