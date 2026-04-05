@@ -48,7 +48,7 @@ impl From<ServiceError> for moltis_protocol::ErrorShape {
     fn from(err: ServiceError) -> Self {
         let code = match &err {
             ServiceError::Forbidden { .. } => moltis_protocol::error_codes::FORBIDDEN,
-            _ => moltis_protocol::error_codes::UNAVAILABLE,
+            _ => moltis_protocol::error_codes::INTERNAL,
         };
         Self::new(code, err.to_string())
     }

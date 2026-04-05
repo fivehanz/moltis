@@ -358,7 +358,7 @@ pub async fn fetch_models_from_api(
     let client = crate::shared_http_client();
     let response = client
         .get(models_endpoint(&base_url))
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(15))
         .header(
             "Authorization",
             format!("Bearer {}", api_key.expose_secret()),
