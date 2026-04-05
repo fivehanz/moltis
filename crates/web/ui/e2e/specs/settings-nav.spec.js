@@ -578,9 +578,7 @@ test.describe("Settings navigation", () => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/channels");
 		await waitForWsConnected(page);
-		await expect(
-			page.getByText("stored in Moltis's internal database (data_dir()/moltis.db)", { exact: false }),
-		).toBeVisible();
+		await expect(page.getByText(/stored in Moltis's internal database \(.+moltis\.db\)/)).toBeVisible();
 
 		const addButton = page.getByRole("button", { name: "Connect Matrix", exact: true });
 		await expect(addButton).toBeVisible();
@@ -767,8 +765,8 @@ test.describe("Settings navigation", () => {
 			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
 			const prefix = appUrl.slice(0, markerIdx);
 			const state = await import(`${prefix}js/state.js`);
+			const channelsPage = await import(`${prefix}js/page-channels.js`);
 			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
-			state.setConnected(false);
 			state.setWs({
 				readyState: wsOpen,
 				send(raw) {
@@ -813,13 +811,91 @@ test.describe("Settings navigation", () => {
 				},
 			});
 			state.setConnected(true);
+			channelsPage.prefetchChannels();
 		});
 
+		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();
 		await expect(page.getByText("Encryption device state: unverified", { exact: false })).toBeVisible();
 		await expect(page.getByText("Verification pending", { exact: true })).toBeVisible();
 		await expect(page.getByText("With @alice:matrix.org", { exact: true })).toBeVisible();
 		await expect(page.getByText("verify yes", { exact: false })).toBeVisible();
 		await expect(page.getByText("verify show", { exact: false })).toBeVisible();
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("senders page shows pending matrix sender with one visible sigil and OTP code", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await navigateAndWait(page, "/settings/channels");
+
+		await page.evaluate(async () => {
+			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app.js script not found");
+			const appUrl = new URL(appScript.src, window.location.origin).href;
+			const marker = "js/app.js";
+			const markerIdx = appUrl.indexOf(marker);
+			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
+			const prefix = appUrl.slice(0, markerIdx);
+			const state = await import(`${prefix}js/state.js`);
+			const channelsPage = await import(`${prefix}js/page-channels.js`);
+			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
+			state.setWs({
+				readyState: wsOpen,
+				send(raw) {
+					const req = JSON.parse(raw || "{}");
+					const resolver = state.pending[req.id];
+					if (!resolver) return;
+					if (req.method === "channels.status") {
+						resolver({
+							ok: true,
+							payload: {
+								channels: [
+									{
+										type: "matrix",
+										account_id: "moltis-testbot",
+										name: "Matrix (moltis-testbot)",
+										status: "connected",
+										details: "@moltis-testbot:matrix.org on https://matrix.org",
+										sessions: [],
+									},
+								],
+							},
+						});
+					} else if (req.method === "channels.senders.list") {
+						resolver({
+							ok: true,
+							payload: {
+								senders: [
+									{
+										peer_id: "@alice:matrix.org",
+										username: "@alice:matrix.org",
+										sender_name: "Alice",
+										message_count: 1,
+										last_seen: 1700000000,
+										allowed: false,
+										otp_pending: {
+											code: "954502",
+											expires_at: 1700000300,
+										},
+									},
+								],
+							},
+						});
+					} else {
+						resolver({ ok: false, error: { message: `unexpected rpc in matrix senders test: ${req.method}` } });
+					}
+					delete state.pending[req.id];
+				},
+			});
+			state.setConnected(true);
+			channelsPage.prefetchChannels();
+		});
+
+		await page.getByRole("button", { name: "Senders", exact: true }).click();
+		await expect(page.getByText("Alice", { exact: true })).toBeVisible();
+		await expect(page.getByText("@penso:matrix.org", { exact: true })).toBeVisible();
+		await expect(page.getByText("@@penso:matrix.org", { exact: true })).toHaveCount(0);
+		await expect(page.getByText("954502", { exact: true })).toBeVisible();
+		await expect(page.getByText("Approve", { exact: true })).toBeVisible();
 		expect(pageErrors).toEqual([]);
 	});
 

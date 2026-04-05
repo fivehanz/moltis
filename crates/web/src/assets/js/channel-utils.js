@@ -2,19 +2,25 @@
 //
 // Used by page-channels.js and onboarding-view.js.
 
+import { get as getGon } from "./gon.js";
 import { sendRpc } from "./helpers.js";
 
 export var MATRIX_DOCS_URL = "https://docs.moltis.org/matrix.html";
 export var MATRIX_DEFAULT_HOMESERVER = "https://matrix.org";
 export var MATRIX_ENCRYPTION_GUIDANCE =
-	"Encrypted Matrix chats require Password auth. Access token auth can connect for plain Matrix traffic, but it reuses an existing Matrix session without that device's private encryption keys, so Moltis cannot reliably decrypt encrypted chats. Use Password so Moltis creates and persists its own Matrix device keys, then finish Element verification in chat with `verify yes`, `verify no`, `verify show`, or `verify cancel`.";
+	"Encrypted Matrix chats require Password auth. Access token auth can connect for plain Matrix traffic, but it reuses an existing Matrix session without that device's private encryption keys, so Moltis cannot reliably decrypt encrypted chats. Use Password so Moltis creates and persists its own Matrix device keys, then finish Element verification in the same Matrix DM or room by sending `verify yes`, `verify no`, `verify show`, or `verify cancel` as normal chat messages.";
 export function matrixAuthModeGuidance(authMode) {
 	return normalizeMatrixAuthMode(authMode) === "password"
 		? "Required for encrypted Matrix chats. Moltis logs in as its own Matrix device and stores the device's encryption keys locally."
 		: "Does not support encrypted Matrix chats. Access tokens authenticate an existing Matrix session, but they do not transfer that device's private encryption keys into Moltis.";
 }
-export var CHANNEL_STORAGE_NOTE =
-	"Channels added or edited in the web UI are stored in Moltis's internal database (data_dir()/moltis.db). They are not written back to moltis.toml.";
+export function channelStorageNote() {
+	var dbPath = String(getGon("channel_storage_db_path") || "").trim();
+	if (dbPath) {
+		return `Channels added or edited in the web UI are stored in Moltis's internal database (${dbPath}). They are not written back to moltis.toml.`;
+	}
+	return "Channels added or edited in the web UI are stored in Moltis's internal database (moltis.db). They are not written back to moltis.toml.";
+}
 
 /**
  * Validate required channel fields before submission.

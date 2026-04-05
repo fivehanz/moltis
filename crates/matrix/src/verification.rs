@@ -559,7 +559,7 @@ fn format_prompt_message(prompt: &VerificationPrompt) -> String {
         "Matrix verification for {} is waiting.\n\
 Compare these emojis with Element:\n\
 {}\n\n\
-Reply with one of:\n\
+Send one of these exact messages as a normal message in this same Matrix chat:\n\
 verify yes\n\
 verify no\n\
 verify show\n\
@@ -596,5 +596,6 @@ mod tests {
         assert!(message.contains("🐶 Dog"));
         assert!(message.contains("verify yes"));
         assert!(message.contains("verify no"));
+        assert!(message.contains("same Matrix chat"));
     }
 }

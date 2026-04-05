@@ -64,6 +64,20 @@ fn merge_channel_config(existing: Option<Value>, patch: Value) -> Value {
     }
 }
 
+fn sender_allowlist_key(channel_type: ChannelType) -> &'static str {
+    match channel_type {
+        ChannelType::Matrix => "user_allowlist",
+        _ => "allowlist",
+    }
+}
+
+fn otp_pending_payload(code: &str, expires_at: i64) -> Value {
+    serde_json::json!({
+        "code": code,
+        "expires_at": expires_at,
+    })
+}
+
 /// Live channel service backed by the channel registry.
 ///
 /// All per-channel dispatch is handled by the registry — no match arms needed.
@@ -567,10 +581,7 @@ impl ChannelService for LiveChannelService {
                     .as_ref()
                     .and_then(|pending| pending.iter().find(|c| c.peer_id == s.peer_id))
                 {
-                    entry["otp_pending"] = serde_json::json!({
-                        "code": otp.code,
-                        "expires_at": otp.expires_at,
-                    });
+                    entry["otp_pending"] = otp_pending_payload(&otp.code, otp.expires_at);
                 }
                 entry
             })
@@ -609,14 +620,15 @@ impl ChannelService for LiveChannelService {
             })?;
 
         let mut config = stored.config.clone();
+        let allowlist_key = sender_allowlist_key(channel_type);
         let allowlist = config
             .as_object_mut()
             .ok_or_else(|| "config is not an object".to_string())?
-            .entry("allowlist")
+            .entry(allowlist_key)
             .or_insert_with(|| serde_json::json!([]));
         let arr = allowlist
             .as_array_mut()
-            .ok_or_else(|| "allowlist is not an array".to_string())?;
+            .ok_or_else(|| format!("{allowlist_key} is not an array"))?;
 
         let id_lower = identifier.to_lowercase();
         if !arr
@@ -690,9 +702,10 @@ impl ChannelService for LiveChannelService {
             })?;
 
         let mut config = stored.config.clone();
+        let allowlist_key = sender_allowlist_key(channel_type);
         if let Some(arr) = config
             .as_object_mut()
-            .and_then(|o| o.get_mut("allowlist"))
+            .and_then(|o| o.get_mut(allowlist_key))
             .and_then(|v| v.as_array_mut())
         {
             let id_lower = identifier.to_lowercase();
@@ -736,9 +749,11 @@ impl ChannelService for LiveChannelService {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
-    use super::merge_channel_config;
+    use {
+        super::{merge_channel_config, otp_pending_payload, sender_allowlist_key},
+        moltis_channels::ChannelType,
+        serde_json::json,
+    };
 
     #[test]
     fn merge_channel_config_preserves_omitted_fields() {
@@ -797,5 +812,19 @@ mod tests {
             merged["channel_overrides"]["C123"]["model_provider"],
             "anthropic"
         );
+    }
+
+    #[test]
+    fn sender_allowlist_key_uses_matrix_user_allowlist() {
+        assert_eq!(sender_allowlist_key(ChannelType::Matrix), "user_allowlist");
+        assert_eq!(sender_allowlist_key(ChannelType::Telegram), "allowlist");
+    }
+
+    #[test]
+    fn otp_pending_payload_includes_code_for_authenticated_ui() {
+        let payload = otp_pending_payload("954502", 1_234_567);
+
+        assert_eq!(payload["expires_at"], 1_234_567);
+        assert_eq!(payload["code"], "954502");
     }
 }

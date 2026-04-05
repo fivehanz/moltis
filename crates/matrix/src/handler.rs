@@ -28,8 +28,11 @@ use {
         ChannelEvent, ChannelType,
         config_view::ChannelConfigView,
         gating::{self, DmPolicy, GroupPolicy},
-        message_log::MessageLogEntry,
-        otp::{OtpInitResult, OtpVerifyResult},
+        message_log::{MessageLog, MessageLogEntry},
+        otp::{
+            OtpInitResult, OtpVerifyResult, approve_sender_via_otp, emit_otp_challenge,
+            emit_otp_resolution,
+        },
         plugin::{ChannelEventSink, ChannelMessageKind, ChannelMessageMeta, ChannelReplyTarget},
     },
     moltis_common::types::ChatType,
@@ -140,6 +143,18 @@ pub async fn handle_room_message(
         return;
     }
 
+    let sender_name = room
+        .get_member_no_sync(&ev.sender)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|m| m.display_name().map(|s| s.to_string()));
+    let chat_type_str = if matches!(chat_type, ChatType::Dm) {
+        "dm"
+    } else {
+        "group"
+    };
+
     if let Err(reason) = checked_chat_type(
         &config,
         &sender_id,
@@ -154,6 +169,28 @@ pub async fn handle_room_message(
             && config.otp_self_approval
             && config.dm_policy == DmPolicy::Allowlist
         {
+            log_inbound_message(&message_log, MessageLogEntry {
+                id: 0,
+                account_id: account_id.clone(),
+                channel_type: "matrix".into(),
+                peer_id: sender_id.clone(),
+                username: Some(sender_id.clone()),
+                sender_name: sender_name.clone(),
+                chat_id: room_id.clone(),
+                chat_type: chat_type_str.into(),
+                body: body.clone(),
+                access_granted: false,
+                created_at: unix_now(),
+            })
+            .await;
+            emit_inbound_message_event(
+                &event_sink,
+                &account_id,
+                &sender_id,
+                sender_name.clone(),
+                false,
+            )
+            .await;
             info!(
                 account_id,
                 room = %room_id,
@@ -180,15 +217,30 @@ pub async fn handle_room_message(
             %reason,
             "matrix inbound access denied"
         );
+        log_inbound_message(&message_log, MessageLogEntry {
+            id: 0,
+            account_id: account_id.clone(),
+            channel_type: "matrix".into(),
+            peer_id: sender_id.clone(),
+            username: Some(sender_id.clone()),
+            sender_name: sender_name.clone(),
+            chat_id: room_id.clone(),
+            chat_type: chat_type_str.into(),
+            body: body.clone(),
+            access_granted: false,
+            created_at: unix_now(),
+        })
+        .await;
+        emit_inbound_message_event(
+            &event_sink,
+            &account_id,
+            &sender_id,
+            sender_name.clone(),
+            false,
+        )
+        .await;
         return;
     }
-
-    let sender_name = room
-        .get_member_no_sync(&ev.sender)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|m| m.display_name().map(|s| s.to_string()));
 
     if let Some(emoji) = &config.ack_reaction {
         let room_clone = room.clone();
@@ -204,28 +256,29 @@ pub async fn handle_room_message(
         });
     }
 
-    if let Some(log) = &message_log {
-        let _ = log
-            .log(MessageLogEntry {
-                id: 0,
-                account_id: account_id.clone(),
-                channel_type: "matrix".into(),
-                peer_id: sender_id.clone(),
-                username: Some(sender_id.clone()),
-                sender_name: sender_name.clone(),
-                chat_id: room_id.clone(),
-                chat_type: if matches!(chat_type, ChatType::Dm) {
-                    "dm"
-                } else {
-                    "group"
-                }
-                .into(),
-                body: body.clone(),
-                access_granted: true,
-                created_at: unix_now(),
-            })
-            .await;
-    }
+    log_inbound_message(&message_log, MessageLogEntry {
+        id: 0,
+        account_id: account_id.clone(),
+        channel_type: "matrix".into(),
+        peer_id: sender_id.clone(),
+        username: Some(sender_id.clone()),
+        sender_name: sender_name.clone(),
+        chat_id: room_id.clone(),
+        chat_type: chat_type_str.into(),
+        body: body.clone(),
+        access_granted: true,
+        created_at: unix_now(),
+    })
+    .await;
+
+    emit_inbound_message_event(
+        &event_sink,
+        &account_id,
+        &sender_id,
+        sender_name.clone(),
+        true,
+    )
+    .await;
 
     let reply_to = ChannelReplyTarget {
         channel_type: ChannelType::Matrix,
@@ -249,17 +302,6 @@ pub async fn handle_room_message(
     };
 
     if let Some(sink) = &event_sink {
-        sink.emit(ChannelEvent::InboundMessage {
-            channel_type: ChannelType::Matrix,
-            account_id: account_id.clone(),
-            peer_id: sender_id.clone(),
-            username: Some(sender_id.clone()),
-            sender_name: sender_name.clone(),
-            message_count: Some(1),
-            access_granted: true,
-        })
-        .await;
-
         match &ev.content.msgtype {
             MessageType::Audio(audio) => {
                 handle_audio_message(
@@ -802,9 +844,15 @@ fn utd_notice_message(verification_state: VerificationState) -> &'static str {
             "I received an encrypted Matrix message but could not decrypt it yet. This Moltis device is likely missing room keys for older history. Resend the message after verification, or share keys from Element if needed."
         },
         VerificationState::Unknown | VerificationState::Unverified => {
-            "I received an encrypted Matrix message but could not decrypt it yet. This Moltis device likely still needs verification or room keys. Start Element verification with the bot, then reply `verify show` if you need the emoji prompt. After verification finishes, resend the message."
+            "I received an encrypted Matrix message but could not decrypt it yet. This Moltis device likely still needs verification or room keys. Start a fresh Element verification with the bot, then send `verify show` as a normal message in this same Matrix chat if you need the emoji prompt again. After verification finishes, resend the message."
         },
     }
+}
+
+fn otp_request_message() -> &'static str {
+    "To use this bot, please enter the verification code.\n\n\
+     Ask the bot owner for the code, it is visible in the Moltis web UI under Channels -> Senders.\n\n\
+     The code expires in 5 minutes."
 }
 
 fn saved_audio_filename(
@@ -923,17 +971,16 @@ async fn handle_otp(
 
         match result {
             OtpVerifyResult::Approved => {
+                approve_sender_via_otp(
+                    event_sink.as_deref(),
+                    ChannelType::Matrix,
+                    account_id,
+                    sender_id,
+                    sender_id,
+                    Some(sender_id),
+                )
+                .await;
                 send_status_text(room, "Access granted.", "otp approved").await;
-                if let Some(sink) = &event_sink {
-                    sink.emit(ChannelEvent::OtpResolved {
-                        channel_type: ChannelType::Matrix,
-                        account_id: account_id.into(),
-                        peer_id: sender_id.into(),
-                        username: Some(sender_id.into()),
-                        resolution: "approved".into(),
-                    })
-                    .await;
-                }
             },
             OtpVerifyResult::WrongCode { attempts_left } => {
                 let msg = format!("Invalid code. {attempts_left} attempts remaining.");
@@ -946,9 +993,27 @@ async fn handle_otp(
                     "otp expired",
                 )
                 .await;
+                emit_otp_resolution(
+                    event_sink.as_deref(),
+                    ChannelType::Matrix,
+                    account_id,
+                    sender_id,
+                    Some(sender_id),
+                    "expired",
+                )
+                .await;
             },
             OtpVerifyResult::LockedOut => {
                 send_status_text(room, "Too many attempts. Please wait.", "otp locked").await;
+                emit_otp_resolution(
+                    event_sink.as_deref(),
+                    ChannelType::Matrix,
+                    account_id,
+                    sender_id,
+                    Some(sender_id),
+                    "locked_out",
+                )
+                .await;
             },
             OtpVerifyResult::NoPending => {
                 // Fall through to initiate
@@ -976,24 +1041,19 @@ async fn handle_otp(
         OtpInitResult::Created(code) => {
             let expires_at =
                 unix_now().saturating_add(i64::try_from(otp_cooldown_secs).unwrap_or(i64::MAX));
-            let msg = format!(
-                "You're not on the allowlist. A verification code has been generated.\n\
-                 Ask the admin to approve code: **{code}**\n\
-                 Or enter it here if you have it."
-            );
+            let msg = otp_request_message().to_string();
             send_status_text(room, &msg, "otp created").await;
-            if let Some(sink) = &event_sink {
-                sink.emit(ChannelEvent::OtpChallenge {
-                    channel_type: ChannelType::Matrix,
-                    account_id: account_id.into(),
-                    peer_id: sender_id.into(),
-                    username: Some(sender_id.into()),
-                    sender_name: Some(sender_id.into()),
-                    code,
-                    expires_at,
-                })
-                .await;
-            }
+            emit_otp_challenge(
+                event_sink.as_deref(),
+                ChannelType::Matrix,
+                account_id,
+                sender_id,
+                Some(sender_id),
+                Some(sender_id),
+                code,
+                expires_at,
+            )
+            .await;
         },
         OtpInitResult::AlreadyPending => {
             send_status_text(
@@ -1066,13 +1126,42 @@ fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
+async fn log_inbound_message(message_log: &Option<Arc<dyn MessageLog>>, entry: MessageLogEntry) {
+    if let Some(log) = message_log
+        && let Err(error) = log.log(entry).await
+    {
+        warn!(error = %error, "failed to log Matrix inbound message");
+    }
+}
+
+async fn emit_inbound_message_event(
+    event_sink: &Option<Arc<dyn ChannelEventSink>>,
+    account_id: &str,
+    sender_id: &str,
+    sender_name: Option<String>,
+    access_granted: bool,
+) {
+    if let Some(sink) = event_sink {
+        sink.emit(ChannelEvent::InboundMessage {
+            channel_type: ChannelType::Matrix,
+            account_id: account_id.to_string(),
+            peer_id: sender_id.to_string(),
+            username: Some(sender_id.to_string()),
+            sender_name,
+            message_count: None,
+            access_granted,
+        })
+        .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
         super::{
             audio_format_from_metadata, checked_chat_type, first_selection, infer_audio_kind,
-            infer_chat_type, is_bot_mentioned, location_dispatch_body, parse_geo_uri,
-            saved_audio_filename, should_auto_join_invite, update_utd_notice_window,
+            infer_chat_type, is_bot_mentioned, location_dispatch_body, otp_request_message,
+            parse_geo_uri, saved_audio_filename, should_auto_join_invite, update_utd_notice_window,
             utd_notice_message,
         },
         crate::{
@@ -1522,7 +1611,18 @@ mod tests {
     #[test]
     fn utd_notice_message_guides_verification_for_unverified_devices() {
         assert!(utd_notice_message(VerificationState::Unverified).contains("verify show"));
+        assert!(utd_notice_message(VerificationState::Unverified).contains("same Matrix chat"));
         assert!(utd_notice_message(VerificationState::Unknown).contains("verification"));
         assert!(utd_notice_message(VerificationState::Verified).contains("room keys"));
+    }
+
+    #[test]
+    fn otp_request_message_does_not_leak_codes() {
+        let message = otp_request_message();
+
+        assert!(message.contains("please enter the verification code"));
+        assert!(message.contains("Channels -> Senders"));
+        assert!(!message.contains("approve code"));
+        assert!(!message.contains("enter it here"));
     }
 }

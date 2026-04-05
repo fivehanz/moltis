@@ -7,7 +7,7 @@ import { useEffect, useState } from "preact/hooks";
 import {
 	addChannel,
 	buildTeamsEndpoint,
-	CHANNEL_STORAGE_NOTE,
+	channelStorageNote,
 	defaultTeamsBaseUrl,
 	deriveMatrixAccountId,
 	fetchChannelStatus,
@@ -108,7 +108,7 @@ function ConnectionModeHint({ type }) {
 
 function ChannelStorageNotice({ compact = false }) {
 	return html`<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] px-3 py-2 text-xs text-[var(--muted)] ${compact ? "" : "max-w-3xl"}">
-		<span class="font-medium text-[var(--text-strong)]">Storage note.</span> ${CHANNEL_STORAGE_NOTE}
+		<span class="font-medium text-[var(--text-strong)]">Storage note.</span> ${channelStorageNote()}
 	</div>`;
 }
 
@@ -252,7 +252,7 @@ function ChannelCard(props) {
 		      ${pendingVerifications.map(
 						(prompt) => html`<div class="mt-1">
 							<div>With ${prompt.other_user_id}</div>
-							<div class="text-emerald-200/90">Reply <span class="font-mono">verify yes</span>, <span class="font-mono">verify no</span>, <span class="font-mono">verify show</span>, or <span class="font-mono">verify cancel</span> in the Matrix chat.</div>
+							<div class="text-emerald-200/90">Send <span class="font-mono">verify yes</span>, <span class="font-mono">verify no</span>, <span class="font-mono">verify show</span>, or <span class="font-mono">verify cancel</span> as a normal message in that same Matrix chat.</div>
 						</div>`,
 					)}
 		    </div>`
@@ -344,6 +344,7 @@ function ChannelsTab() {
 function renderSenderRow(s, onAction) {
 	var identifier = s.username || s.peer_id;
 	var lastSeenMs = s.last_seen ? s.last_seen * 1000 : 0;
+	var usernameLabel = s.username ? (String(s.username).startsWith("@") ? s.username : `@${s.username}`) : "\u2014";
 	var statusBadge = s.otp_pending
 		? html`<span class="provider-item-badge cursor-pointer select-none" style="background:var(--warning-bg, #fef3c7);color:var(--warning-text, #92400e);" onClick=${() => {
 				navigator.clipboard.writeText(s.otp_pending.code).then(() => showToast("OTP code copied"));
@@ -354,7 +355,7 @@ function renderSenderRow(s, onAction) {
 		: html`<button class="provider-btn provider-btn-sm" onClick=${() => onAction(identifier, "approve")}>Approve</button>`;
 	return html`<tr key=${s.peer_id}>
     <td class="senders-td">${s.sender_name || s.peer_id}</td>
-    <td class="senders-td" style="color:var(--muted);">${s.username ? `@${s.username}` : "\u2014"}</td>
+    <td class="senders-td" style="color:var(--muted);">${usernameLabel}</td>
     <td class="senders-td">${s.message_count}</td>
     <td class="senders-td" style="color:var(--muted);font-size:12px;">${lastSeenMs ? html`<time data-epoch-ms="${lastSeenMs}">${new Date(lastSeenMs).toISOString()}</time>` : "\u2014"}</td>
     <td class="senders-td">${statusBadge}</td>

@@ -222,7 +222,7 @@ When you add Matrix through the web UI:
 - encrypted Matrix chats require password auth
 - access-token auth is for plain Matrix traffic only, because Moltis cannot import the existing device's private E2EE keys from an access token
 - if Element starts device verification, Moltis accepts it and posts emoji confirmation instructions in the room
-- reply `verify yes`, `verify no`, `verify show`, or `verify cancel` in that Matrix chat to finish or inspect the verification flow
+- send `verify yes`, `verify no`, `verify show`, or `verify cancel` as normal messages in that same Matrix chat to finish or inspect the verification flow
 - older encrypted history may still be unreadable if this Moltis device joined after those keys were created
 
 If you want to inspect web-added channels directly, query the SQLite database:
@@ -370,9 +370,9 @@ seconds.
 
 - That is fine, encrypted rooms are supported
 - Make sure the Matrix account was added with password auth, not access-token auth
-- If the Moltis device is new, start Element verification with the bot
+- If the Moltis device is new, start a fresh Element verification with the bot
 - Moltis will accept the request and post emoji instructions in the chat
-- Reply `verify yes` if the emojis match, `verify no` if they do not
+- Send `verify yes` as a normal chat message if the emojis match, `verify no` if they do not
 - If older encrypted history still does not decrypt, resend the message after verification
 
 ### Access-token auth connects but encrypted messages do not decrypt
@@ -388,7 +388,8 @@ seconds.
 
 - Moltis should accept Matrix verification requests automatically
 - Watch the chat for the emoji confirmation prompt
-- If the prompt scrolled away, send `verify show`
+- If the prompt scrolled away, send `verify show` as a normal message in that same Matrix chat
+- If an older stale verification request was replayed from sync history, start a fresh verification in Element and then use the `verify ...` commands
 - If nothing happens, check the Matrix logs for verification events and try starting verification again
 
 ### Bot does not respond in rooms

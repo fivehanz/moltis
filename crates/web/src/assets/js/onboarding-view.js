@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import {
 	addChannel,
 	buildTeamsEndpoint,
-	CHANNEL_STORAGE_NOTE,
+	channelStorageNote,
 	defaultTeamsBaseUrl,
 	deriveMatrixAccountId,
 	fetchChannelStatus,
@@ -99,7 +99,7 @@ function ErrorPanel({ message }) {
 
 function ChannelStorageNotice() {
 	return html`<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)]">
-		<span class="font-medium text-[var(--text-strong)]">Storage note.</span> ${CHANNEL_STORAGE_NOTE}
+		<span class="font-medium text-[var(--text-strong)]">Storage note.</span> ${channelStorageNote()}
 	</div>`;
 }
 

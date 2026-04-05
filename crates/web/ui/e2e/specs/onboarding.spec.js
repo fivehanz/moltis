@@ -620,9 +620,7 @@ test.describe("Onboarding wizard", () => {
 			return;
 		}
 
-		await expect(
-			page.getByText("stored in Moltis's internal database (data_dir()/moltis.db)", { exact: false }),
-		).toBeVisible();
+		await expect(page.getByText(/stored in Moltis's internal database \(.+moltis\.db\)/)).toBeVisible();
 
 		const matrixSelectBtn = page.getByRole("button", { name: "Matrix", exact: true });
 		if (await isVisible(matrixSelectBtn)) {
