@@ -196,20 +196,46 @@ send_webhook() {
       ;;
   esac
 
+  if [[ -z "$SECRET" ]]; then
+    echo "Auth:    none (no --secret provided)"
+  fi
+  echo ""
+
+  echo "Request headers:"
+  for h in "${extra_headers[@]}"; do
+    echo "  $h"
+  done
   echo ""
   echo "Sending..."
   echo ""
 
-  local http_code
-  http_code=$(curl -s -o /dev/stderr -w "%{http_code}" \
+  local response http_code
+  response=$(curl -sk -w "\n__HTTP_CODE__%{http_code}" \
     -X POST "$URL" \
     -H "Content-Type: application/json" \
     "${extra_headers[@]}" \
     -d "$payload" 2>&1)
 
-  echo ""
+  http_code="${response##*__HTTP_CODE__}"
+  local body="${response%__HTTP_CODE__*}"
+
+  echo "Response body:"
+  echo "$body" | python3 -m json.tool 2>/dev/null || echo "$body"
   echo ""
   echo "HTTP Status: $http_code"
+
+  if [[ "$http_code" == "401" ]]; then
+    echo ""
+    echo "⚠  Auth failed. If your webhook uses 'static_header' auth mode,"
+    echo "   pass --secret <value> matching what you configured."
+    echo "   If your webhook uses 'none' auth, edit it in Settings → Webhooks."
+  elif [[ "$http_code" == "000" ]]; then
+    echo ""
+    echo "⚠  Connection failed. Check that:"
+    echo "   - The Moltis server is running"
+    echo "   - The URL is correct"
+    echo "   - For HTTPS, the certificate is valid (script uses -k to skip verification)"
+  fi
   echo "────────────────────────────────────────────"
   echo ""
 }
