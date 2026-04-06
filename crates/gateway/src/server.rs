@@ -1908,6 +1908,7 @@ pub async fn prepare_gateway_core(
     // Agent turn: run an LLM turn in a session determined by the job's session_target.
     let agent_state = Arc::clone(&deferred_state);
     let agent_events_queue = Arc::clone(&events_queue);
+    let global_auto_prune_containers = config.cron.auto_prune_cron_containers;
     let on_agent_turn: moltis_cron::service::AgentTurnFn = Arc::new(move |req| {
         let st = Arc::clone(&agent_state);
         let eq = Arc::clone(&agent_events_queue);
@@ -1943,6 +1944,7 @@ pub async fn prepare_gateway_core(
                         output: moltis_cron::heartbeat::HEARTBEAT_OK.to_string(),
                         input_tokens: None,
                         output_tokens: None,
+                        session_key: None,
                     });
                 }
             }
@@ -2015,8 +2017,23 @@ pub async fn prepare_gateway_core(
                 .await
                 .map_err(|e| moltis_cron::Error::message(e.to_string()));
 
-            // Clean up sandbox overrides.
-            if let Some(ref router) = state.sandbox_router {
+            // Auto-prune sandbox container if configured (before clearing overrides).
+            let auto_prune = req
+                .sandbox
+                .auto_prune_container
+                .unwrap_or(global_auto_prune_containers);
+            if req.sandbox.enabled && auto_prune {
+                if let Some(ref router) = state.sandbox_router
+                    && let Err(e) = router.cleanup_session(&session_key).await
+                {
+                    tracing::debug!(
+                        session_key = %session_key,
+                        error = %e,
+                        "cron sandbox container cleanup failed"
+                    );
+                }
+            } else if let Some(ref router) = state.sandbox_router {
+                // Just clean up sandbox overrides (not the container).
                 router.remove_override(&session_key).await;
                 router.remove_image_override(&session_key).await;
             }
@@ -2048,6 +2065,7 @@ pub async fn prepare_gateway_core(
                 output: text,
                 input_tokens,
                 output_tokens,
+                session_key: Some(session_key),
             })
         })
     });
@@ -2088,6 +2106,7 @@ pub async fn prepare_gateway_core(
         window_ms: config.cron.rate_limit_window_secs * 1000,
     };
 
+    let cron_store_for_pruning = Arc::clone(&cron_store);
     let cron_service = moltis_cron::service::CronService::with_events_queue(
         cron_store,
         on_system_event,
@@ -2385,6 +2404,71 @@ pub async fn prepare_gateway_core(
                         "startup GC: cleaned orphaned session containers"
                     ),
                     Err(e) => debug!("startup GC: container cleanup skipped: {e}"),
+                }
+            }
+        });
+    }
+
+    // Periodic cron session retention pruning.
+    if let Some(retention_days) = config.cron.session_retention_days
+        && retention_days > 0
+    {
+        let prune_store = Arc::clone(&cron_store_for_pruning);
+        let prune_session_store = Arc::clone(&session_store);
+        let prune_session_metadata = Arc::clone(&session_metadata);
+        let prune_sandbox = Arc::clone(&sandbox_router);
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(60 * 60); // hourly
+            loop {
+                tokio::time::sleep(interval).await;
+                let retention_ms = retention_days * 24 * 60 * 60 * 1000;
+                let cutoff_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let before_ms = cutoff_ms.saturating_sub(retention_ms);
+
+                // Collect session keys from old runs before pruning.
+                let session_keys = match prune_store.list_session_keys_before(before_ms).await {
+                    Ok(keys) => keys,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "cron session pruning: failed to list session keys");
+                        Vec::new()
+                    },
+                };
+
+                // Clean up sessions and their sandbox containers.
+                let mut cleaned = 0u64;
+                for key in &session_keys {
+                    // Skip named cron sessions (they are reused).
+                    if !key.starts_with("cron:") {
+                        continue;
+                    }
+                    // Clear session file.
+                    if let Err(e) = prune_session_store.clear(key).await {
+                        tracing::debug!(key, error = %e, "cron prune: failed to clear session");
+                    }
+                    // Remove session metadata.
+                    prune_session_metadata.remove(key).await;
+                    // Clean up sandbox container.
+                    if let Err(e) = prune_sandbox.cleanup_session(key).await {
+                        tracing::debug!(key, error = %e, "cron prune: sandbox cleanup failed");
+                    }
+                    cleaned += 1;
+                }
+
+                // Prune old run records.
+                match prune_store.prune_runs_before(before_ms).await {
+                    Ok(0) => {},
+                    Ok(n) => tracing::info!(
+                        pruned_runs = n,
+                        pruned_sessions = cleaned,
+                        retention_days,
+                        "cron retention: pruned old runs and sessions"
+                    ),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "cron retention: failed to prune runs")
+                    },
                 }
             }
         });

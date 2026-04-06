@@ -536,6 +536,17 @@ prometheus_endpoint = true        # Expose /metrics endpoint for Prometheus scra
                                   # Additional labels to add to all metrics
 
 # ══════════════════════════════════════════════════════════════════════════════
+# CRON
+# ══════════════════════════════════════════════════════════════════════════════
+# Settings for the cron scheduler.
+
+# [cron]
+# rate_limit_max = 10                # Max jobs created per rate limit window
+# rate_limit_window_secs = 60        # Rate limit window in seconds
+# session_retention_days = 7         # Auto-clean cron sessions older than N days (0 or omit to disable)
+# auto_prune_cron_containers = true  # Auto-remove sandbox containers after cron job completion
+
+# ══════════════════════════════════════════════════════════════════════════════
 # HEARTBEAT
 # ══════════════════════════════════════════════════════════════════════════════
 # Periodic health-check agent turns to keep the agent "alive" and responsive.

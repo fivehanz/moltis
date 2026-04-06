@@ -533,6 +533,8 @@ fn build_schema_map() -> KnownKeys {
             Struct(HashMap::from([
                 ("rate_limit_max", Leaf),
                 ("rate_limit_window_secs", Leaf),
+                ("session_retention_days", Leaf),
+                ("auto_prune_cron_containers", Leaf),
             ])),
         ),
         ("env", Map(Box::new(Leaf))),

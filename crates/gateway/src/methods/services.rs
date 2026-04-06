@@ -1695,6 +1695,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                             sandbox: Some(moltis_cron::types::CronSandboxConfig {
                                 enabled: patch.sandbox_enabled,
                                 image: patch.sandbox_image.clone(),
+                                auto_prune_container: None,
                             }),
                             ..Default::default()
                         };
@@ -1731,6 +1732,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                             sandbox: moltis_cron::types::CronSandboxConfig {
                                 enabled: patch.sandbox_enabled,
                                 image: patch.sandbox_image.clone(),
+                                auto_prune_container: None,
                             },
                             wake_mode: moltis_cron::types::CronWakeMode::default(),
                         };

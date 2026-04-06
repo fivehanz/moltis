@@ -1766,6 +1766,7 @@ pub async fn prepare_gateway(
                     sandbox: Some(moltis_cron::types::CronSandboxConfig {
                         enabled: hb.sandbox_enabled,
                         image: hb.sandbox_image.clone(),
+                        auto_prune_container: None,
                     }),
                     ..Default::default()
                 };
@@ -1797,6 +1798,7 @@ pub async fn prepare_gateway(
                     sandbox: moltis_cron::types::CronSandboxConfig {
                         enabled: hb.sandbox_enabled,
                         image: hb.sandbox_image.clone(),
+                        auto_prune_container: None,
                     },
                     wake_mode: moltis_cron::types::CronWakeMode::default(),
                 };

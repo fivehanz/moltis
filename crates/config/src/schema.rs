@@ -967,6 +967,14 @@ pub struct CronConfig {
     pub rate_limit_max: usize,
     /// Rate limit window in seconds. Defaults to 60 (1 minute).
     pub rate_limit_window_secs: u64,
+    /// Number of days to retain cron session data before auto-cleanup.
+    /// Set to `None` (or 0) to disable retention pruning. Defaults to 7 days.
+    pub session_retention_days: Option<u64>,
+    /// Whether to auto-prune sandbox containers after cron job completion.
+    /// Per-job `auto_prune_container` overrides this global default.
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub auto_prune_cron_containers: bool,
 }
 
 impl Default for CronConfig {
@@ -974,6 +982,8 @@ impl Default for CronConfig {
         Self {
             rate_limit_max: 10,
             rate_limit_window_secs: 60,
+            session_retention_days: Some(7),
+            auto_prune_cron_containers: true,
         }
     }
 }
