@@ -64,7 +64,7 @@ struct GithubTokenResponse {
 
 #[derive(serde::Deserialize)]
 struct CopilotTokenResponse {
-    token: String,
+    token: Secret<String>,
     expires_at: u64,
     /// Enterprise accounts return a proxy endpoint hostname (e.g.
     /// `proxy.enterprise.githubcopilot.com`). When present, all API
@@ -315,7 +315,7 @@ async fn fetch_copilot_auth(
 
     let copilot_resp: CopilotTokenResponse = resp.json().await?;
     let _ = token_store.save("github-copilot-api", &OAuthTokens {
-        access_token: Secret::new(copilot_resp.token.clone()),
+        access_token: copilot_resp.token.clone(),
         refresh_token: None,
         id_token: None,
         // NOTE: account_id is repurposed here to persist the enterprise
@@ -325,7 +325,7 @@ async fn fetch_copilot_auth(
     });
 
     Ok(copilot_auth_from_parts(
-        Secret::new(copilot_resp.token),
+        copilot_resp.token,
         copilot_resp.proxy_ep.as_deref(),
     ))
 }
@@ -444,7 +444,10 @@ async fn fetch_models_from_api(
 ) -> anyhow::Result<Vec<super::DiscoveredModel>> {
     let response = client
         .get(format!("{}/models", auth.base_url))
-        .header("Authorization", format!("Bearer {}", auth.token.expose_secret()))
+        .header(
+            "Authorization",
+            format!("Bearer {}", auth.token.expose_secret()),
+        )
         .header("Accept", "application/json")
         .header("Editor-Version", EDITOR_VERSION)
         .header("User-Agent", COPILOT_USER_AGENT)
@@ -555,7 +558,10 @@ async fn collect_streamed_completion(
 
     let http_resp = client
         .post(format!("{}/chat/completions", auth.base_url))
-        .header("Authorization", format!("Bearer {}", auth.token.expose_secret()))
+        .header(
+            "Authorization",
+            format!("Bearer {}", auth.token.expose_secret()),
+        )
         .header("content-type", "application/json")
         .header("Editor-Version", EDITOR_VERSION)
         .header("User-Agent", COPILOT_USER_AGENT)
@@ -614,19 +620,18 @@ async fn collect_streamed_completion(
 
     // Process any trailing data in the buffer.
     let line = buf.trim().to_string();
-    if !line.is_empty() {
-        if let Some(data) = line
+    if !line.is_empty()
+        && let Some(data) = line
             .strip_prefix("data: ")
             .or_else(|| line.strip_prefix("data:"))
-        {
-            match process_openai_sse_line(data, &mut state) {
-                SseLineResult::Done => {
-                    events.extend(finalize_stream(&mut state));
-                    return Ok(stream_events_to_completion(events));
-                },
-                SseLineResult::Events(evts) => events.extend(evts),
-                SseLineResult::Skip => {},
-            }
+    {
+        match process_openai_sse_line(data, &mut state) {
+            SseLineResult::Done => {
+                events.extend(finalize_stream(&mut state));
+                return Ok(stream_events_to_completion(events));
+            },
+            SseLineResult::Events(evts) => events.extend(evts),
+            SseLineResult::Skip => {},
         }
     }
     events.extend(finalize_stream(&mut state));
@@ -761,7 +766,10 @@ impl LlmProvider for GitHubCopilotProvider {
         let http_resp = self
             .client
             .post(format!("{}/chat/completions", auth.base_url))
-            .header("Authorization", format!("Bearer {}", auth.token.expose_secret()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", auth.token.expose_secret()),
+            )
             .header("content-type", "application/json")
             .header("Editor-Version", EDITOR_VERSION)
             .header("User-Agent", COPILOT_USER_AGENT)
@@ -867,7 +875,10 @@ impl GitHubCopilotProvider {
         let http_resp = self
             .client
             .post(format!("{}/responses", auth.base_url))
-            .header("Authorization", format!("Bearer {}", auth.token.expose_secret()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", auth.token.expose_secret()),
+            )
             .header("content-type", "application/json")
             .header("Editor-Version", EDITOR_VERSION)
             .header("User-Agent", COPILOT_USER_AGENT)
@@ -1693,7 +1704,7 @@ mod tests {
             "proxy-ep": "proxy.enterprise.githubcopilot.com"
         }"#;
         let resp: CopilotTokenResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.token, "tok_abc");
+        assert_eq!(resp.token.expose_secret(), "tok_abc");
         assert_eq!(resp.expires_at, 1700000000);
         assert_eq!(
             resp.proxy_ep.as_deref(),
@@ -1717,8 +1728,10 @@ mod tests {
 
     #[test]
     fn copilot_auth_from_parts_enterprise() {
-        let auth =
-            copilot_auth_from_parts(Secret::new("tok".into()), Some("proxy.enterprise.githubcopilot.com"));
+        let auth = copilot_auth_from_parts(
+            Secret::new("tok".into()),
+            Some("proxy.enterprise.githubcopilot.com"),
+        );
         assert_eq!(auth.base_url, "https://proxy.enterprise.githubcopilot.com");
         assert!(auth.is_enterprise);
     }
@@ -1902,12 +1915,7 @@ mod tests {
         // Start a mock that returns 500 for /chat/completions.
         let app = Router::new().route(
             "/chat/completions",
-            post(|| async {
-                (
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error",
-                )
-            }),
+            post(|| async { (http::StatusCode::INTERNAL_SERVER_ERROR, "internal error") }),
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1936,7 +1944,7 @@ mod tests {
     #[test]
     fn copilot_token_response_debug_redacts_token() {
         let resp = CopilotTokenResponse {
-            token: "super-secret-token".into(),
+            token: Secret::new("super-secret-token".into()),
             expires_at: 1700000000,
             proxy_ep: Some("proxy.enterprise.githubcopilot.com".into()),
         };
@@ -2160,5 +2168,34 @@ mod tests {
         assert!(ids.contains(&"gpt-5.4"), "missing gpt-5.4");
         assert!(ids.contains(&"gpt-5.4-pro"), "missing gpt-5.4-pro");
         assert!(ids.contains(&"gpt-5.2-pro"), "missing gpt-5.2-pro");
+    }
+
+    #[tokio::test]
+    async fn complete_responses_uses_enterprise_base_url() {
+        // Verify that complete_responses routes to /responses on the
+        // enterprise base URL (not the hardcoded individual endpoint).
+        let (base_url, chat_captured, responses_captured) = start_mock_with_both_endpoints(
+            mock_completion_response(),
+            mock_responses_api_response(),
+        )
+        .await;
+        // Use a Responses-API model so needs_responses_api() returns true.
+        let provider = mock_provider(&base_url, "gpt-5.4");
+
+        let messages = vec![ChatMessage::User {
+            content: moltis_agents::model::UserContent::Text("hello".into()),
+        }];
+        let resp = provider.complete_responses(&messages, &[]).await.unwrap();
+        assert_eq!(resp.text.as_deref(), Some("Hello from Responses API!"));
+
+        // /responses must have been called, NOT /chat/completions.
+        let responses_reqs = responses_captured.lock().unwrap();
+        assert_eq!(responses_reqs.len(), 1, "expected 1 request to /responses");
+        let chat_reqs = chat_captured.lock().unwrap();
+        assert_eq!(
+            chat_reqs.len(),
+            0,
+            "/chat/completions should not be called for gpt-5.4"
+        );
     }
 }
