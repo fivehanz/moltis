@@ -827,7 +827,7 @@ test.describe("Settings navigation", () => {
 				},
 			});
 			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			await channelsPage.prefetchChannels();
 		});
 
 		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();
@@ -911,7 +911,7 @@ test.describe("Settings navigation", () => {
 				},
 			});
 			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			await channelsPage.prefetchChannels();
 		});
 
 		await expect(page.getByText("Moltis ownership blocked", { exact: true })).toBeVisible();
@@ -997,7 +997,7 @@ test.describe("Settings navigation", () => {
 				},
 			});
 			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			await channelsPage.prefetchChannels();
 		});
 
 		await expect(page.getByText("Ownership approval required", { exact: true })).toBeVisible();
@@ -1099,7 +1099,7 @@ test.describe("Settings navigation", () => {
 				},
 			});
 			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			await channelsPage.prefetchChannels();
 		});
 
 		await page.getByRole("button", { name: "Senders", exact: true }).click();

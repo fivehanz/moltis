@@ -37,7 +37,7 @@ import { ConfirmDialog, Modal, ModelSelect, requestConfirm, showToast } from "./
 var channels = signal([]);
 
 export function prefetchChannels() {
-	fetchChannelStatus().then((res) => {
+	return fetchChannelStatus().then((res) => {
 		if (res?.ok) {
 			var ch = res.payload?.channels || [];
 			channels.value = ch;
