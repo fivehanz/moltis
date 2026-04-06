@@ -1131,7 +1131,7 @@ pub async fn prepare_gateway(
                       body: axum::body::Bytes| {
                     let gw = Arc::clone(&state_for_webhook_ingest);
                     async move {
-                        let Some(ref store) = gw.webhook_store else {
+                        let Some(store) = gw.webhook_store.get() else {
                             return (
                                 StatusCode::NOT_FOUND,
                                 Json(serde_json::json!({ "error": "webhooks not configured" })),
@@ -1329,7 +1329,7 @@ pub async fn prepare_gateway(
                         }
 
                         // Queue for async processing.
-                        if let Some(ref tx) = gw.webhook_worker_tx {
+                        if let Some(tx) = gw.webhook_worker_tx.get() {
                             if let Err(e) = tx.send(delivery_id).await {
                                 tracing::error!(
                                     delivery_id,

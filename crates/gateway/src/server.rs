@@ -3239,7 +3239,7 @@ pub async fn prepare_gateway_core(
 
     let pairing_store = Arc::new(crate::pairing::PairingStore::new(db_pool.clone()));
 
-    let mut state = GatewayState::with_options(
+    let state = GatewayState::with_options(
         resolved_auth,
         services,
         Some(Arc::clone(&sandbox_router)),
@@ -3262,13 +3262,11 @@ pub async fn prepare_gateway_core(
         vault.clone(),
     );
 
-    // Wire webhook store and worker into gateway state (before Arc is shared).
+    // Wire webhook store and worker into gateway state.
     {
         let (webhook_tx, webhook_rx) = tokio::sync::mpsc::channel::<i64>(256);
-        if let Some(s) = Arc::get_mut(&mut state) {
-            s.webhook_store = Some(Arc::clone(&webhook_store));
-            s.webhook_worker_tx = Some(webhook_tx);
-        }
+        let _ = state.webhook_store.set(Arc::clone(&webhook_store));
+        let _ = state.webhook_worker_tx.set(webhook_tx);
 
         // Spawn webhook background worker.
         let worker_store = Arc::clone(&webhook_store);
