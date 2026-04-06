@@ -643,6 +643,139 @@ async fn collect_streamed_completion(
     Ok(stream_events_to_completion(events))
 }
 
+fn extend_responses_events_or_error(
+    events: &mut Vec<StreamEvent>,
+    new_events: Vec<StreamEvent>,
+) -> anyhow::Result<()> {
+    for event in new_events {
+        if let StreamEvent::Error(msg) = &event {
+            anyhow::bail!("{msg}");
+        }
+        events.push(event);
+    }
+    Ok(())
+}
+
+async fn collect_streamed_responses_completion(
+    client: &reqwest::Client,
+    auth: &CopilotAuth,
+    model: &str,
+    messages: &[ChatMessage],
+    tools: &[serde_json::Value],
+) -> anyhow::Result<CompletionResponse> {
+    let (instructions, input) = split_responses_instructions_and_input(messages.to_vec());
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "stream": true,
+        "input": input,
+    });
+    if let Some(instructions) = instructions {
+        body["instructions"] = serde_json::Value::String(instructions);
+    }
+    if !tools.is_empty() {
+        body["tools"] = serde_json::Value::Array(to_responses_api_tools(tools));
+        body["tool_choice"] = serde_json::json!("auto");
+    }
+
+    let http_resp = client
+        .post(format!("{}/responses", auth.base_url))
+        .header(
+            "Authorization",
+            format!("Bearer {}", auth.token.expose_secret()),
+        )
+        .header("content-type", "application/json")
+        .header("Editor-Version", EDITOR_VERSION)
+        .header("User-Agent", COPILOT_USER_AGENT)
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = http_resp.status();
+    if !status.is_success() {
+        let retry_after_ms = super::retry_after_ms_from_headers(http_resp.headers());
+        let body_text = http_resp.text().await.unwrap_or_default();
+        warn!(status = %status, body = %body_text, "github-copilot enterprise responses API error");
+        anyhow::bail!(
+            "{}",
+            super::with_retry_after_marker(
+                format!("GitHub Copilot Responses API error HTTP {status}: {body_text}"),
+                retry_after_ms,
+            )
+        );
+    }
+
+    let mut byte_stream = http_resp.bytes_stream();
+    let mut buf = String::new();
+    let mut state = ResponsesStreamState::default();
+    let mut events: Vec<StreamEvent> = Vec::new();
+
+    while let Some(chunk) = byte_stream.next().await {
+        let chunk = chunk?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+
+        let mut offset = 0usize;
+        while let Some(pos) = buf[offset..].find('\n') {
+            let pos = offset + pos;
+            let line = buf[offset..pos].trim();
+            offset = pos + 1;
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let Some(data) = line
+                .strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
+            else {
+                continue;
+            };
+
+            match process_responses_sse_line(data, &mut state) {
+                SseLineResult::Done => {
+                    extend_responses_events_or_error(
+                        &mut events,
+                        finalize_responses_stream(&mut state),
+                    )?;
+                    return Ok(stream_events_to_completion(events));
+                },
+                SseLineResult::Events(new_events) => {
+                    extend_responses_events_or_error(&mut events, new_events)?;
+                },
+                SseLineResult::Skip => {},
+            }
+        }
+        if offset > 0 {
+            buf.drain(..offset);
+        }
+    }
+
+    // Process any trailing data in the buffer.
+    let line = buf.trim();
+    if !line.is_empty()
+        && let Some(data) = line
+            .strip_prefix("data: ")
+            .or_else(|| line.strip_prefix("data:"))
+    {
+        match process_responses_sse_line(data, &mut state) {
+            SseLineResult::Done => {
+                extend_responses_events_or_error(
+                    &mut events,
+                    finalize_responses_stream(&mut state),
+                )?;
+                return Ok(stream_events_to_completion(events));
+            },
+            SseLineResult::Events(new_events) => {
+                extend_responses_events_or_error(&mut events, new_events)?;
+            },
+            SseLineResult::Skip => {},
+        }
+    }
+
+    extend_responses_events_or_error(&mut events, finalize_responses_stream(&mut state))?;
+    Ok(stream_events_to_completion(events))
+}
+
 /// Collapse a collected list of [`StreamEvent`]s into a [`CompletionResponse`].
 fn stream_events_to_completion(events: Vec<StreamEvent>) -> CompletionResponse {
     let mut text_parts: Vec<String> = Vec::new();
@@ -854,6 +987,17 @@ impl GitHubCopilotProvider {
         tools: &[serde_json::Value],
     ) -> anyhow::Result<CompletionResponse> {
         let auth = self.get_copilot_auth().await?;
+
+        if auth.is_enterprise {
+            return collect_streamed_responses_completion(
+                self.client,
+                &auth,
+                &self.model,
+                messages,
+                tools,
+            )
+            .await;
+        }
 
         let (instructions, input) = split_responses_instructions_and_input(messages.to_vec());
 
@@ -1818,11 +1962,69 @@ mod tests {
         (format!("http://{addr}"), captured)
     }
 
+    async fn start_streaming_responses_mock_with_capture(
+        sse_body: String,
+    ) -> (String, Arc<Mutex<Vec<CapturedRequest>>>) {
+        let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+
+        let app = Router::new().route(
+            "/responses",
+            post(move |req: Request| {
+                let cap = captured_clone.clone();
+                let body_data = sse_body.clone();
+                async move {
+                    let headers: Vec<(String, String)> = req
+                        .headers()
+                        .iter()
+                        .map(|(k, v)| {
+                            (k.as_str().to_string(), v.to_str().unwrap_or("").to_string())
+                        })
+                        .collect();
+
+                    let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap_or_default();
+                    let body: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
+
+                    cap.lock().unwrap().push(CapturedRequest { headers, body });
+
+                    (
+                        [(
+                            http::header::CONTENT_TYPE,
+                            "text/event-stream; charset=utf-8",
+                        )],
+                        body_data,
+                    )
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        (format!("http://{addr}"), captured)
+    }
+
     fn mock_streaming_sse() -> String {
         [
             r#"data: {"choices":[{"delta":{"role":"assistant","content":"Hello"}}]}"#,
             r#"data: {"choices":[{"delta":{"content":" world"}}]}"#,
             r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n\n")
+    }
+
+    fn mock_responses_streaming_sse() -> String {
+        [
+            r#"data: {"type":"response.output_text.delta","delta":"Hello from "}"#,
+            r#"data: {"type":"response.output_text.delta","delta":"Responses stream"}"#,
+            r#"data: {"type":"response.completed","response":{"usage":{"input_tokens":12,"output_tokens":4}}}"#,
             "data: [DONE]",
             "",
         ]
@@ -2019,6 +2221,37 @@ mod tests {
         assert_eq!(resp.text.as_deref(), Some("partial"));
     }
 
+    #[tokio::test]
+    async fn enterprise_complete_responses_uses_streaming_and_collects() {
+        let sse = mock_responses_streaming_sse();
+        let (base_url, captured) = start_streaming_responses_mock_with_capture(sse).await;
+
+        let auth = CopilotAuth {
+            token: Secret::new("ent-token".into()),
+            base_url,
+            is_enterprise: true,
+        };
+
+        let client = reqwest::Client::new();
+        let messages = vec![ChatMessage::User {
+            content: moltis_agents::model::UserContent::Text("hello".into()),
+        }];
+        let resp = collect_streamed_responses_completion(&client, &auth, "gpt-5.4", &messages, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(resp.text.as_deref(), Some("Hello from Responses stream"));
+        assert!(resp.tool_calls.is_empty());
+        assert_eq!(resp.usage.input_tokens, 12);
+        assert_eq!(resp.usage.output_tokens, 4);
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        let body = reqs[0].body.as_ref().unwrap();
+        assert_eq!(body["model"], "gpt-5.4");
+        assert_eq!(body["stream"], true);
+    }
+
     // ── Responses API tests ─────────────────────────────────────────────────
 
     #[test]
@@ -2176,9 +2409,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_responses_uses_enterprise_base_url() {
-        // Verify that complete_responses routes to /responses on the
-        // enterprise base URL (not the hardcoded individual endpoint).
+    async fn mock_complete_responses_uses_supplied_base_url() {
+        // MockCopilotProvider bypasses token-store auth resolution, so this
+        // only validates /responses URL routing for the supplied base URL.
         let (base_url, chat_captured, responses_captured) = start_mock_with_both_endpoints(
             mock_completion_response(),
             mock_responses_api_response(),
