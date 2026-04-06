@@ -90,19 +90,17 @@ function WebhooksPage() {
 
 function WebhooksListPanel() {
   return html`
-    <div class="p-5">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-sm font-semibold text-[var(--text-strong)]">
-          Webhooks
-        </h2>
+    <div class="p-4 flex flex-col gap-4">
+      <div class="flex items-center gap-3">
+        <h2 class="text-lg font-medium text-[var(--text-strong)]">Webhooks</h2>
         <button
-          class="provider-btn provider-btn-sm"
+          class="provider-btn"
           onClick=${() => {
             editingWebhook.value = null;
             showCreateModal.value = true;
           }}
         >
-          Create webhook
+          + Create webhook
         </button>
       </div>
 
@@ -116,7 +114,7 @@ function WebhooksListPanel() {
             )}
           </div>`}
 
-      <div class="text-xs text-[var(--muted)] mt-4">
+      <div class="text-xs text-[var(--muted)]">
         Test your webhooks with
         <a href="https://hoppscotch.io" target="_blank" rel="noopener"
           class="text-[var(--accent)] underline">Hoppscotch</a> — send POST requests with custom headers and JSON bodies, no signup needed.
@@ -225,17 +223,17 @@ function DeliveriesPanel() {
   var name = wh?.name || "Webhook";
 
   return html`
-    <div class="p-5">
-      <div class="flex items-center gap-3 mb-4">
+    <div class="p-4 flex flex-col gap-4">
+      <div class="flex items-center gap-3">
         <button
-          class="provider-btn provider-btn-sm provider-btn-secondary"
+          class="provider-btn provider-btn-secondary"
           onClick=${() => {
             viewingDeliveries.value = null;
           }}
         >
           Back
         </button>
-        <h2 class="text-sm font-semibold text-[var(--text-strong)]">
+        <h2 class="text-lg font-medium text-[var(--text-strong)]">
           ${name} — Deliveries
         </h2>
       </div>
