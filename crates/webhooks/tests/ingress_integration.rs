@@ -1,0 +1,447 @@
+//! Integration tests for the webhook ingress flow.
+//!
+//! Simulates the full pipeline: lookup → auth → profile parsing → event filter
+//! → dedup → persist delivery, without the HTTP server.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use axum::http::HeaderMap;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use sqlx::SqlitePool;
+
+use moltis_webhooks::{
+    auth,
+    dedup,
+    profiles::{ProfileRegistry, SourceProfile},
+    store::{NewDelivery, SqliteWebhookStore, WebhookStore},
+    types::{AuthMode, DeliveryStatus, EventFilter, SessionMode, WebhookCreate},
+};
+
+type HmacSha256 = Hmac<Sha256>;
+
+async fn setup() -> SqliteWebhookStore {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    moltis_webhooks::run_migrations(&pool).await.unwrap();
+    SqliteWebhookStore::with_pool(pool)
+}
+
+fn make_headers(pairs: &[(&str, &str)]) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (k, v) in pairs {
+        headers.insert(
+            axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+            axum::http::HeaderValue::from_str(v).unwrap(),
+        );
+    }
+    headers
+}
+
+fn github_hmac_sig(secret: &str, body: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(body);
+    let sig = hex::encode(mac.finalize().into_bytes());
+    format!("sha256={sig}")
+}
+
+// ── Full GitHub PR ingress flow ────────────────────────────────────────
+
+#[tokio::test]
+async fn test_github_pr_ingress_full_flow() {
+    let store = setup().await;
+    let secret = "test-secret-123";
+
+    // 1. Create a GitHub webhook
+    let wh = store
+        .create_webhook(WebhookCreate {
+            name: "GitHub PR Review".into(),
+            description: Some("Reviews pull requests".into()),
+            agent_id: Some("code-reviewer".into()),
+            model: None,
+            system_prompt_suffix: Some("Focus on security issues.".into()),
+            tool_policy: None,
+            auth_mode: AuthMode::GithubHmacSha256,
+            auth_config: Some(serde_json::json!({ "secret": secret })),
+            source_profile: "github".into(),
+            source_config: None,
+            event_filter: EventFilter {
+                allow: vec![
+                    "pull_request.opened".into(),
+                    "pull_request.synchronize".into(),
+                ],
+                deny: vec![],
+            },
+            session_mode: SessionMode::PerEntity,
+            named_session_key: None,
+            allowed_cidrs: vec![],
+            max_body_bytes: 1_048_576,
+            rate_limit_per_minute: 60,
+        })
+        .await
+        .unwrap();
+
+    assert!(wh.public_id.starts_with("wh_"));
+    assert!(wh.enabled);
+
+    // 2. Simulate an inbound GitHub PR opened event
+    let body = serde_json::to_vec(&serde_json::json!({
+        "action": "opened",
+        "number": 42,
+        "pull_request": {
+            "number": 42,
+            "title": "Add webhook support",
+            "user": { "login": "testuser" },
+            "head": { "ref": "feature/webhooks" },
+            "base": { "ref": "main" },
+            "html_url": "https://github.com/example/repo/pull/42",
+            "body": "This PR adds webhook support.",
+            "draft": false,
+            "additions": 500,
+            "deletions": 50,
+            "changed_files": 20
+        },
+        "repository": {
+            "full_name": "example/repo",
+            "html_url": "https://github.com/example/repo"
+        },
+        "sender": { "login": "testuser" }
+    }))
+    .unwrap();
+
+    let delivery_id = "test-delivery-001";
+    let sig = github_hmac_sig(secret, &body);
+    let headers = make_headers(&[
+        ("x-github-event", "pull_request"),
+        ("x-github-delivery", delivery_id),
+        ("x-hub-signature-256", &sig),
+        ("content-type", "application/json"),
+    ]);
+
+    // 3. Verify auth
+    let verify_result = auth::verify(&wh.auth_mode, wh.auth_config.as_ref(), &headers, &body);
+    assert!(verify_result.is_ok(), "auth should pass with correct HMAC");
+
+    // 4. Parse event type and delivery key via profile
+    let registry = ProfileRegistry::new();
+    let profile = registry.get("github").expect("github profile exists");
+    let event_type = profile.parse_event_type(&headers, &body);
+    assert_eq!(event_type.as_deref(), Some("pull_request.opened"));
+
+    let delivery_key = profile.parse_delivery_key(&headers, &body);
+    assert_eq!(delivery_key.as_deref(), Some(delivery_id));
+
+    // 5. Check event filter
+    assert!(wh.event_filter.accepts("pull_request.opened"));
+    assert!(!wh.event_filter.accepts("push")); // not in allow list
+
+    // 6. Check dedup (should be None for first delivery)
+    let dup = dedup::check_duplicate(&store, wh.id, delivery_key.as_deref())
+        .await
+        .unwrap();
+    assert!(dup.is_none(), "first delivery should not be a duplicate");
+
+    // 7. Extract entity key
+    let body_val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entity_key = profile.entity_key("pull_request.opened", &body_val);
+    assert_eq!(entity_key.as_deref(), Some("github:example/repo:pr:42"));
+
+    // 8. Persist delivery
+    let did = store
+        .insert_delivery(&NewDelivery {
+            webhook_id: wh.id,
+            received_at: "2026-04-07T12:00:00Z".into(),
+            status: DeliveryStatus::Queued,
+            event_type: event_type.clone(),
+            entity_key: entity_key.clone(),
+            delivery_key: delivery_key.clone(),
+            http_method: Some("POST".into()),
+            content_type: Some("application/json".into()),
+            remote_ip: Some("192.0.2.1".into()),
+            headers_json: None,
+            body_size: body.len(),
+            body_blob: Some(body.clone()),
+            rejection_reason: None,
+        })
+        .await
+        .unwrap();
+
+    // Increment count
+    store
+        .increment_delivery_count(wh.id, "2026-04-07T12:00:00Z")
+        .await
+        .unwrap();
+
+    // 9. Verify delivery was persisted
+    let delivery = store.get_delivery(did).await.unwrap();
+    assert_eq!(delivery.status, DeliveryStatus::Queued);
+    assert_eq!(delivery.event_type.as_deref(), Some("pull_request.opened"));
+    assert_eq!(
+        delivery.entity_key.as_deref(),
+        Some("github:example/repo:pr:42")
+    );
+
+    // 10. Verify dedup now catches the duplicate
+    let dup2 = dedup::check_duplicate(&store, wh.id, delivery_key.as_deref())
+        .await
+        .unwrap();
+    assert_eq!(dup2, Some(did), "second delivery with same key is a duplicate");
+
+    // 11. Verify body can be retrieved
+    let stored_body = store.get_delivery_body(did).await.unwrap();
+    assert!(stored_body.is_some());
+    assert_eq!(stored_body.unwrap(), body);
+
+    // 12. Check webhook delivery count was incremented
+    let updated_wh = store.get_webhook(wh.id).await.unwrap();
+    assert_eq!(updated_wh.delivery_count, 1);
+
+    // 13. Verify normalization produces useful output
+    let normalized = profile.normalize_payload("pull_request.opened", &body_val);
+    assert!(normalized.summary.contains("pull_request.opened"));
+    assert!(normalized.summary.contains("example/repo"));
+    assert!(normalized.summary.contains("PR #42"));
+    assert!(normalized.summary.contains("Add webhook support"));
+    assert!(normalized.summary.contains("@testuser"));
+
+    // 14. Verify the delivery message builder works
+    let message = moltis_webhooks::normalize::build_delivery_message(
+        &wh,
+        Some("pull_request.opened"),
+        Some(delivery_id),
+        "2026-04-07T12:00:00Z",
+        &normalized.summary,
+    );
+    assert!(message.contains("Webhook delivery received."));
+    assert!(message.contains("GitHub PR Review"));
+    assert!(message.contains("github"));
+    assert!(message.contains("Focus on security issues.")); // system prompt suffix
+}
+
+// ── Auth rejection ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_github_auth_rejects_bad_signature() {
+    let secret = "real-secret";
+    let body = b"test body";
+
+    // Sign with wrong secret
+    let bad_sig = github_hmac_sig("wrong-secret", body);
+    let headers = make_headers(&[
+        ("x-github-event", "push"),
+        ("x-hub-signature-256", &bad_sig),
+    ]);
+
+    let config = serde_json::json!({ "secret": secret });
+    let result = auth::verify(&AuthMode::GithubHmacSha256, Some(&config), &headers, body);
+    assert!(result.is_err(), "bad signature should be rejected");
+}
+
+#[tokio::test]
+async fn test_static_header_auth_flow() {
+    let store = setup().await;
+
+    let wh = store
+        .create_webhook(WebhookCreate {
+            name: "Generic Hook".into(),
+            description: None,
+            agent_id: None,
+            model: None,
+            system_prompt_suffix: None,
+            tool_policy: None,
+            auth_mode: AuthMode::StaticHeader,
+            auth_config: Some(serde_json::json!({ "header": "x-webhook-secret", "value": "my-token" })),
+            source_profile: "generic".into(),
+            source_config: None,
+            event_filter: EventFilter::default(),
+            session_mode: SessionMode::PerDelivery,
+            named_session_key: None,
+            allowed_cidrs: vec![],
+            max_body_bytes: 1_048_576,
+            rate_limit_per_minute: 60,
+        })
+        .await
+        .unwrap();
+
+    // Good token
+    let good_headers = make_headers(&[("x-webhook-secret", "my-token")]);
+    assert!(auth::verify(&wh.auth_mode, wh.auth_config.as_ref(), &good_headers, b"{}").is_ok());
+
+    // Bad token
+    let bad_headers = make_headers(&[("x-webhook-secret", "wrong")]);
+    assert!(auth::verify(&wh.auth_mode, wh.auth_config.as_ref(), &bad_headers, b"{}").is_err());
+
+    // Missing header
+    let empty_headers = HeaderMap::new();
+    assert!(auth::verify(&wh.auth_mode, wh.auth_config.as_ref(), &empty_headers, b"{}").is_err());
+}
+
+// ── Event filter blocks unwanted events ────────────────────────────────
+
+#[tokio::test]
+async fn test_event_filter_blocks_unwanted_github_events() {
+    let filter = EventFilter {
+        allow: vec!["pull_request.opened".into()],
+        deny: vec![],
+    };
+
+    assert!(filter.accepts("pull_request.opened"));
+    assert!(!filter.accepts("pull_request.closed"));
+    assert!(!filter.accepts("push"));
+    assert!(!filter.accepts("issues.opened"));
+}
+
+#[tokio::test]
+async fn test_event_filter_deny_overrides_allow() {
+    let filter = EventFilter {
+        allow: vec!["push".into(), "pull_request.opened".into()],
+        deny: vec!["push".into()],
+    };
+
+    assert!(!filter.accepts("push")); // denied
+    assert!(filter.accepts("pull_request.opened")); // allowed
+}
+
+// ── GitLab profile parsing ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_gitlab_event_parsing() {
+    let registry = ProfileRegistry::new();
+    let profile = registry.get("gitlab").expect("gitlab profile exists");
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "object_kind": "merge_request",
+        "user": { "username": "dev" },
+        "project": { "path_with_namespace": "group/project" },
+        "object_attributes": {
+            "iid": 10,
+            "title": "Fix bug",
+            "action": "open",
+            "url": "https://gitlab.com/group/project/-/merge_requests/10"
+        }
+    }))
+    .unwrap();
+
+    let headers = make_headers(&[("x-gitlab-event", "Merge Request Hook")]);
+    let event_type = profile.parse_event_type(&headers, &body);
+    assert_eq!(event_type.as_deref(), Some("merge_request.open"));
+
+    let body_val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entity_key = profile.entity_key("merge_request.open", &body_val);
+    assert_eq!(entity_key.as_deref(), Some("gitlab:group/project:mr:10"));
+}
+
+// ── Stripe profile parsing ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_stripe_event_parsing() {
+    let registry = ProfileRegistry::new();
+    let profile = registry.get("stripe").expect("stripe profile exists");
+
+    let body = serde_json::to_vec(&serde_json::json!({
+        "id": "evt_test_123",
+        "type": "customer.subscription.created",
+        "livemode": false,
+        "data": {
+            "object": {
+                "id": "sub_abc",
+                "customer": "cus_xyz",
+                "status": "active"
+            }
+        }
+    }))
+    .unwrap();
+
+    let headers = make_headers(&[("content-type", "application/json")]);
+    let event_type = profile.parse_event_type(&headers, &body);
+    assert_eq!(event_type.as_deref(), Some("customer.subscription.created"));
+
+    let delivery_key = profile.parse_delivery_key(&headers, &body);
+    assert_eq!(delivery_key.as_deref(), Some("evt_test_123"));
+
+    let body_val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entity_key = profile.entity_key("customer.subscription.created", &body_val);
+    assert_eq!(entity_key.as_deref(), Some("stripe:sub_abc"));
+}
+
+// ── Rate limiting ──────────────────────────────────────────────────────
+
+#[test]
+fn test_rate_limiter_enforces_per_webhook_limit() {
+    let limiter = moltis_webhooks::rate_limit::WebhookRateLimiter::new(1000);
+
+    // 10 requests should succeed for webhook 1 with limit 10
+    for _ in 0..10 {
+        assert!(limiter.check(1, 10));
+    }
+    // 11th should fail
+    assert!(!limiter.check(1, 10));
+
+    // Different webhook should still work
+    assert!(limiter.check(2, 10));
+}
+
+// ── Disabled webhook returns not found ─────────────────────────────────
+
+#[tokio::test]
+async fn test_disabled_webhook_lookup() {
+    let store = setup().await;
+
+    let wh = store
+        .create_webhook(WebhookCreate {
+            name: "Disabled Hook".into(),
+            description: None,
+            agent_id: None,
+            model: None,
+            system_prompt_suffix: None,
+            tool_policy: None,
+            auth_mode: AuthMode::None,
+            auth_config: None,
+            source_profile: "generic".into(),
+            source_config: None,
+            event_filter: EventFilter::default(),
+            session_mode: SessionMode::PerDelivery,
+            named_session_key: None,
+            allowed_cidrs: vec![],
+            max_body_bytes: 1_048_576,
+            rate_limit_per_minute: 60,
+        })
+        .await
+        .unwrap();
+
+    // Disable it
+    store
+        .update_webhook(
+            wh.id,
+            moltis_webhooks::types::WebhookPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Lookup by public_id still works, but enabled is false
+    let fetched = store.get_webhook_by_public_id(&wh.public_id).await.unwrap();
+    assert!(!fetched.enabled);
+}
+
+// ── Profile registry ───────────────────────────────────────────────────
+
+#[test]
+fn test_profile_registry_lists_all_profiles() {
+    let registry = ProfileRegistry::new();
+    let summaries = registry.list();
+    let ids: Vec<&str> = summaries.iter().map(|s| s.id.as_str()).collect();
+
+    assert!(ids.contains(&"generic"));
+    assert!(ids.contains(&"github"));
+    assert!(ids.contains(&"gitlab"));
+    assert!(ids.contains(&"stripe"));
+}
+
+#[test]
+fn test_profile_registry_lookup() {
+    let registry = ProfileRegistry::new();
+    assert!(registry.get("github").is_some());
+    assert!(registry.get("nonexistent").is_none());
+}
