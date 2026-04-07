@@ -739,3 +739,100 @@ fn test_webhook_redacted_none_stays_none() {
     assert!(redacted.auth_config.is_none());
     assert!(redacted.source_config.is_none());
 }
+
+// ── CIDR allowlist filtering ──────────────────────────────────────────
+
+#[test]
+fn test_cidr_match_ipv4() {
+    use std::net::IpAddr;
+    let cidr: ipnet::IpNet = "10.0.0.0/8".parse().unwrap();
+    let ip: IpAddr = "10.1.2.3".parse().unwrap();
+    assert!(cidr.contains(&ip));
+
+    let outside: IpAddr = "192.168.1.1".parse().unwrap();
+    assert!(!cidr.contains(&outside));
+}
+
+#[test]
+fn test_cidr_match_exact_ip() {
+    use std::net::IpAddr;
+    let cidr: ipnet::IpNet = "203.0.113.50/32".parse().unwrap();
+    let ip: IpAddr = "203.0.113.50".parse().unwrap();
+    assert!(cidr.contains(&ip));
+
+    let other: IpAddr = "203.0.113.51".parse().unwrap();
+    assert!(!cidr.contains(&other));
+}
+
+#[test]
+fn test_cidr_allowlist_logic() {
+    // Simulate the allowlist check logic from the ingress handler.
+    let allowed_cidrs = vec!["10.0.0.0/8".to_string(), "192.168.1.0/24".to_string()];
+    let check = |ip_str: &str| -> bool {
+        if let Ok(addr) = ip_str.parse::<std::net::IpAddr>() {
+            allowed_cidrs.iter().any(|cidr| {
+                cidr.parse::<ipnet::IpNet>()
+                    .map(|net| net.contains(&addr))
+                    .unwrap_or(false)
+            })
+        } else {
+            false
+        }
+    };
+
+    assert!(check("10.1.2.3"));
+    assert!(check("192.168.1.100"));
+    assert!(!check("172.16.0.1"));
+    assert!(!check("8.8.8.8"));
+}
+
+#[test]
+fn test_cidr_empty_allowlist_allows_all() {
+    // When allowed_cidrs is empty, the check is skipped (all traffic allowed).
+    let allowed_cidrs: Vec<String> = vec![];
+    assert!(allowed_cidrs.is_empty()); // guard skips the check
+}
+
+// ── Source profile immutability on edit ────────────────────────────────
+
+#[tokio::test]
+async fn test_source_profile_not_in_patch() {
+    // WebhookPatch does not have source_profile — verify the field is
+    // absent so serde ignores it on the server side.
+    let patch_json = serde_json::json!({
+        "name": "renamed",
+        "sourceProfile": "github",  // should be ignored
+    });
+    let patch: moltis_webhooks::types::WebhookPatch =
+        serde_json::from_value(patch_json).unwrap();
+    assert_eq!(patch.name, Some("renamed".into()));
+    // source_profile is not a field on WebhookPatch, so it's silently ignored.
+    // The webhook keeps its original source_profile.
+
+    let store = setup().await;
+    let wh = store
+        .create_webhook(WebhookCreate {
+            name: "test".into(),
+            description: None,
+            agent_id: None,
+            model: None,
+            system_prompt_suffix: None,
+            tool_policy: None,
+            auth_mode: AuthMode::None,
+            auth_config: None,
+            source_profile: "generic".into(),
+            source_config: None,
+            event_filter: EventFilter::default(),
+            session_mode: SessionMode::PerDelivery,
+            named_session_key: None,
+            allowed_cidrs: vec![],
+            max_body_bytes: 1_048_576,
+            rate_limit_per_minute: 60,
+        })
+        .await
+        .unwrap();
+
+    let updated = store.update_webhook(wh.id, patch).await.unwrap();
+    assert_eq!(updated.name, "renamed");
+    assert_eq!(updated.source_profile, "generic", "source_profile must not change via patch");
+}

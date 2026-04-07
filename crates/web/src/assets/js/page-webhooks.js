@@ -372,10 +372,13 @@ function WebhookModal() {
       agentId: selectedAgent.value || null,
       model: selectedModel.value || null,
       systemPromptSuffix: promptSuffixRef.current?.value?.trim() || null,
-      sourceProfile: sourceProfile.value,
       authMode: authMode.value,
       sessionMode: sessionMode.value,
     };
+    // source_profile is immutable after creation — only include on create.
+    if (!isEdit) {
+      params.sourceProfile = sourceProfile.value;
+    }
 
     // Build auth config based on mode
     var secret = authSecretRef.current?.value?.trim();
@@ -463,10 +466,11 @@ function WebhookModal() {
         value=${wh?.description || ""}
       />
 
-      <label class="text-xs text-[var(--muted)]">Source Profile</label>
+      <label class="text-xs text-[var(--muted)]">Source Profile${isEdit ? " (read-only after creation)" : ""}</label>
       <select
         class="provider-key-input"
         value=${sourceProfile.value}
+        disabled=${isEdit}
         onChange=${(e) => {
           sourceProfile.value = e.target.value;
           var prof = profiles.value.find((p) => p.id === e.target.value);

@@ -1147,13 +1147,13 @@ pub async fn prepare_gateway(
             "/api/webhooks/ingest/{public_id}",
             axum::routing::post(
                 move |axum::extract::Path(public_id): axum::extract::Path<String>,
+                      ConnectInfo(peer): ConnectInfo<SocketAddr>,
                       headers: axum::http::HeaderMap,
                       body: axum::body::Bytes| {
                     let gw = Arc::clone(&state_for_webhook_ingest);
                     async move {
-                        // Extract remote IP. Only trust forwarded headers when
-                        // behind a reverse proxy — otherwise an attacker can
-                        // forge X-Forwarded-For to bypass CIDR allowlists.
+                        // Extract remote IP. Behind a proxy, trust forwarded
+                        // headers; otherwise use the real TCP peer address.
                         let remote_ip = if gw.behind_proxy {
                             headers
                                 .get("x-forwarded-for")
@@ -1166,8 +1166,9 @@ pub async fn prepare_gateway(
                                         .and_then(|v| v.to_str().ok())
                                         .map(|s| s.trim().to_string())
                                 })
+                                .or_else(|| Some(peer.ip().to_string()))
                         } else {
-                            None
+                            Some(peer.ip().to_string())
                         };
 
                         let resp = async {
