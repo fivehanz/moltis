@@ -490,7 +490,7 @@ impl WebhookStore for SqliteWebhookStore {
 
     async fn list_unprocessed_deliveries(&self) -> Result<Vec<i64>> {
         let rows = sqlx::query(
-            "SELECT id FROM webhook_deliveries WHERE status IN ('received', 'queued') ORDER BY received_at ASC",
+            "SELECT id FROM webhook_deliveries WHERE status IN ('received', 'queued', 'processing') ORDER BY received_at ASC",
         )
         .fetch_all(&self.pool)
         .await?;
