@@ -445,3 +445,297 @@ fn test_profile_registry_lookup() {
     assert!(registry.get("github").is_some());
     assert!(registry.get("nonexistent").is_none());
 }
+
+// ── GitLab token auth uses "token" key, not "secret" ──────────────────
+
+#[test]
+fn test_gitlab_token_auth_uses_token_key() {
+    // GitLab verify expects { "token": "..." }, not { "secret": "..." }.
+    // Regression test: the UI previously sent { secret } for gitlab_token mode.
+    let config_correct = serde_json::json!({ "token": "glpat-abc123" });
+    let headers = make_headers(&[("x-gitlab-token", "glpat-abc123")]);
+    assert!(auth::verify(&AuthMode::GitlabToken, Some(&config_correct), &headers, b"").is_ok());
+
+    // Wrong key name must fail.
+    let config_wrong = serde_json::json!({ "secret": "glpat-abc123" });
+    assert!(auth::verify(&AuthMode::GitlabToken, Some(&config_wrong), &headers, b"").is_err());
+}
+
+// ── Auth with missing config returns clear error ──────────────────────
+
+#[test]
+fn test_auth_with_null_config_fails_clearly() {
+    let headers = make_headers(&[("x-webhook-secret", "anything")]);
+    let result = auth::verify(&AuthMode::StaticHeader, None, &headers, b"");
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("missing auth config key"), "error should mention missing config, got: {err}");
+}
+
+// ── UTF-8 safe truncation ─────────────────────────────────────────────
+
+#[test]
+fn test_truncate_str_ascii() {
+    let s = "hello world";
+    assert_eq!(moltis_webhooks::normalize::truncate_str(s, 5), "hello");
+    assert_eq!(moltis_webhooks::normalize::truncate_str(s, 100), "hello world");
+}
+
+#[test]
+fn test_truncate_str_multibyte() {
+    // Each emoji is 4 bytes. "🎉🎊🎈" = 12 bytes.
+    let s = "\u{1F389}\u{1F38A}\u{1F388}";
+    assert_eq!(s.len(), 12);
+
+    // Truncate at 5 bytes — falls inside the 2nd emoji (bytes 4..8).
+    // Should walk back to byte 4 (end of first emoji).
+    let t = moltis_webhooks::normalize::truncate_str(s, 5);
+    assert_eq!(t, "\u{1F389}");
+    assert_eq!(t.len(), 4);
+
+    // Truncate at 8 — exactly at boundary of 2nd emoji.
+    let t2 = moltis_webhooks::normalize::truncate_str(s, 8);
+    assert_eq!(t2, "\u{1F389}\u{1F38A}");
+}
+
+#[test]
+fn test_truncate_str_cjk() {
+    // CJK chars are 3 bytes each. "你好世界" = 12 bytes.
+    let s = "你好世界";
+    assert_eq!(s.len(), 12);
+
+    // Truncate at 7 — falls inside "世" (bytes 6..9).
+    let t = moltis_webhooks::normalize::truncate_str(s, 7);
+    assert_eq!(t, "你好");
+    assert_eq!(t.len(), 6);
+}
+
+// ── GitHub normalize with multibyte description doesn't panic ─────────
+
+#[test]
+fn test_github_normalize_multibyte_description() {
+    let registry = ProfileRegistry::new();
+    let profile = registry.get("github").unwrap();
+
+    // Build a PR payload with a long CJK description (> 500 bytes).
+    let long_desc = "修复".repeat(300); // 6 bytes * 300 = 1800 bytes
+    let body = serde_json::json!({
+        "action": "opened",
+        "pull_request": {
+            "number": 1,
+            "title": "修复错误",
+            "user": { "login": "dev" },
+            "head": { "ref": "fix" },
+            "base": { "ref": "main" },
+            "body": long_desc,
+            "html_url": "https://github.com/test/repo/pull/1",
+            "draft": false
+        },
+        "repository": { "full_name": "test/repo" }
+    });
+
+    // This must not panic on multibyte truncation.
+    let normalized = profile.normalize_payload("pull_request.opened", &body);
+    assert!(normalized.summary.contains("PR #1"));
+    assert!(normalized.summary.contains("..."));
+}
+
+// ── Generic profile normalize with large payload doesn't panic ────────
+
+#[test]
+fn test_generic_normalize_large_multibyte_payload() {
+    let registry = ProfileRegistry::new();
+    let profile = registry.get("generic").unwrap();
+
+    // Build a payload > 8192 bytes with multibyte chars.
+    let big_value = "日本語テスト".repeat(2000); // 18 bytes * 2000 = 36000 bytes
+    let body = serde_json::json!({ "data": big_value });
+
+    // This must not panic on multibyte truncation.
+    let normalized = profile.normalize_payload("test", &body);
+    assert!(normalized.summary.contains("truncated"));
+}
+
+// ── Crash recovery includes processing deliveries ─────────────────────
+
+#[tokio::test]
+async fn test_crash_recovery_includes_processing_deliveries() {
+    let store = setup().await;
+    let wh = store
+        .create_webhook(WebhookCreate {
+            name: "test".into(),
+            description: None,
+            agent_id: None,
+            model: None,
+            system_prompt_suffix: None,
+            tool_policy: None,
+            auth_mode: AuthMode::None,
+            auth_config: None,
+            source_profile: "generic".into(),
+            source_config: None,
+            event_filter: EventFilter::default(),
+            session_mode: SessionMode::PerDelivery,
+            named_session_key: None,
+            allowed_cidrs: vec![],
+            max_body_bytes: 1_048_576,
+            rate_limit_per_minute: 60,
+        })
+        .await
+        .unwrap();
+
+    // Insert deliveries in various states.
+    use moltis_webhooks::store::NewDelivery;
+    for (i, status) in [
+        DeliveryStatus::Received,
+        DeliveryStatus::Queued,
+        DeliveryStatus::Processing,
+        DeliveryStatus::Completed,
+        DeliveryStatus::Failed,
+        DeliveryStatus::Filtered,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let id = store
+            .insert_delivery(&NewDelivery {
+                webhook_id: wh.id,
+                received_at: format!("2026-04-07T00:00:0{i}Z"),
+                status: status.clone(),
+                event_type: None,
+                entity_key: None,
+                delivery_key: None,
+                http_method: None,
+                content_type: None,
+                remote_ip: None,
+                headers_json: None,
+                body_size: 0,
+                body_blob: None,
+                rejection_reason: None,
+            })
+            .await
+            .unwrap();
+        // For non-received statuses, update the status after insert.
+        if *status != DeliveryStatus::Received {
+            store
+                .update_delivery_status(id, status.clone(), Default::default())
+                .await
+                .unwrap();
+        }
+    }
+
+    // Crash recovery should find received + queued + processing = 3.
+    let unprocessed = store.list_unprocessed_deliveries().await.unwrap();
+    assert_eq!(
+        unprocessed.len(),
+        3,
+        "should find received, queued, and processing; got {unprocessed:?}"
+    );
+}
+
+// ── Generic profile dedup: no body-hash fallback ──────────────────────
+
+#[test]
+fn test_generic_profile_no_body_hash_dedup() {
+    let registry = ProfileRegistry::new();
+    let profile = registry.get("generic").unwrap();
+
+    // Without delivery ID headers, dedup key should be None.
+    let headers = make_headers(&[("content-type", "application/json")]);
+    let key = profile.parse_delivery_key(&headers, b"{\"same\":\"body\"}");
+    assert!(key.is_none(), "generic profile should not generate dedup key from body hash");
+
+    // With an explicit header, dedup key should be present.
+    let headers_with_id = make_headers(&[("x-delivery-id", "abc-123")]);
+    let key2 = profile.parse_delivery_key(&headers_with_id, b"{}");
+    assert_eq!(key2.as_deref(), Some("abc-123"));
+}
+
+// ── Rate limiter: global limit blocks across webhooks ─────────────────
+
+#[test]
+fn test_rate_limiter_global_limit_blocks_all() {
+    let limiter = moltis_webhooks::rate_limit::WebhookRateLimiter::new(3);
+
+    // 3 requests across different webhooks should succeed.
+    assert!(limiter.check(1, 100));
+    assert!(limiter.check(2, 100));
+    assert!(limiter.check(3, 100));
+
+    // 4th request from any webhook should be blocked by global limit.
+    assert!(!limiter.check(4, 100));
+    assert!(!limiter.check(1, 100));
+}
+
+// ── Webhook redaction ─────────────────────────────────────────────────
+
+#[test]
+fn test_webhook_redacted_hides_secrets() {
+    let wh = moltis_webhooks::types::Webhook {
+        id: 1,
+        name: "test".into(),
+        description: None,
+        enabled: true,
+        public_id: "wh_test".into(),
+        agent_id: None,
+        model: None,
+        system_prompt_suffix: None,
+        tool_policy: None,
+        auth_mode: AuthMode::GithubHmacSha256,
+        auth_config: Some(serde_json::json!({ "secret": "super-secret-value" })),
+        source_profile: "github".into(),
+        source_config: Some(serde_json::json!({ "api_token": "ghp_secret" })),
+        event_filter: EventFilter::default(),
+        session_mode: SessionMode::PerDelivery,
+        named_session_key: None,
+        allowed_cidrs: vec![],
+        max_body_bytes: 1_048_576,
+        rate_limit_per_minute: 60,
+        delivery_count: 0,
+        last_delivery_at: None,
+        created_at: "2026-04-07T00:00:00Z".into(),
+        updated_at: "2026-04-07T00:00:00Z".into(),
+    };
+
+    let redacted = wh.redacted();
+    assert_eq!(redacted.auth_config, Some(serde_json::json!("[REDACTED]")));
+    assert_eq!(redacted.source_config, Some(serde_json::json!("[REDACTED]")));
+
+    // Serialized JSON must not contain the secret.
+    let json = serde_json::to_string(&redacted).unwrap();
+    assert!(!json.contains("super-secret-value"));
+    assert!(!json.contains("ghp_secret"));
+    assert!(json.contains("[REDACTED]"));
+}
+
+#[test]
+fn test_webhook_redacted_none_stays_none() {
+    let wh = moltis_webhooks::types::Webhook {
+        id: 1,
+        name: "test".into(),
+        description: None,
+        enabled: true,
+        public_id: "wh_test".into(),
+        agent_id: None,
+        model: None,
+        system_prompt_suffix: None,
+        tool_policy: None,
+        auth_mode: AuthMode::None,
+        auth_config: None,
+        source_profile: "generic".into(),
+        source_config: None,
+        event_filter: EventFilter::default(),
+        session_mode: SessionMode::PerDelivery,
+        named_session_key: None,
+        allowed_cidrs: vec![],
+        max_body_bytes: 1_048_576,
+        rate_limit_per_minute: 60,
+        delivery_count: 0,
+        last_delivery_at: None,
+        created_at: "2026-04-07T00:00:00Z".into(),
+        updated_at: "2026-04-07T00:00:00Z".into(),
+    };
+
+    let redacted = wh.redacted();
+    assert!(redacted.auth_config.is_none());
+    assert!(redacted.source_config.is_none());
+}

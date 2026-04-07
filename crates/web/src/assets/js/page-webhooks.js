@@ -384,14 +384,13 @@ function WebhookModal() {
         params.authConfig = { header: "X-Webhook-Secret", value: secret };
       } else if (authMode.value === "bearer") {
         params.authConfig = { token: secret };
-      } else if (
-        authMode.value === "github_hmac_sha256" ||
-        authMode.value === "stripe_webhook_signature" ||
-        authMode.value === "gitlab_token"
-      ) {
-        params.authConfig = { secret };
       } else if (authMode.value === "gitlab_token") {
         params.authConfig = { token: secret };
+      } else if (
+        authMode.value === "github_hmac_sha256" ||
+        authMode.value === "stripe_webhook_signature"
+      ) {
+        params.authConfig = { secret };
       }
     }
 
