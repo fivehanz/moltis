@@ -3225,8 +3225,17 @@ mod tests {
 
     #[cfg(feature = "tls")]
     #[test]
+    fn tls_runtime_sans_uses_ip_for_concrete_non_loopback_ipv6_bind() {
+        assert_eq!(tls_runtime_sans("2001:db8::42"), vec![
+            moltis_tls::ServerSan::Ip("2001:db8::42".parse().unwrap())
+        ]);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
     fn tls_runtime_sans_skips_loopback_hosts() {
         assert!(tls_runtime_sans("127.0.0.1").is_empty());
+        assert!(tls_runtime_sans("::1").is_empty());
         assert!(tls_runtime_sans("localhost").is_empty());
         assert!(tls_runtime_sans("moltis.localhost").is_empty());
     }
@@ -3237,6 +3246,19 @@ mod tests {
         let sans = tls_runtime_sans("0.0.0.0");
         if let Some(ip) =
             resolve_outbound_ip(false).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        {
+            assert_eq!(sans, vec![moltis_tls::ServerSan::Ip(ip)]);
+        } else {
+            assert!(sans.is_empty());
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn tls_runtime_sans_ipv6_wildcard_bind_uses_resolved_outbound_ip_when_available() {
+        let sans = tls_runtime_sans("::");
+        if let Some(ip) =
+            resolve_outbound_ip(true).filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
         {
             assert_eq!(sans, vec![moltis_tls::ServerSan::Ip(ip)]);
         } else {
