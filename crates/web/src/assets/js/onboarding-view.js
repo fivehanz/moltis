@@ -1560,11 +1560,6 @@ function ProviderStep({ onNext, onBack }) {
 			setSelectedModels(new Set());
 			setPhase("selectModel");
 		} else {
-			sendRpc("models.detect_supported", {
-				background: true,
-				reason: "provider_connected",
-				provider: providerName,
-			});
 			setValidationResults((prev) => ({ ...prev, [providerName]: { ok: true, message: null } }));
 		}
 		refreshProviders();

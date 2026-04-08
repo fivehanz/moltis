@@ -17,6 +17,7 @@ use {
         task::AbortHandle,
     },
     tokio_stream::StreamExt,
+    tokio_util::sync::CancellationToken,
     tracing::{debug, info, warn},
 };
 
@@ -1494,6 +1495,8 @@ pub struct LiveModelService {
     disabled: Arc<RwLock<DisabledModelsStore>>,
     state: Arc<OnceCell<Arc<dyn ChatRuntime>>>,
     detect_gate: Arc<Semaphore>,
+    /// Token used to cancel an in-flight `detect_supported` run.
+    detect_cancel: Arc<RwLock<Option<CancellationToken>>>,
     priority_models: Arc<RwLock<Vec<String>>>,
     show_legacy_models: bool,
     /// Provider config for runtime model rediscovery.
@@ -1514,6 +1517,7 @@ impl LiveModelService {
             disabled,
             state: Arc::new(OnceCell::new()),
             detect_gate: Arc::new(Semaphore::new(1)),
+            detect_cancel: Arc::new(RwLock::new(None)),
             priority_models: Arc::new(RwLock::new(priority_models)),
             show_legacy_models: false,
             providers_config: moltis_config::schema::ProvidersConfig::default(),
@@ -1944,6 +1948,13 @@ impl ModelService for LiveModelService {
                 .map_err(|_| ServiceError::message("model probe gate closed"))?
         };
 
+        // Install a cancellation token for this run so cancel_detect() can stop it.
+        let cancel_token = CancellationToken::new();
+        {
+            let mut guard = self.detect_cancel.write().await;
+            *guard = Some(cancel_token.clone());
+        }
+
         let state = self.state.get().cloned();
 
         // Phase 0: re-discover models from provider APIs so that newly
@@ -2064,7 +2075,19 @@ impl ModelService for LiveModelService {
         let mut unsupported_by_provider: BTreeMap<String, Vec<Value>> = BTreeMap::new();
         let mut errors_by_provider: BTreeMap<String, Vec<Value>> = BTreeMap::new();
 
-        while let Some(joined) = tasks.next().await {
+        let mut cancelled = false;
+        loop {
+            let joined = tokio::select! {
+                biased;
+                () = cancel_token.cancelled() => {
+                    cancelled = true;
+                    break;
+                }
+                next = tasks.next() => match next {
+                    Some(joined) => joined,
+                    None => break,
+                },
+            };
             checked += 1;
             let outcome = match joined {
                 Ok(outcome) => outcome,
@@ -2239,8 +2262,20 @@ impl ModelService for LiveModelService {
             }
         }
 
+        // Clear the cancellation token now that the loop has exited.
+        {
+            let mut guard = self.detect_cancel.write().await;
+            *guard = None;
+        }
+
+        let phase = if cancelled {
+            "cancelled"
+        } else {
+            "complete"
+        };
         let summary = serde_json::json!({
             "ok": true,
+            "cancelled": cancelled,
             "probeWord": "ping",
             "background": background,
             "reason": reason,
@@ -2266,7 +2301,7 @@ impl ModelService for LiveModelService {
                 state,
                 "models.updated",
                 serde_json::json!({
-                    "phase": "complete",
+                    "phase": phase,
                     "background": background,
                     "reason": reason,
                     "provider": provider_filter.as_deref(),
@@ -2278,6 +2313,17 @@ impl ModelService for LiveModelService {
         }
 
         Ok(summary)
+    }
+
+    async fn cancel_detect(&self) -> ServiceResult {
+        let token = self.detect_cancel.read().await.clone();
+        let cancelled = if let Some(token) = token {
+            token.cancel();
+            true
+        } else {
+            false
+        };
+        Ok(serde_json::json!({ "ok": true, "cancelled": cancelled }))
     }
 
     async fn test(&self, params: Value) -> ServiceResult {

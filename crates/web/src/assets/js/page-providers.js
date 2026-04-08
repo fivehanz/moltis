@@ -60,6 +60,14 @@ function handleModelsUpdatedEvent(payload) {
 		}
 		return;
 	}
+	if (payload.phase === "cancelled") {
+		detectingModels.value = false;
+		if (payload.summary) {
+			detectSummary.value = payload.summary;
+			detectProgress.value = progressFromPayload(payload.summary);
+		}
+		return;
+	}
 	if (payload.phase === "error") {
 		detectingModels.value = false;
 		detectError.value = payload.error || t("providers:modelDetectionFailed");
@@ -148,6 +156,10 @@ async function runDetectAllModels() {
 	} catch (_err) {
 		detectingModels.value = false;
 	}
+}
+
+function cancelDetection() {
+	sendRpc("models.cancel_detect", {});
 }
 
 function groupProviderRows(models, metaMap) {
@@ -361,11 +373,19 @@ function ProvidersPage() {
 				${
 					detectingModels.value
 						? html`<div class="max-w-form">
-							<div class="h-2 w-full overflow-hidden rounded-sm border border-[var(--border)] bg-[var(--surface2)]">
-								<div
-									class="h-full bg-[var(--accent)] transition-all duration-150"
-									style=${`width:${progressPercent}%;`}
-								></div>
+							<div class="flex items-center gap-2">
+								<div class="flex-1 h-2 overflow-hidden rounded-sm border border-[var(--border)] bg-[var(--surface2)]">
+									<div
+										class="h-full bg-[var(--accent)] transition-all duration-150"
+										style=${`width:${progressPercent}%;`}
+									></div>
+								</div>
+								<button
+									class="provider-btn provider-btn-danger provider-btn-sm"
+									onClick=${cancelDetection}
+								>
+									${t("providers:stopDetection")}
+								</button>
 							</div>
 							<div class="mt-1 text-xs text-[var(--muted)]">
 								${t("providers:probingModels", { checked: progressValue.checked, total: progressValue.total, pct: progressPercent })}

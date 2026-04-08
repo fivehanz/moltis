@@ -973,6 +973,8 @@ pub trait ModelService: Send + Sync {
     async fn enable(&self, params: Value) -> ServiceResult;
     /// Probe configured models and flag unsupported ones for this account.
     async fn detect_supported(&self, params: Value) -> ServiceResult;
+    /// Cancel an in-flight `detect_supported` run.
+    async fn cancel_detect(&self) -> ServiceResult;
     /// Test a single model by sending a probe request.
     async fn test(&self, params: Value) -> ServiceResult;
 }
@@ -1009,6 +1011,10 @@ impl ModelService for NoopModelService {
         Err(model_service_not_configured_error(
             "models.detect_supported",
         ))
+    }
+
+    async fn cancel_detect(&self) -> ServiceResult {
+        Ok(serde_json::json!({ "ok": true, "cancelled": false }))
     }
 
     async fn test(&self, _params: Value) -> ServiceResult {

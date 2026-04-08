@@ -12,6 +12,8 @@ export default {
 	modelDetectionFailed: "Model detection failed.",
 	detectAllModels: "Detect All Models",
 	detectingModels: "Detecting Models\u2026",
+	stopDetection: "Arr\u00eater",
+	detectionCancelled: "D\u00e9tection arr\u00eat\u00e9e.",
 	probingModels: "Probing models: {{checked}}/{{total}} ({{pct}}%)",
 	detectSummary: "Detected {{supported}} supported, {{unsupported}} unsupported out of {{total}} models.",
 	noProvidersConfigured: "No LLM providers configured yet.",

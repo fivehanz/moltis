@@ -1120,12 +1120,6 @@ function showOAuthModelSelector(provider) {
 			}));
 			showModelSelector(provider, mapped, null, null, null, true);
 		} else {
-			// No models found yet — trigger detection in background and show success.
-			sendRpc("models.detect_supported", {
-				background: true,
-				reason: "provider_connected",
-				provider: provider.name,
-			});
 			fetchModels();
 			if (S.refreshProvidersPage) S.refreshProvidersPage();
 			var modal = els();

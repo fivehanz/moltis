@@ -643,6 +643,10 @@ impl moltis_service_traits::ModelService for MockModel {
         self.0.call("models.detect_supported", p)
     }
 
+    async fn cancel_detect(&self) -> ServiceResult {
+        self.0.call("models.cancel_detect", json!({}))
+    }
+
     async fn test(&self, p: Value) -> ServiceResult {
         self.0.call("models.test", p)
     }
