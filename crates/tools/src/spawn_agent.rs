@@ -6,7 +6,7 @@ use {async_trait::async_trait, tracing::info};
 
 use crate::{
     error::Error,
-    params::{bool_param, str_param, u64_param},
+    params::{bool_param, str_param, string_array_param, u64_param},
 };
 
 use {
@@ -109,29 +109,6 @@ impl SpawnAgentTool {
         if let Some(ref cb) = self.on_event {
             cb(event);
         }
-    }
-
-    fn parse_tool_name_array(params: &serde_json::Value, key: &str) -> crate::Result<Vec<String>> {
-        let Some(raw) = params.get(key) else {
-            return Ok(Vec::new());
-        };
-        let arr = raw
-            .as_array()
-            .ok_or_else(|| Error::message(format!("parameter '{key}' must be an array")))?;
-        let mut out = Vec::new();
-        for (idx, item) in arr.iter().enumerate() {
-            let name = item.as_str().ok_or_else(|| {
-                Error::message(format!("parameter '{key}[{idx}]' must be a string"))
-            })?;
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                return Err(Error::message(format!(
-                    "parameter '{key}[{idx}]' cannot be empty"
-                )));
-            }
-            out.push(trimmed.to_string());
-        }
-        Ok(out)
     }
 
     fn build_sub_tools(
@@ -395,7 +372,7 @@ impl AgentTool for SpawnAgentTool {
             .clone()
             .or_else(|| preset.as_ref().and_then(|p| p.model.clone()));
 
-        let explicit_allow_tools = Self::parse_tool_name_array(&params, "allow_tools")?;
+        let explicit_allow_tools = string_array_param(&params, "allow_tools")?;
         let allow_tools = if explicit_allow_tools.is_empty() {
             preset
                 .as_ref()
@@ -405,7 +382,7 @@ impl AgentTool for SpawnAgentTool {
             explicit_allow_tools
         };
 
-        let explicit_deny_tools = Self::parse_tool_name_array(&params, "deny_tools")?;
+        let explicit_deny_tools = string_array_param(&params, "deny_tools")?;
         let deny_tools = if explicit_deny_tools.is_empty() {
             preset
                 .as_ref()
@@ -805,6 +782,31 @@ mod tests {
         });
         let result = spawn_tool.execute(params).await.unwrap();
         assert_eq!(result["text"], "done with context");
+    }
+
+    #[tokio::test]
+    async fn test_null_optional_array_params_are_treated_as_absent() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider {
+            response: "done".into(),
+            model_id: "mock".into(),
+        });
+        let spawn_tool = SpawnAgentTool::new(
+            make_empty_provider_registry(),
+            provider,
+            Arc::new(ToolRegistry::new()),
+        );
+
+        let params = serde_json::json!({
+            "task": "analyze code",
+            "allow_tools": null,
+            "deny_tools": null,
+            "context": null,
+            "model": null,
+            "preset": null,
+            "delegate_only": null,
+        });
+        let result = spawn_tool.execute(params).await.unwrap();
+        assert_eq!(result["text"], "done");
     }
 
     #[tokio::test]
