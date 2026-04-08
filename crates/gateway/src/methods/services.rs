@@ -14,19 +14,6 @@ use crate::{
 
 use super::{MethodContext, MethodRegistry};
 
-pub(super) fn model_probe_params(provider: Option<&str>) -> serde_json::Value {
-    let mut params = serde_json::json!({
-        "background": true,
-        "reason": "provider_connected",
-    });
-    if let Some(provider) = provider
-        && !provider.trim().is_empty()
-    {
-        params["provider"] = serde_json::json!(provider);
-    }
-    params
-}
-
 async fn active_session_key_for_ctx(ctx: &MethodContext) -> Option<String> {
     if let Some(session_key) = ctx
         .params
@@ -3310,6 +3297,19 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         }),
     );
     reg.register(
+        "models.cancel_detect",
+        Box::new(|ctx| {
+            Box::pin(async move {
+                ctx.state
+                    .services
+                    .model
+                    .cancel_detect()
+                    .await
+                    .map_err(ErrorShape::from)
+            })
+        }),
+    );
+    reg.register(
         "models.test",
         Box::new(|ctx| {
             Box::pin(async move {
@@ -3341,30 +3341,12 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         "providers.save_key",
         Box::new(|ctx| {
             Box::pin(async move {
-                let provider_name = ctx
-                    .params
-                    .get("provider")
-                    .and_then(|v| v.as_str())
-                    .map(ToOwned::to_owned);
-
-                let result = ctx
-                    .state
+                ctx.state
                     .services
                     .provider_setup
                     .save_key(ctx.params.clone())
                     .await
-                    .map_err(ErrorShape::from)?;
-
-                // Kick off background model detection after saving provider
-                // credentials, matching the behaviour of oauth.complete.
-                let model_service = Arc::clone(&ctx.state.services.model);
-                tokio::spawn(async move {
-                    let _ = model_service
-                        .detect_supported(model_probe_params(provider_name.as_deref()))
-                        .await;
-                });
-
-                Ok(result)
+                    .map_err(ErrorShape::from)
             })
         }),
     );
@@ -3385,35 +3367,12 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         "providers.oauth.start",
         Box::new(|ctx| {
             Box::pin(async move {
-                let provider_name = ctx
-                    .params
-                    .get("provider")
-                    .and_then(|v| v.as_str())
-                    .map(ToOwned::to_owned);
-                let result = ctx
-                    .state
+                ctx.state
                     .services
                     .provider_setup
                     .oauth_start(ctx.params.clone())
                     .await
-                    .map_err(ErrorShape::from)?;
-
-                // If oauth.start short-circuited because valid tokens already
-                // existed, trigger a provider-scoped background probe now.
-                if result
-                    .get("alreadyAuthenticated")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    let model_service = Arc::clone(&ctx.state.services.model);
-                    tokio::spawn(async move {
-                        let _ = model_service
-                            .detect_supported(model_probe_params(provider_name.as_deref()))
-                            .await;
-                    });
-                }
-
-                Ok(result)
+                    .map_err(ErrorShape::from)
             })
         }),
     );
@@ -3434,28 +3393,12 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         "providers.oauth.complete",
         Box::new(|ctx| {
             Box::pin(async move {
-                let result = ctx
-                    .state
+                ctx.state
                     .services
                     .provider_setup
                     .oauth_complete(ctx.params.clone())
                     .await
-                    .map_err(ErrorShape::from)?;
-
-                let provider_name = result
-                    .get("provider")
-                    .and_then(|v| v.as_str())
-                    .map(ToOwned::to_owned);
-
-                // Kick off background support probing after OAuth provider connect.
-                let model_service = Arc::clone(&ctx.state.services.model);
-                tokio::spawn(async move {
-                    let _ = model_service
-                        .detect_supported(model_probe_params(provider_name.as_deref()))
-                        .await;
-                });
-
-                Ok(result)
+                    .map_err(ErrorShape::from)
             })
         }),
     );
@@ -3476,29 +3419,12 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         "providers.save_models",
         Box::new(|ctx| {
             Box::pin(async move {
-                let provider_name = ctx
-                    .params
-                    .get("provider")
-                    .and_then(|v| v.as_str())
-                    .map(ToOwned::to_owned);
-
-                let result = ctx
-                    .state
+                ctx.state
                     .services
                     .provider_setup
                     .save_models(ctx.params.clone())
                     .await
-                    .map_err(ErrorShape::from)?;
-
-                // Kick off background support probing after saving preferred models.
-                let model_service = Arc::clone(&ctx.state.services.model);
-                tokio::spawn(async move {
-                    let _ = model_service
-                        .detect_supported(model_probe_params(provider_name.as_deref()))
-                        .await;
-                });
-
-                Ok(result)
+                    .map_err(ErrorShape::from)
             })
         }),
     );
