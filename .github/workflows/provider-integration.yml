@@ -53,6 +53,9 @@ jobs:
           - provider: kimi-code
             test: kimi_code_integration
             secret_key: KIMI_API_KEY
+          - provider: deepseek
+            test: deepseek_integration
+            secret_key: DEEPSEEK_API_KEY
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -95,6 +98,7 @@ jobs:
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TEST_NAME: ${{ matrix.test }}
         run: |
           cargo test \
