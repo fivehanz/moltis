@@ -977,7 +977,7 @@ pub fn is_chat_capable_model(model_id: &str) -> bool {
         "imagen-",
         "gemini-embedding",
         "learnlm-",
-        "gemma-",
+        "gemma-3n-",
         // Z.AI non-chat models
         "glm-image",
         "glm-asr",
@@ -3475,6 +3475,9 @@ mod tests {
         assert!(!is_chat_capable_model("gemini-embedding-exp"));
         assert!(!is_chat_capable_model("learnlm-1.5-pro-experimental"));
         assert!(!is_chat_capable_model("gemma-3n-e4b-it"));
+        // Gemma instruction-tuned models ARE chat-capable
+        assert!(is_chat_capable_model("gemma-3-27b-it"));
+        assert!(is_chat_capable_model("gemma-4"));
         // Gemini live/image variants are not chat models
         assert!(!is_chat_capable_model("gemini-3.1-flash-live-preview"));
         assert!(!is_chat_capable_model("gemini-3.1-flash-image-preview"));
