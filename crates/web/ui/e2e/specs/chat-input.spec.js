@@ -218,6 +218,45 @@ test.describe("Chat input and slash commands", () => {
 		await expect(chatInput).toBeFocused();
 	});
 
+	test("chat.full_context reports workspace prompt truncation", async ({ page }) => {
+		const originalResponse = await sendRpcFromPage(page, "agents.files.get", {
+			agent_id: "main",
+			path: "AGENTS.md",
+		});
+		const originalContent = originalResponse?.ok ? originalResponse.payload?.content || "" : "";
+		const oversizedContent = `${"A".repeat(32_050)}\n`;
+
+		try {
+			const setResponse = await sendRpcFromPage(page, "agents.files.set", {
+				agent_id: "main",
+				path: "AGENTS.md",
+				content: oversizedContent,
+			});
+			expect(setResponse?.ok).toBe(true);
+
+			const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", {});
+			expect(fullContextRpc?.ok).toBe(true);
+			expect(fullContextRpc.payload?.truncated).toBe(true);
+			expect(Array.isArray(fullContextRpc.payload?.workspaceFiles)).toBe(true);
+			const agentsFile = fullContextRpc.payload.workspaceFiles.find((file) => file?.name === "AGENTS.md");
+			expect(agentsFile?.truncated).toBe(true);
+			expect(Number(agentsFile?.original_chars || 0)).toBeGreaterThan(32_000);
+
+			const triggerBtn = await openFullContextWithRetry(page);
+			if (triggerBtn) {
+				const panel = page.locator("#fullContextPanel");
+				await expect(panel).toContainText("AGENTS.md", { timeout: 10_000 });
+				await expect(panel).toContainText("truncated by", { timeout: 10_000 });
+			}
+		} finally {
+			await sendRpcFromPage(page, "agents.files.set", {
+				agent_id: "main",
+				path: "AGENTS.md",
+				content: originalContent,
+			});
+		}
+	});
+
 	test('typing "/" shows slash command menu', async ({ page }) => {
 		const chatInput = page.locator("#chatInput");
 		await chatInput.focus();

@@ -640,6 +640,27 @@ function refreshFullContextPanel() {
 			`total ${res.payload.totalChars.toLocaleString()} chars`;
 		headerRow.appendChild(headerText);
 
+		var workspaceFiles = Array.isArray(res.payload.workspaceFiles) ? res.payload.workspaceFiles : [];
+		if (res.payload.truncated && workspaceFiles.length > 0) {
+			var truncatedFiles = workspaceFiles.filter((file) => file?.truncated);
+			if (truncatedFiles.length > 0) {
+				var warning = ctxEl(
+					"div",
+					"text-xs mb-3 rounded-md border border-[var(--border)] bg-[var(--surface)] p-2 text-[var(--text)]",
+				);
+				warning.textContent = truncatedFiles
+					.map((file) => {
+						var name = typeof file.name === "string" ? file.name : "workspace file";
+						var charCount = Number(file.original_chars || 0).toLocaleString();
+						var limitChars = Number(file.limit_chars || 0).toLocaleString();
+						var truncatedChars = Number(file.truncated_chars || 0).toLocaleString();
+						return `${name}: ${charCount} chars, limit ${limitChars}, truncated by ${truncatedChars}`;
+					})
+					.join(" | ");
+				panel.appendChild(warning);
+			}
+		}
+
 		var messages = res.payload.messages || [];
 		var llmOutputs = res.payload.llmOutputs || [];
 		var llmOutputPanel = null;

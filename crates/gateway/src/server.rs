@@ -2827,6 +2827,7 @@ pub async fn prepare_gateway_core(
 
     // ── Hook discovery & registration ─────────────────────────────────────
     seed_default_workspace_markdown_files();
+    warn_on_workspace_prompt_file_truncation();
     seed_example_skill();
     seed_example_hook();
     seed_dcg_guard_hook();
@@ -4198,6 +4199,42 @@ fn seed_default_workspace_markdown_files() {
     seed_file_if_missing(data_dir.join("AGENTS.md"), DEFAULT_WORKSPACE_AGENTS_MD);
     seed_file_if_missing(data_dir.join("TOOLS.md"), DEFAULT_TOOLS_MD);
     seed_file_if_missing(data_dir.join("HEARTBEAT.md"), DEFAULT_HEARTBEAT_MD);
+}
+
+fn warn_on_workspace_prompt_file_truncation() {
+    let limit_chars = moltis_config::discover_and_load()
+        .chat
+        .workspace_file_max_chars;
+    let data_dir = moltis_config::data_dir();
+    let mut paths = vec![data_dir.join("AGENTS.md"), data_dir.join("TOOLS.md")];
+    let agents_dir = data_dir.join("agents");
+    if let Ok(entries) = std::fs::read_dir(&agents_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            paths.push(path.join("AGENTS.md"));
+            paths.push(path.join("TOOLS.md"));
+        }
+    }
+
+    for path in paths {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let char_count = content.chars().count();
+        if char_count <= limit_chars {
+            continue;
+        }
+        tracing::warn!(
+            path = %path.display(),
+            char_count,
+            limit_chars,
+            truncated_chars = char_count.saturating_sub(limit_chars),
+            "workspace prompt file exceeds configured prompt cap and will be truncated"
+        );
+    }
 }
 
 fn seed_file_if_missing(path: PathBuf, content: &str) {

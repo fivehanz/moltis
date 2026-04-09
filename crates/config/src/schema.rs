@@ -1496,6 +1496,9 @@ pub struct ChatConfig {
     /// How to handle messages that arrive while an agent run is active.
     #[serde(default = "default_message_queue_mode")]
     pub message_queue_mode: MessageQueueMode,
+    /// Maximum characters from each workspace prompt file (`AGENTS.md`, `TOOLS.md`).
+    #[serde(default = "default_workspace_file_max_chars")]
+    pub workspace_file_max_chars: usize,
     /// Preferred model IDs to show first in selectors (full or raw model IDs).
     pub priority_models: Vec<String>,
     /// Legacy model allowlist. Kept for backward compatibility.
@@ -1509,10 +1512,15 @@ fn default_message_queue_mode() -> MessageQueueMode {
     MessageQueueMode::Followup
 }
 
+fn default_workspace_file_max_chars() -> usize {
+    32_000
+}
+
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             message_queue_mode: default_message_queue_mode(),
+            workspace_file_max_chars: default_workspace_file_max_chars(),
             priority_models: Vec::new(),
             allowed_models: Vec::new(),
         }
@@ -2727,6 +2735,18 @@ deny = ["exec"]
     fn chat_config_toml_missing_queue_mode_defaults_to_followup() {
         let cfg: ChatConfig = toml::from_str("").unwrap();
         assert_eq!(cfg.message_queue_mode, MessageQueueMode::Followup);
+    }
+
+    #[test]
+    fn chat_config_workspace_file_limit_defaults_to_32000() {
+        let cfg = ChatConfig::default();
+        assert_eq!(cfg.workspace_file_max_chars, 32_000);
+    }
+
+    #[test]
+    fn chat_config_toml_parses_workspace_file_limit() {
+        let cfg: ChatConfig = toml::from_str("workspace_file_max_chars = 12345").unwrap();
+        assert_eq!(cfg.workspace_file_max_chars, 12_345);
     }
 
     #[test]

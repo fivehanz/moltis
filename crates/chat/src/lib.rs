@@ -29,9 +29,10 @@ use {
         model::{StreamEvent, values_to_chat_messages},
         multimodal::parse_data_uri,
         prompt::{
-            PromptHostRuntimeContext, PromptNodeInfo, PromptNodesRuntimeContext,
+            PromptBuildLimits, PromptHostRuntimeContext, PromptNodeInfo, PromptNodesRuntimeContext,
             PromptRuntimeContext, PromptSandboxRuntimeContext, VOICE_REPLY_SUFFIX,
-            build_system_prompt_minimal_runtime, build_system_prompt_with_session_runtime,
+            build_system_prompt_minimal_runtime_details,
+            build_system_prompt_with_session_runtime_details,
         },
         runner::{RunnerEvent, run_agent_loop_streaming},
         tool_registry::{AgentTool, ToolRegistry},
@@ -1065,6 +1066,12 @@ fn load_prompt_persona_for_agent(agent_id: &str) -> PromptPersona {
 fn load_prompt_persona_for_session(session_entry: Option<&SessionEntry>) -> PromptPersona {
     let agent_id = resolve_prompt_agent_id(session_entry);
     load_prompt_persona_for_agent(&agent_id)
+}
+
+fn prompt_build_limits_from_config(config: &moltis_config::MoltisConfig) -> PromptBuildLimits {
+    PromptBuildLimits {
+        workspace_file_max_chars: config.chat.workspace_file_max_chars,
+    }
 }
 
 #[derive(Default)]
@@ -4915,8 +4922,9 @@ impl ChatService for LiveChatService {
         let tool_count = filtered_registry.list_schemas().len();
 
         // Build the system prompt.
-        let system_prompt = if tools_enabled {
-            build_system_prompt_with_session_runtime(
+        let prompt_limits = prompt_build_limits_from_config(&persona.config);
+        let prompt_build = if tools_enabled {
+            build_system_prompt_with_session_runtime_details(
                 &filtered_registry,
                 native_tools,
                 project_context.as_deref(),
@@ -4928,9 +4936,10 @@ impl ChatService for LiveChatService {
                 persona.tools_text.as_deref(),
                 Some(&runtime_context),
                 persona.memory_text.as_deref(),
+                prompt_limits,
             )
         } else {
-            build_system_prompt_minimal_runtime(
+            build_system_prompt_minimal_runtime_details(
                 project_context.as_deref(),
                 Some(&persona.identity),
                 Some(&persona.user),
@@ -4939,14 +4948,20 @@ impl ChatService for LiveChatService {
                 persona.tools_text.as_deref(),
                 Some(&runtime_context),
                 persona.memory_text.as_deref(),
+                prompt_limits,
             )
         };
 
+        let truncated = prompt_build.metadata.truncated();
+        let workspace_files = prompt_build.metadata.workspace_files.clone();
+        let system_prompt = prompt_build.prompt;
         let char_count = system_prompt.len();
 
         Ok(serde_json::json!({
             "prompt": system_prompt,
             "charCount": char_count,
+            "truncated": truncated,
+            "workspaceFiles": workspace_files,
             "native_tools": native_tools,
             "tools_enabled": tools_enabled,
             "tool_mode": format!("{:?}", tool_mode),
@@ -5028,8 +5043,9 @@ impl ChatService for LiveChatService {
         };
 
         // Build the system prompt.
-        let system_prompt = if tools_enabled {
-            build_system_prompt_with_session_runtime(
+        let prompt_limits = prompt_build_limits_from_config(&persona.config);
+        let prompt_build = if tools_enabled {
+            build_system_prompt_with_session_runtime_details(
                 &filtered_registry,
                 native_tools,
                 project_context.as_deref(),
@@ -5041,9 +5057,10 @@ impl ChatService for LiveChatService {
                 persona.tools_text.as_deref(),
                 Some(&runtime_context),
                 persona.memory_text.as_deref(),
+                prompt_limits,
             )
         } else {
-            build_system_prompt_minimal_runtime(
+            build_system_prompt_minimal_runtime_details(
                 project_context.as_deref(),
                 Some(&persona.identity),
                 Some(&persona.user),
@@ -5052,9 +5069,13 @@ impl ChatService for LiveChatService {
                 persona.tools_text.as_deref(),
                 Some(&runtime_context),
                 persona.memory_text.as_deref(),
+                prompt_limits,
             )
         };
 
+        let truncated = prompt_build.metadata.truncated();
+        let workspace_files = prompt_build.metadata.workspace_files.clone();
+        let system_prompt = prompt_build.prompt;
         let system_prompt_chars = system_prompt.len();
 
         // Keep raw assistant outputs (including provider/model/token metadata)
@@ -5084,6 +5105,8 @@ impl ChatService for LiveChatService {
             "messageCount": message_count,
             "systemPromptChars": system_prompt_chars,
             "totalChars": total_chars,
+            "truncated": truncated,
+            "workspaceFiles": workspace_files,
         }))
     }
 
@@ -6109,8 +6132,9 @@ async fn run_with_tools(
     // - Native tools: full prompt with tool schemas sent via API
     // - Text tools: full prompt with tool schemas embedded + call guidance
     // - Off: minimal prompt without tools
+    let prompt_limits = prompt_build_limits_from_config(&persona.config);
     let system_prompt = if tools_enabled {
-        build_system_prompt_with_session_runtime(
+        build_system_prompt_with_session_runtime_details(
             &filtered_registry,
             native_tools,
             project_context,
@@ -6122,9 +6146,11 @@ async fn run_with_tools(
             persona.tools_text.as_deref(),
             runtime_context,
             persona.memory_text.as_deref(),
+            prompt_limits,
         )
+        .prompt
     } else {
-        build_system_prompt_minimal_runtime(
+        build_system_prompt_minimal_runtime_details(
             project_context,
             Some(&persona.identity),
             Some(&persona.user),
@@ -6133,7 +6159,9 @@ async fn run_with_tools(
             persona.tools_text.as_deref(),
             runtime_context,
             persona.memory_text.as_deref(),
+            prompt_limits,
         )
+        .prompt
     };
 
     // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
@@ -7169,7 +7197,7 @@ async fn run_streaming(
     let run_started = Instant::now();
     let persona = load_prompt_persona_for_agent(agent_id);
 
-    let system_prompt = build_system_prompt_minimal_runtime(
+    let system_prompt = build_system_prompt_minimal_runtime_details(
         project_context,
         Some(&persona.identity),
         Some(&persona.user),
@@ -7178,7 +7206,9 @@ async fn run_streaming(
         persona.tools_text.as_deref(),
         runtime_context,
         persona.memory_text.as_deref(),
-    );
+        prompt_build_limits_from_config(&persona.config),
+    )
+    .prompt;
 
     // Layer 1: instruct the LLM to write speech-friendly output when voice is active.
     let system_prompt = apply_voice_reply_suffix(system_prompt, desired_reply_medium);

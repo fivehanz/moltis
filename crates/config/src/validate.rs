@@ -393,6 +393,7 @@ fn build_schema_map() -> KnownKeys {
             "chat",
             Struct(HashMap::from([
                 ("message_queue_mode", Leaf),
+                ("workspace_file_max_chars", Leaf),
                 ("priority_models", Leaf),
                 ("allowed_models", Leaf),
             ])),
