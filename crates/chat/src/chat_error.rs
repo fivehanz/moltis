@@ -165,6 +165,17 @@ fn try_parse_known_error(raw: &str) -> Value {
                     None,
                 );
             },
+            404 => {
+                return build_error(
+                    "model_not_found",
+                    "\u{26A0}\u{FE0F}",
+                    "Model not found",
+                    "The requested model was not found. Check that the model name is correct and is available at the endpoint.",
+                    None,
+                    None,
+                    None,
+                );
+            },
             429 => {
                 let retry_after_ms = extract_retry_after_ms(raw, &Value::Null);
                 return build_error(
@@ -437,6 +448,10 @@ fn translation_keys_for(error_type: &str) -> (Option<&'static str>, Option<&'sta
             Some("errors:chat.serverError.title"),
             Some("errors:chat.serverError.detail"),
         ),
+        "model_not_found" => (
+            Some("errors:chat.modelNotFound.title"),
+            Some("errors:chat.modelNotFound.detail"),
+        ),
         "unsupported_model" => (Some("errors:chat.unsupportedModel.title"), None),
         "billing_exhausted" => (
             Some("errors:chat.billingExhausted.title"),
@@ -666,5 +681,16 @@ mod tests {
         assert_eq!(result["type"], "max_iterations_reached");
         assert_eq!(result["detail_params"]["limit"], 10u64);
         assert_eq!(result["provider"], "anthropic");
+    }
+
+    #[test]
+    fn test_http_404_maps_to_model_not_found() {
+        let raw = "OpenAI API error HTTP 404: model not found";
+        let result = parse_chat_error(raw, Some("ollama"));
+        assert_eq!(result["type"], "model_not_found");
+        assert_eq!(result["title"], "Model not found");
+        assert_eq!(result["provider"], "ollama");
+        assert_eq!(result["title_key"], "errors:chat.modelNotFound.title");
+        assert_eq!(result["detail_key"], "errors:chat.modelNotFound.detail");
     }
 }

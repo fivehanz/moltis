@@ -313,7 +313,7 @@ fn anthropic_fallback_catalog() -> Vec<DiscoveredModel> {
     catalog_to_discovered(ANTHROPIC_MODELS, 3)
 }
 
-fn normalize_ollama_api_base_url(base_url: &str) -> String {
+pub(crate) fn normalize_ollama_api_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_string()
 }
@@ -1394,7 +1394,7 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         config_name: "ollama",
         env_key: "OLLAMA_API_KEY",
         env_base_url_key: "OLLAMA_BASE_URL",
-        default_base_url: "http://127.0.0.1:11434/v1",
+        default_base_url: "http://localhost:11434/v1",
         models: &[],
         supports_model_discovery: true,
         requires_api_key: false,
@@ -3711,6 +3711,19 @@ mod tests {
                 def.config_name
             );
         }
+    }
+
+    #[test]
+    fn ollama_default_base_url_uses_localhost() {
+        let ollama = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "ollama")
+            .expect("ollama entry must exist");
+        assert!(
+            ollama.default_base_url.contains("localhost"),
+            "expected 'localhost' in Ollama default_base_url, got: {}",
+            ollama.default_base_url,
+        );
     }
 
     #[test]

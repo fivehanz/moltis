@@ -592,6 +592,15 @@ impl OpenAiProvider {
                     "openai probe model unsupported for chat/completions endpoint"
                 );
             }
+            // Ollama's OpenAI-compat layer returns 404 for models that
+            // exist but aren't wired to /v1/chat/completions.  Fall back
+            // to the native `/api/show` endpoint before giving up.
+            if status == reqwest::StatusCode::NOT_FOUND
+                && self.provider_name.eq_ignore_ascii_case("ollama")
+            {
+                return self.probe_ollama_native().await;
+            }
+
             anyhow::bail!(
                 "{}",
                 super::with_retry_after_marker(
@@ -602,6 +611,39 @@ impl OpenAiProvider {
         }
 
         Ok(())
+    }
+
+    /// Fallback probe for Ollama: POST `/api/show` with the model name.
+    ///
+    /// This confirms the model is installed and Ollama is reachable even when
+    /// the OpenAI-compat `/v1/chat/completions` endpoint returns 404.
+    async fn probe_ollama_native(&self) -> anyhow::Result<()> {
+        let api_base = super::normalize_ollama_api_base_url(&self.base_url);
+        let url = format!("{}/api/show", api_base.trim_end_matches('/'));
+
+        debug!(model = %self.model, url = %url, "ollama native probe via /api/show");
+
+        let mut req = self.client.post(&url).json(&serde_json::json!({ "name": self.model }));
+        let key = self.api_key.expose_secret();
+        if !key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        let resp = req.send().await?;
+
+        if resp.status().is_success() {
+            return Ok(());
+        }
+
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        anyhow::bail!(
+            "Model '{}' not found. Make sure it is installed (ollama pull {}) \
+             and try again. (Ollama /api/show returned HTTP {}: {})",
+            self.model,
+            self.model,
+            status,
+            body_text,
+        )
     }
 
     async fn probe_responses(&self) -> anyhow::Result<()> {
@@ -3305,5 +3347,107 @@ mod tests {
 
         provider.apply_openrouter_cache_control(&mut messages);
         assert_eq!(messages[0]["content"], "hello");
+    }
+
+    // ---- Ollama native probe fallback tests ----
+
+    /// Start a mock server for Ollama probe fallback tests.
+    ///
+    /// `/v1/chat/completions` returns `chat_status`.
+    /// `/api/show` returns `show_status` with `show_body`.
+    async fn start_ollama_probe_mock(
+        chat_status: u16,
+        show_status: u16,
+        show_body: &str,
+    ) -> String {
+        use axum::routing::{any, post};
+
+        let show_body = show_body.to_string();
+
+        let app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(move || async move {
+                    axum::response::Response::builder()
+                        .status(chat_status)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(r#"{"error":"not found"}"#))
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/api/show",
+                any(move || {
+                    let body = show_body.clone();
+                    async move {
+                        axum::response::Response::builder()
+                            .status(show_status)
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(body))
+                            .unwrap()
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn ollama_probe_falls_back_to_native_api_show_on_404() {
+        let base = start_ollama_probe_mock(404, 200, r#"{"name":"gemma4:e2b"}"#).await;
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new(String::new()),
+            "gemma4:e2b".into(),
+            format!("{base}/v1"),
+            "ollama".into(),
+        );
+
+        provider
+            .probe()
+            .await
+            .expect("probe should succeed via /api/show fallback");
+    }
+
+    #[tokio::test]
+    async fn ollama_probe_native_fallback_also_fails() {
+        let base = start_ollama_probe_mock(404, 404, r#"{"error":"model not found"}"#).await;
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new(String::new()),
+            "no-such-model".into(),
+            format!("{base}/v1"),
+            "ollama".into(),
+        );
+
+        let err = provider.probe().await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ollama pull"),
+            "error should suggest 'ollama pull', got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_ollama_provider_does_not_fallback_on_404() {
+        let base = start_ollama_probe_mock(404, 200, "{}").await;
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new("key".into()),
+            "some-model".into(),
+            format!("{base}/v1"),
+            "openai".into(),
+        );
+
+        let err = provider.probe().await.unwrap_err();
+        let msg = err.to_string();
+        // Should NOT attempt fallback — should get the standard OpenAI error.
+        assert!(
+            msg.contains("HTTP 404"),
+            "non-ollama provider should get standard 404 error, got: {msg}"
+        );
     }
 }
