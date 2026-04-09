@@ -947,6 +947,10 @@ pub fn context_window_for_model(model_id: &str) -> u32 {
     if model_id.starts_with("glm-") {
         return 128_000;
     }
+    // Qwen3 series (Qwen3, Qwen3-Coder): 128k.
+    if model_id.starts_with("qwen3") {
+        return 128_000;
+    }
     // Default fallback.
     200_000
 }
@@ -1241,6 +1245,20 @@ const FIREWORKS_MODELS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Known Alibaba Cloud Coding Plan models.
+/// See: <https://www.alibabacloud.com/help/en/model-studio/coding-plan>
+const ALIBABA_CODING_MODELS: &[(&str, &str)] = &[
+    ("qwen3.6-plus", "Qwen 3.6 Plus"),
+    ("kimi-k2.5", "Kimi K2.5"),
+    ("glm-5", "GLM-5"),
+    ("MiniMax-M2.5", "MiniMax M2.5"),
+    ("qwen3.5-plus", "Qwen 3.5 Plus"),
+    ("qwen3-max-2026-01-23", "Qwen3 Max"),
+    ("qwen3-coder-next", "Qwen3 Coder Next"),
+    ("qwen3-coder-plus", "Qwen3 Coder Plus"),
+    ("glm-4.7", "GLM-4.7"),
+];
+
 /// Known DeepSeek models.
 const DEEPSEEK_MODELS: &[(&str, &str)] = &[
     ("deepseek-chat", "DeepSeek Chat"),
@@ -1409,6 +1427,16 @@ const OPENAI_COMPAT_PROVIDERS: &[OpenAiCompatDef] = &[
         supports_model_discovery: true,
         requires_api_key: false,
         local_only: true,
+    },
+    OpenAiCompatDef {
+        config_name: "alibaba-coding",
+        env_key: "ALIBABA_CODING_API_KEY",
+        env_base_url_key: "ALIBABA_CODING_BASE_URL",
+        default_base_url: "https://coding-intl.dashscope.aliyuncs.com/v1",
+        models: ALIBABA_CODING_MODELS,
+        supports_model_discovery: true,
+        requires_api_key: true,
+        local_only: false,
     },
     OpenAiCompatDef {
         config_name: "gemini",
@@ -3711,6 +3739,69 @@ mod tests {
                 def.config_name
             );
         }
+    }
+
+    #[test]
+    fn alibaba_coding_provider_exists() {
+        let alibaba = OPENAI_COMPAT_PROVIDERS
+            .iter()
+            .find(|d| d.config_name == "alibaba-coding")
+            .expect("alibaba-coding entry must exist");
+        assert_eq!(alibaba.env_key, "ALIBABA_CODING_API_KEY");
+        assert_eq!(
+            alibaba.default_base_url,
+            "https://coding-intl.dashscope.aliyuncs.com/v1"
+        );
+        assert!(alibaba.requires_api_key);
+        assert!(!alibaba.local_only);
+        assert!(alibaba.supports_model_discovery);
+    }
+
+    #[test]
+    fn alibaba_coding_models_no_duplicates() {
+        let mut ids: Vec<&str> = ALIBABA_CODING_MODELS.iter().map(|(id, _)| *id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            ALIBABA_CODING_MODELS.len(),
+            "duplicate model IDs"
+        );
+    }
+
+    #[test]
+    fn alibaba_coding_models_have_recommended() {
+        let discovered = catalog_to_discovered(ALIBABA_CODING_MODELS, 4);
+        let recommended_count = discovered.iter().filter(|m| m.recommended).count();
+        assert_eq!(recommended_count, 4);
+    }
+
+    #[test]
+    fn qwen3_context_window() {
+        assert_eq!(context_window_for_model("qwen3.6-plus"), 128_000);
+        assert_eq!(context_window_for_model("qwen3.5-plus"), 128_000);
+        assert_eq!(context_window_for_model("qwen3-max-2026-01-23"), 128_000);
+        assert_eq!(context_window_for_model("qwen3-coder-next"), 128_000);
+        assert_eq!(context_window_for_model("qwen3-coder-plus"), 128_000);
+    }
+
+    #[test]
+    fn alibaba_coding_registers_with_api_key() {
+        let mut config = ProvidersConfig::default();
+        config.providers.insert(
+            "alibaba-coding".into(),
+            moltis_config::schema::ProviderEntry {
+                api_key: Some(secrecy::Secret::new("sk-sp-test".into())),
+                ..Default::default()
+            },
+        );
+
+        let reg = ProviderRegistry::from_env_with_config(&config);
+        assert!(
+            reg.list_models()
+                .iter()
+                .any(|m| m.provider == "alibaba-coding")
+        );
     }
 
     #[test]
