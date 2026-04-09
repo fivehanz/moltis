@@ -58,10 +58,10 @@ pub fn init_shared_http_client(proxy_url: Option<&str>) {
 /// All providers that don't need custom redirect/proxy settings should
 /// reuse this client to share connection pools, DNS cache, and TLS sessions.
 ///
-/// Falls back to a plain client if [`init_shared_http_client`] was never
-/// called (e.g. in tests).
+/// Falls back to a client with default headers (including User-Agent)
+/// if [`init_shared_http_client`] was never called (e.g. in tests).
 pub fn shared_http_client() -> &'static reqwest::Client {
-    SHARED_CLIENT.get_or_init(reqwest::Client::new)
+    SHARED_CLIENT.get_or_init(moltis_common::http_client::build_default_http_client)
 }
 
 /// A model discovered from a provider API (e.g. `/v1/models`).
