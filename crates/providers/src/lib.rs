@@ -968,6 +968,7 @@ pub fn is_chat_capable_model(model_id: &str) -> bool {
         "imagen-",
         "gemini-embedding",
         "learnlm-",
+        "gemma-",
         // Z.AI non-chat models
         "glm-image",
         "glm-asr",
@@ -990,6 +991,10 @@ pub fn is_chat_capable_model(model_id: &str) -> bool {
         return false;
     }
     if id.contains("-transcribe") {
+        return false;
+    }
+    // Gemini live (real-time dialogue) and image-generation variants
+    if id.contains("-live-") || id.contains("-image-") {
         return false;
     }
     true
@@ -1083,8 +1088,8 @@ pub fn supports_reasoning_for_model(model_id: &str) -> bool {
     if id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
         return true;
     }
-    // Gemini 2.5 Flash/Pro with thinking
-    if id.starts_with("gemini-2.5") {
+    // Gemini 2.5+ with thinking (2.5 Flash/Pro, 3 Flash, 3.1 Pro)
+    if id.starts_with("gemini-2.5") || id.starts_with("gemini-3") {
         return true;
     }
     // DeepSeek R1 / reasoning models
@@ -1206,6 +1211,12 @@ const MOONSHOT_MODELS: &[(&str, &str)] = &[("kimi-k2.5", "Kimi K2.5")];
 /// Known Google Gemini models.
 /// See: <https://ai.google.dev/gemini-api/docs/models>
 const GEMINI_MODELS: &[(&str, &str)] = &[
+    ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
+    (
+        "gemini-3.1-flash-lite-preview",
+        "Gemini 3.1 Flash-Lite Preview",
+    ),
+    ("gemini-3-flash-preview", "Gemini 3 Flash Preview"),
     ("gemini-2.5-flash-preview-05-20", "Gemini 2.5 Flash Preview"),
     ("gemini-2.5-pro-preview-05-06", "Gemini 2.5 Pro Preview"),
     ("gemini-2.0-flash", "Gemini 2.0 Flash"),
@@ -3399,9 +3410,16 @@ mod tests {
         assert!(!is_chat_capable_model("imagen-3.0-generate-002"));
         assert!(!is_chat_capable_model("gemini-embedding-exp"));
         assert!(!is_chat_capable_model("learnlm-1.5-pro-experimental"));
+        assert!(!is_chat_capable_model("gemma-3n-e4b-it"));
+        // Gemini live/image variants are not chat models
+        assert!(!is_chat_capable_model("gemini-3.1-flash-live-preview"));
+        assert!(!is_chat_capable_model("gemini-3.1-flash-image-preview"));
         // Gemini chat models pass
         assert!(is_chat_capable_model("gemini-2.0-flash"));
         assert!(is_chat_capable_model("gemini-2.5-flash-preview-05-20"));
+        assert!(is_chat_capable_model("gemini-3-flash-preview"));
+        assert!(is_chat_capable_model("gemini-3.1-pro-preview"));
+        assert!(is_chat_capable_model("gemini-3.1-flash-lite-preview"));
 
         // Z.AI non-chat models
         assert!(!is_chat_capable_model("glm-image"));
@@ -4392,6 +4410,9 @@ mod tests {
             "gemini-1.5-flash",
             "gemini-2.0-flash",
             "gemini-2.0-pro",
+            "gemini-3-flash-preview",
+            "gemini-3.1-pro-preview",
+            "gemini-3.1-flash-lite-preview",
             "gemini-ultra",
         ];
         for model in gemini_models {
@@ -5017,9 +5038,12 @@ mod tests {
         assert!(supports_reasoning_for_model("o1"));
         assert!(supports_reasoning_for_model("o1-mini"));
         assert!(supports_reasoning_for_model("gemini-2.5-flash"));
+        assert!(supports_reasoning_for_model("gemini-3-flash-preview"));
+        assert!(supports_reasoning_for_model("gemini-3.1-pro-preview"));
         assert!(supports_reasoning_for_model("deepseek-r1"));
 
         // Models that don't support reasoning
+        assert!(!supports_reasoning_for_model("gemini-2.0-flash"));
         assert!(!supports_reasoning_for_model("claude-sonnet-4-20250514"));
         assert!(!supports_reasoning_for_model("gpt-4o"));
         assert!(!supports_reasoning_for_model("gpt-5.2"));
