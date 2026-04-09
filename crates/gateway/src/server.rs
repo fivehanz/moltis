@@ -56,6 +56,18 @@ use crate::tailscale::{
     CliTailscaleManager, TailscaleManager, TailscaleMode, validate_tailscale_config,
 };
 
+#[cfg(feature = "file-watcher")]
+async fn start_skill_hot_reload_watcher() -> anyhow::Result<(
+    moltis_skills::watcher::SkillWatcher,
+    tokio::sync::mpsc::UnboundedReceiver<moltis_skills::watcher::SkillWatchEvent>,
+)> {
+    let watch_specs = tokio::task::spawn_blocking(moltis_skills::watcher::default_watch_specs)
+        .await
+        .map_err(|error| anyhow::anyhow!("skills watcher task failed: {error}"))??;
+
+    moltis_skills::watcher::SkillWatcher::start(watch_specs)
+}
+
 // ── Location requester ───────────────────────────────────────────────────────
 
 /// Gateway implementation of [`moltis_tools::location::LocationRequester`].
@@ -3980,9 +3992,7 @@ pub async fn prepare_gateway_core(
     {
         let watcher_state = Arc::clone(&state);
         tokio::spawn(async move {
-            let (mut watcher, mut rx) = match moltis_skills::watcher::default_watch_specs()
-                .and_then(moltis_skills::watcher::SkillWatcher::start)
-            {
+            let (mut watcher, mut rx) = match start_skill_hot_reload_watcher().await {
                 Ok(started) => started,
                 Err(error) => {
                     tracing::warn!("skills: failed to start file watcher: {error}");
@@ -3991,7 +4001,7 @@ pub async fn prepare_gateway_core(
             };
 
             loop {
-                let Some(_event) = rx.recv().await else {
+                let Some(event) = rx.recv().await else {
                     break;
                 };
                 broadcast(
@@ -4002,16 +4012,19 @@ pub async fn prepare_gateway_core(
                 )
                 .await;
 
-                match moltis_skills::watcher::default_watch_specs()
-                    .and_then(moltis_skills::watcher::SkillWatcher::start)
-                {
-                    Ok((new_watcher, new_rx)) => {
-                        watcher = new_watcher;
-                        rx = new_rx;
-                    },
-                    Err(error) => {
-                        tracing::warn!("skills: failed to refresh file watcher: {error}");
-                    },
+                if matches!(
+                    event,
+                    moltis_skills::watcher::SkillWatchEvent::ManifestChanged
+                ) {
+                    match start_skill_hot_reload_watcher().await {
+                        Ok((new_watcher, new_rx)) => {
+                            watcher = new_watcher;
+                            rx = new_rx;
+                        },
+                        Err(error) => {
+                            tracing::warn!("skills: failed to refresh file watcher: {error}");
+                        },
+                    }
                 }
             }
 

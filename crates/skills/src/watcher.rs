@@ -26,8 +26,10 @@ use crate::{
 /// Events emitted by the skill watcher.
 #[derive(Debug, Clone)]
 pub enum SkillWatchEvent {
-    /// A skill was created, modified, or deleted.
-    Changed,
+    /// An enabled skill's `SKILL.md` changed.
+    SkillChanged,
+    /// The skills manifest changed, which may require rebuilding the watch set.
+    ManifestChanged,
 }
 
 /// A filesystem path plus the recursion mode to use when watching it.
@@ -135,7 +137,8 @@ impl SkillWatcher {
             None,
             move |result: DebounceEventResult| match result {
                 Ok(events) => {
-                    let mut changed = false;
+                    let mut skill_changed = false;
+                    let mut manifest_changed = false;
                     for event in events {
                         for path in &event.paths {
                             let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -149,14 +152,20 @@ impl SkillWatcher {
                                 | EventKind::Modify(_)
                                 | EventKind::Remove(_) => {
                                     debug!(path = %path.display(), "skill watcher event");
-                                    changed = true;
+                                    if filename == "skills-manifest.json" {
+                                        manifest_changed = true;
+                                    } else {
+                                        skill_changed = true;
+                                    }
                                 },
                                 _ => {},
                             }
                         }
                     }
-                    if changed {
-                        let _ = tx.send(SkillWatchEvent::Changed);
+                    if manifest_changed {
+                        let _ = tx.send(SkillWatchEvent::ManifestChanged);
+                    } else if skill_changed {
+                        let _ = tx.send(SkillWatchEvent::SkillChanged);
                     }
                 },
                 Err(errors) => {
