@@ -583,6 +583,7 @@ type ModelInfo {
 	enabled: Boolean
 	supportsTools: Boolean
 	supportsVision: Boolean
+	supportsReasoning: Boolean
 	supportsStreaming: Boolean
 	contextWindow: Int
 	maxOutputTokens: Int
