@@ -19,6 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260409.03] - 2026-04-09
+### Removed
+- Remove redundant http client fallback check
+
+
+### Fixed
+- [common] Ensure User-Agent survives all HTTP client fallback paths
+- [test] Address PR review — clarify comment and assert no Error events
+- [crons] Persist schedule field values across modal re-renders
+- [crons] Read schedule fields as snake_case from server responses
+- [providers] Deliver MiniMax system prompt via first user message
+- [tests] Use streaming probe for OpenAI integration tests
+- [providers] Bump GPT-5 probe output cap to 16 tokens
+- [tests] Use Secret<T> for API keys in model discovery tests
+- [providers] Handle multimodal content in MiniMax system prompt rewrite
+
 ## [20260409.02] - 2026-04-09
 ### Added
 - [msteams] Comprehensive Teams channel implementation
