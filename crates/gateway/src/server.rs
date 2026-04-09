@@ -5076,6 +5076,7 @@ mod tests {
                 display_name: "Remote Model".into(),
                 created_at: None,
                 recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
             },
             remote_provider,
         );
