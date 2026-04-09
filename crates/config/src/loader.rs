@@ -884,14 +884,18 @@ fn yaml_scalar(value: &str) -> String {
     }
 }
 
-fn load_workspace_markdown(path: PathBuf) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let trimmed = strip_leading_html_comments(&content).trim();
+pub fn normalize_workspace_markdown_content(content: &str) -> Option<String> {
+    let trimmed = strip_leading_html_comments(content).trim();
     if trimmed.is_empty() {
         None
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn load_workspace_markdown(path: PathBuf) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    normalize_workspace_markdown_content(&content)
 }
 
 fn load_identity_from_path(path: &Path) -> Option<AgentIdentity> {
@@ -2023,5 +2027,19 @@ name = "Rex"
         assert_eq!(result, Some(dir.path().join("share")));
 
         clear_data_dir();
+    }
+
+    #[test]
+    fn normalize_workspace_markdown_content_strips_leading_comments_and_trims() {
+        let content = "<!-- comment -->\n\n  hello world  \n";
+        let normalized = normalize_workspace_markdown_content(content);
+        assert_eq!(normalized.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn normalize_workspace_markdown_content_returns_none_for_comment_only_content() {
+        let content = "  <!-- comment -->\n\n<!-- another -->  ";
+        let normalized = normalize_workspace_markdown_content(content);
+        assert_eq!(normalized, None);
     }
 }

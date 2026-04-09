@@ -5,7 +5,10 @@ use std::{
 
 use tracing::warn;
 
-use moltis_protocol::{ErrorShape, error_codes};
+use {
+    moltis_agents::prompt::WorkspaceFilePromptStatus,
+    moltis_protocol::{ErrorShape, error_codes},
+};
 
 use crate::{
     broadcast::{BroadcastOpts, broadcast},
@@ -202,16 +205,85 @@ fn normalize_relative_agent_path(path: &str) -> Result<PathBuf, ErrorShape> {
     Ok(candidate.to_path_buf())
 }
 
-fn read_agent_file(agent_id: &str, relative_path: &Path) -> Result<String, ErrorShape> {
-    let primary = moltis_config::agent_workspace_dir(agent_id).join(relative_path);
-    let fallback = (agent_id == "main").then(|| moltis_config::data_dir().join(relative_path));
+#[derive(Debug, Clone, serde::Serialize)]
+struct WorkspacePromptFileStatusResponse {
+    path: String,
+    source: &'static str,
+    size: Option<u64>,
+    #[serde(flatten)]
+    prompt_status: WorkspaceFilePromptStatus,
+}
 
-    let target = if primary.exists() {
-        Some(primary)
-    } else {
-        fallback.filter(|path| path.exists())
+fn workspace_file_limit_chars(ctx: &MethodContext) -> usize {
+    ctx.state.config.chat.workspace_file_max_chars
+}
+
+fn should_fallback_agent_file_to_root(agent_id: &str, relative_path: &Path) -> bool {
+    if agent_id == "main" {
+        return true;
     }
-    .ok_or_else(|| ErrorShape::new(error_codes::INVALID_REQUEST, "file not found"))?;
+
+    matches!(relative_path.to_str(), Some("AGENTS.md") | Some("TOOLS.md"))
+}
+
+fn resolve_agent_file_target(
+    agent_id: &str,
+    relative_path: &Path,
+) -> Option<(PathBuf, &'static str)> {
+    let primary = moltis_config::agent_workspace_dir(agent_id).join(relative_path);
+    if primary.exists() {
+        return Some((primary, "agent"));
+    }
+
+    if should_fallback_agent_file_to_root(agent_id, relative_path) {
+        let fallback = moltis_config::data_dir().join(relative_path);
+        if fallback.exists() {
+            return Some((fallback, "root"));
+        }
+    }
+
+    None
+}
+
+fn workspace_prompt_file_status(
+    agent_id: &str,
+    file_name: &str,
+    limit_chars: usize,
+) -> Option<WorkspacePromptFileStatusResponse> {
+    let relative_path = Path::new(file_name);
+    let (path, source) = resolve_agent_file_target(agent_id, relative_path)?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let normalized = moltis_config::normalize_workspace_markdown_content(&content)?;
+    let original_chars = normalized.chars().count();
+    let size_bytes = std::fs::metadata(&path).ok().map(|meta| meta.len());
+    Some(WorkspacePromptFileStatusResponse {
+        path: file_name.to_string(),
+        source,
+        size: size_bytes,
+        prompt_status: WorkspaceFilePromptStatus {
+            name: file_name.to_string(),
+            original_chars,
+            included_chars: original_chars.min(limit_chars),
+            limit_chars,
+            truncated_chars: original_chars.saturating_sub(limit_chars),
+            truncated: original_chars > limit_chars,
+        },
+    })
+}
+
+fn workspace_prompt_files_status(agent_id: &str, limit_chars: usize) -> Vec<serde_json::Value> {
+    ["AGENTS.md", "TOOLS.md"]
+        .iter()
+        .filter_map(|file_name| {
+            workspace_prompt_file_status(agent_id, file_name, limit_chars)
+                .and_then(|status| serde_json::to_value(status).ok())
+        })
+        .collect()
+}
+
+fn read_agent_file(agent_id: &str, relative_path: &Path) -> Result<String, ErrorShape> {
+    let (target, _) = resolve_agent_file_target(agent_id, relative_path)
+        .ok_or_else(|| ErrorShape::new(error_codes::INVALID_REQUEST, "file not found"))?;
 
     std::fs::read_to_string(target)
         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))
@@ -370,7 +442,28 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         ));
                     };
                     let default_id = store.default_id().await.map_err(ErrorShape::from)?;
-                    let agents = store.list().await.map_err(ErrorShape::from)?;
+                    let limit_chars = workspace_file_limit_chars(&ctx);
+                    let agents = store
+                        .list()
+                        .await
+                        .map_err(ErrorShape::from)?
+                        .into_iter()
+                        .map(|agent| {
+                            let agent_id = agent.id.clone();
+                            let mut value = serde_json::to_value(agent)
+                                .unwrap_or_else(|_| serde_json::json!({}));
+                            if let Some(obj) = value.as_object_mut() {
+                                obj.insert(
+                                    "workspace_prompt_files".to_string(),
+                                    serde_json::Value::Array(workspace_prompt_files_status(
+                                        &agent_id,
+                                        limit_chars,
+                                    )),
+                                );
+                            }
+                            value
+                        })
+                        .collect::<Vec<_>>();
                     Ok(serde_json::json!({
                         "default_id": default_id,
                         "agents": agents,
@@ -403,6 +496,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
 
                     let mut payload = serde_json::to_value(agent)
                         .map_err(|e| ErrorShape::new(error_codes::UNAVAILABLE, e.to_string()))?;
+                    let limit_chars = workspace_file_limit_chars(&ctx);
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert(
                             "identity_fields".to_string(),
@@ -422,6 +516,13 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                                     .await
                                     .unwrap_or_else(|_| "main".to_string())
                             ),
+                        );
+                        obj.insert(
+                            "workspace_prompt_files".to_string(),
+                            serde_json::Value::Array(workspace_prompt_files_status(
+                                &id,
+                                limit_chars,
+                            )),
                         );
                     }
                     Ok(payload)
@@ -676,29 +777,46 @@ pub(super) fn register(reg: &mut MethodRegistry) {
             Box::new(|ctx| {
                 Box::pin(async move {
                     let agent_id = resolve_requested_agent_id(&ctx, &ctx.params).await?;
+                    let limit_chars = workspace_file_limit_chars(&ctx);
                     let mut files: Vec<serde_json::Value> = Vec::new();
                     let root = moltis_config::agent_workspace_dir(&agent_id);
                     let root_exists = root.exists();
                     if root_exists {
                         list_agent_workspace_files_recursively(&root, &root, &mut files);
                     }
-                    if agent_id == "main" {
-                        for file_name in &[
-                            "IDENTITY.md",
-                            "SOUL.md",
-                            "MEMORY.md",
-                            "AGENTS.md",
-                            "TOOLS.md",
-                        ] {
-                            let agent_path = root.join(file_name);
-                            let root_path = moltis_config::data_dir().join(file_name);
-                            if !agent_path.exists() && root_path.exists() {
-                                files.push(serde_json::json!({
-                                    "path": file_name,
-                                    "source": "root",
-                                    "size": std::fs::metadata(root_path).ok().map(|m| m.len()),
-                                }));
+                    for file_name in &[
+                        "IDENTITY.md",
+                        "SOUL.md",
+                        "MEMORY.md",
+                        "AGENTS.md",
+                        "TOOLS.md",
+                    ] {
+                        let relative_path = Path::new(file_name);
+                        if !should_fallback_agent_file_to_root(&agent_id, relative_path) {
+                            continue;
+                        }
+                        let agent_path = root.join(file_name);
+                        let root_path = moltis_config::data_dir().join(file_name);
+                        if !agent_path.exists() && root_path.exists() {
+                            let mut entry = serde_json::json!({
+                                "path": file_name,
+                                "source": "root",
+                                "size": std::fs::metadata(&root_path).ok().map(|m| m.len()),
+                            });
+                            if matches!(*file_name, "AGENTS.md" | "TOOLS.md")
+                                && let Some(obj) = entry.as_object_mut()
+                                && let Some(status) =
+                                    workspace_prompt_file_status(&agent_id, file_name, limit_chars)
+                                && let Ok(status_value) = serde_json::to_value(status)
+                                && let Some(status_obj) = status_value.as_object()
+                            {
+                                for (key, value) in status_obj {
+                                    if key != "path" && key != "source" && key != "size" {
+                                        obj.insert(key.clone(), value.clone());
+                                    }
+                                }
                             }
+                            files.push(entry);
                         }
                     }
                     files.sort_by(|left, right| {

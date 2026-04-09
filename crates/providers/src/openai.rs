@@ -552,6 +552,7 @@ impl OpenAiProvider {
             "model": self.model,
             "messages": openai_messages,
         });
+        self.apply_top_level_system_prompt(&mut body);
         // Probes only answer "can this model respond at all?".
         // Keep them cheap instead of mirroring full reasoning budgets.
         self.apply_probe_output_cap_chat(&mut body);
@@ -662,6 +663,51 @@ impl OpenAiProvider {
             || self.base_url.contains("moonshot.ai")
             || self.base_url.contains("moonshot.cn")
             || self.model.starts_with("kimi-")
+    }
+
+    /// Some providers (e.g. MiniMax) reject `role: "system"` in the messages
+    /// array and require system content in a top-level `"system"` field instead.
+    /// Add new providers here when they have the same constraint.
+    fn requires_top_level_system_prompt(&self) -> bool {
+        self.model.starts_with("MiniMax-")
+            || self.provider_name.eq_ignore_ascii_case("minimax")
+            || self.base_url.to_ascii_lowercase().contains("minimax")
+    }
+
+    /// For providers that reject `role: "system"` in the messages array,
+    /// extract all system messages from `body["messages"]`, join their
+    /// content with `\n\n`, and place the result in `body["system"]`.
+    ///
+    /// Must be called on the request body **after** it is fully assembled.
+    /// This is intentionally a single body-level mutation so call sites
+    /// cannot forget to apply it (previously reverted by accident in #586).
+    fn apply_top_level_system_prompt(&self, body: &mut serde_json::Value) {
+        if !self.requires_top_level_system_prompt() {
+            return;
+        }
+        let Some(messages) = body
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return;
+        };
+        let mut system_parts = Vec::new();
+        messages.retain(|msg| {
+            if msg.get("role").and_then(serde_json::Value::as_str) == Some("system") {
+                if let Some(content) = msg.get("content").and_then(serde_json::Value::as_str)
+                    && !content.is_empty()
+                {
+                    system_parts.push(content.to_string());
+                } else if msg.get("content").is_some() {
+                    warn!("MiniMax system message has non-string content; it will be dropped");
+                }
+                return false;
+            }
+            true
+        });
+        if !system_parts.is_empty() {
+            body["system"] = serde_json::Value::String(system_parts.join("\n\n"));
+        }
     }
 
     fn serialize_messages_for_request(&self, messages: &[ChatMessage]) -> Vec<serde_json::Value> {
@@ -1006,6 +1052,7 @@ impl OpenAiProvider {
                 "stream": true,
                 "stream_options": { "include_usage": true },
             });
+            self.apply_top_level_system_prompt(&mut body);
 
             if !tools.is_empty() {
                 body["tools"] = serde_json::Value::Array(to_openai_tools(&tools));
@@ -1639,6 +1686,7 @@ impl LlmProvider for OpenAiProvider {
             "model": self.model,
             "messages": openai_messages,
         });
+        self.apply_top_level_system_prompt(&mut body);
 
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(to_openai_tools(tools));
@@ -1922,7 +1970,7 @@ mod tests {
     }
 
     #[test]
-    fn minimax_serialization_preserves_system_messages() {
+    fn minimax_body_extracts_system_messages_to_top_level() {
         let provider = OpenAiProvider::new_with_name(
             Secret::new("test-key".to_string()),
             "MiniMax-M2.1".to_string(),
@@ -1934,10 +1982,33 @@ mod tests {
             ChatMessage::user("hi"),
             ChatMessage::system("sys b"),
         ]);
-        assert_eq!(serialized.len(), 3);
-        assert_eq!(serialized[0]["role"], "system");
-        assert_eq!(serialized[1]["role"], "user");
-        assert_eq!(serialized[2]["role"], "system");
+        let mut body = serde_json::json!({ "model": "MiniMax-M2.1", "messages": serialized });
+        provider.apply_top_level_system_prompt(&mut body);
+
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(body["system"], "sys a\n\nsys b");
+    }
+
+    #[test]
+    fn non_minimax_body_keeps_system_messages_in_array() {
+        let provider = OpenAiProvider::new(
+            Secret::new("test-key".to_string()),
+            "gpt-4o".to_string(),
+            "https://api.openai.com/v1".to_string(),
+        );
+        let serialized = provider.serialize_messages_for_request(&[
+            ChatMessage::system("sys a"),
+            ChatMessage::user("hi"),
+        ]);
+        let mut body = serde_json::json!({ "model": "gpt-4o", "messages": serialized });
+        provider.apply_top_level_system_prompt(&mut body);
+
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert!(body.get("system").is_none());
     }
 
     #[test]
@@ -2035,7 +2106,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn minimax_stream_request_preserves_system_role_messages() {
+    async fn minimax_stream_request_extracts_system_role_messages() {
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n\
                    data: [DONE]\n\n";
         let (base_url, captured) = start_sse_mock(sse.to_string()).await;
@@ -2056,19 +2127,17 @@ mod tests {
         let reqs = captured.lock().unwrap();
         assert_eq!(reqs.len(), 1);
         let body = reqs[0].body.as_ref().expect("request should have a body");
-        assert!(body.get("system").is_none());
+        assert_eq!(body["system"], "stay deterministic");
 
         let history = body["messages"]
             .as_array()
             .expect("messages should be an array");
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0]["role"], "system");
-        assert_eq!(history[0]["content"], "stay deterministic");
-        assert_eq!(history[1]["role"], "user");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["role"], "user");
     }
 
     #[tokio::test]
-    async fn minimax_complete_request_preserves_system_role_messages_regression_578() {
+    async fn minimax_complete_request_extracts_system_role_messages_regression_578() {
         let payload = serde_json::json!({
             "choices": [{
                 "message": {
@@ -2103,21 +2172,20 @@ mod tests {
 
         let reqs = captured.lock().unwrap();
         let body = reqs[0].body.as_ref().expect("request should have a body");
-        assert!(body.get("system").is_none());
+        assert_eq!(
+            body["system"],
+            "you are a helpful assistant\n\nextra context"
+        );
 
         let history = body["messages"]
             .as_array()
             .expect("messages should be an array");
-        assert_eq!(history.len(), 3);
-        assert_eq!(history[0]["role"], "system");
-        assert_eq!(history[0]["content"], "you are a helpful assistant");
-        assert_eq!(history[1]["role"], "user");
-        assert_eq!(history[2]["role"], "system");
-        assert_eq!(history[2]["content"], "extra context");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["role"], "user");
     }
 
     #[tokio::test]
-    async fn minimax_stream_preserves_multiple_system_messages_regression_578() {
+    async fn minimax_stream_extracts_multiple_system_messages_regression_578() {
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n\
                    data: [DONE]\n\n";
         let (base_url, captured) = start_sse_mock(sse.to_string()).await;
@@ -2139,17 +2207,16 @@ mod tests {
 
         let reqs = captured.lock().unwrap();
         let body = reqs[0].body.as_ref().expect("request should have a body");
-        assert!(body.get("system").is_none());
+        assert_eq!(
+            body["system"],
+            "you are a helpful assistant\n\nextra context"
+        );
 
         let history = body["messages"]
             .as_array()
             .expect("messages should be an array");
-        assert_eq!(history.len(), 3);
-        assert_eq!(history[0]["role"], "system");
-        assert_eq!(history[0]["content"], "you are a helpful assistant");
-        assert_eq!(history[1]["role"], "user");
-        assert_eq!(history[2]["role"], "system");
-        assert_eq!(history[2]["content"], "extra context");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["role"], "user");
     }
 
     #[tokio::test]
@@ -2218,6 +2285,100 @@ mod tests {
         let usage = last_done.expect("stream should emit Done");
         assert_eq!(usage.input_tokens, 5040);
         assert_eq!(usage.output_tokens, 61);
+    }
+
+    #[tokio::test]
+    async fn lmstudio_reasoning_content_stream_emits_reasoning_and_visible_deltas() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"Thinking\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" process\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Rome\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (base_url, _) = start_sse_mock(sse.to_string()).await;
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new("lmstudio".to_string()),
+            "qwen3.5-27b".to_string(),
+            base_url,
+            "lmstudio".to_string(),
+        );
+
+        crate::contract::stream_surfaces_reasoning_separately(&provider)
+            .await
+            .expect("LM Studio reasoning stream should satisfy provider contract");
+
+        let mut stream = provider.stream(vec![ChatMessage::user("What is the capital of Italy?")]);
+        let mut reasoning_deltas = Vec::new();
+        let mut visible_deltas = Vec::new();
+        let mut final_usage: Option<Usage> = None;
+
+        while let Some(event) = stream.next().await {
+            match event {
+                StreamEvent::ReasoningDelta(delta) => reasoning_deltas.push(delta),
+                StreamEvent::Delta(delta) => visible_deltas.push(delta),
+                StreamEvent::Done(usage) => final_usage = Some(usage),
+                _ => {},
+            }
+        }
+
+        assert_eq!(reasoning_deltas, vec!["Thinking", " process"]);
+        assert_eq!(visible_deltas, vec!["Rome"]);
+        let usage = final_usage.expect("stream should emit Done");
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn lmstudio_reasoning_field_alias_stream_emits_reasoning_before_answer() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"Plan:\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\" compare capitals\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Rome\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (base_url, _) = start_sse_mock(sse.to_string()).await;
+        let provider = OpenAiProvider::new_with_name(
+            Secret::new("lmstudio".to_string()),
+            "gemma-4".to_string(),
+            base_url,
+            "lmstudio".to_string(),
+        );
+
+        let mut stream = provider.stream(vec![ChatMessage::user("Answer briefly")]);
+        let mut events = Vec::new();
+
+        while let Some(event) = stream.next().await {
+            events.push(event);
+        }
+
+        let reasoning: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ReasoningDelta(delta) => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        let visible: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::Delta(delta) => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(reasoning, vec!["Plan:", " compare capitals"]);
+        assert_eq!(visible, vec!["Rome"]);
+
+        let first_reasoning = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::ReasoningDelta(_)))
+            .expect("stream should include reasoning");
+        let first_visible = events
+            .iter()
+            .position(|event| matches!(event, StreamEvent::Delta(_)))
+            .expect("stream should include visible text");
+        assert!(first_reasoning < first_visible);
     }
 
     // ── Regression: stream_with_tools must send tools in the API body ────

@@ -811,6 +811,7 @@ fn build_local_provider_entry(
         display_name: entry.display_name(),
         created_at: None,
         recommended: false,
+        capabilities: moltis_providers::ModelCapabilities::infer(&entry.model_id),
     };
     Ok((info, provider))
 }
@@ -2302,6 +2303,7 @@ mod tests {
                 display_name: "Shared Remote Model".into(),
                 created_at: None,
                 recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
             },
             remote_provider,
         );
@@ -2377,6 +2379,7 @@ mod tests {
                 display_name: "Remote Stale Alias".into(),
                 created_at: None,
                 recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
             },
             remote_provider,
         );

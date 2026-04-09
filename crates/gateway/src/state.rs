@@ -357,6 +357,8 @@ pub struct GatewayState {
     pub version: String,
     /// Hostname for HelloOk.
     pub hostname: String,
+    /// Loaded configuration snapshot for read-mostly request helpers.
+    pub config: moltis_config::schema::MoltisConfig,
     /// Auth configuration.
     pub auth: ResolvedAuth,
     /// Domain services.
@@ -447,6 +449,7 @@ impl GatewayState {
         Self::with_options(
             auth,
             services,
+            moltis_config::MoltisConfig::default(),
             None,
             None,
             None,
@@ -472,6 +475,7 @@ impl GatewayState {
     pub fn with_options(
         auth: ResolvedAuth,
         services: GatewayServices,
+        config: moltis_config::schema::MoltisConfig,
         sandbox_router: Option<Arc<SandboxRouter>>,
         credential_store: Option<Arc<CredentialStore>>,
         pairing_store: Option<Arc<PairingStore>>,
@@ -496,6 +500,7 @@ impl GatewayState {
         Arc::new(Self {
             version: moltis_config::VERSION.to_string(),
             hostname,
+            config,
             auth,
             services,
             credential_store,

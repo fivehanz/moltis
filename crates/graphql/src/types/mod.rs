@@ -450,6 +450,8 @@ pub struct ModelInfo {
     #[serde(default)]
     pub supports_vision: Option<bool>,
     #[serde(default)]
+    pub supports_reasoning: Option<bool>,
+    #[serde(default)]
     pub supports_streaming: Option<bool>,
     #[serde(default)]
     pub context_window: Option<u64>,

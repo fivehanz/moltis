@@ -349,7 +349,7 @@ fn validate_config(config: &moltis_config::MoltisConfig) -> Vec<String> {
         {
             warnings.push(
                 "Sandbox mode is available but no container runtime found. \
-                 Browser sandbox (for sandboxed sessions) requires Docker or Apple Container."
+                 Browser sandbox (for sandboxed sessions) requires Docker, Podman, or Apple Container."
                     .to_string(),
             );
         }

@@ -4779,6 +4779,7 @@ mod tests {
             display_name: id.to_string(),
             created_at: None,
             recommended: false,
+            capabilities: moltis_providers::ModelCapabilities::default(),
         }
     }
 
