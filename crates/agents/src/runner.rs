@@ -248,12 +248,16 @@ fn enforce_tool_result_context_budget(
 /// Error patterns that indicate the context window has been exceeded.
 const CONTEXT_WINDOW_PATTERNS: &[&str] = &[
     "context_length_exceeded",
+    "context_window_exceeded",
+    "context_window_exceeded",
     "max_tokens",
     "too many tokens",
     "request too large",
     "maximum context length",
     "context window",
     "token limit",
+    "input too long",
+    "input_too_long",
     "content_too_large",
     "request_too_large",
 ];
@@ -494,6 +498,12 @@ pub enum RunnerEvent {
     RetryingAfterError {
         error: String,
         delay_ms: u64,
+    },
+    /// The model stopped without tool calls but iteration budget remains;
+    /// the runner is automatically re-prompting.
+    AutoContinue {
+        iteration: usize,
+        max_iterations: usize,
     },
 }
 
@@ -805,6 +815,8 @@ pub async fn run_agent_loop_with_context(
     let native_tools = provider.supports_tools();
     let config = moltis_config::discover_and_load();
     let max_tool_result_bytes = config.tools.max_tool_result_bytes;
+    let max_auto_continues = config.tools.agent_max_auto_continues;
+    let auto_continue_min_tool_calls = config.tools.agent_auto_continue_min_tool_calls;
     let base_max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
     // Lazy mode needs extra iterations for tool_search discovery round-trips.
     let max_iterations = if config.tools.registry_mode == moltis_config::ToolRegistryMode::Lazy {
@@ -853,13 +865,15 @@ pub async fn run_agent_loop_with_context(
     let mut last_answer_text = String::new();
     let mut malformed_retry_count: u8 = 0;
     let mut empty_tool_name_retry_count: u8 = 0;
+    let mut auto_continue_count: usize = 0;
 
     loop {
         iterations += 1;
         if iterations > max_iterations {
             warn!("agent loop exceeded max iterations ({})", max_iterations);
             return Err(AgentRunError::Other(anyhow::anyhow!(
-                "agent loop exceeded max iterations"
+                "agent loop exceeded max iterations ({})",
+                max_iterations
             )));
         }
 
@@ -1118,8 +1132,35 @@ pub async fn run_agent_loop_with_context(
             }
         }
 
-        // If no tool calls, return the text response.
+        // If no tool calls, auto-continue or return the text response.
         if response.tool_calls.is_empty() {
+            // Auto-continue: if the model made tool calls earlier in this run
+            // and we haven't exhausted nudges, ask it to keep going.
+            if total_tool_calls > 0
+                && total_tool_calls >= auto_continue_min_tool_calls
+                && auto_continue_count < max_auto_continues
+            {
+                auto_continue_count += 1;
+                info!(
+                    iterations,
+                    auto_continue_count, "model stopped without tool calls, auto-continuing"
+                );
+                if let Some(cb) = on_event {
+                    cb(RunnerEvent::AutoContinue {
+                        iteration: iterations,
+                        max_iterations,
+                    });
+                }
+                let response_text = response.text.filter(|t| !t.is_empty()).unwrap_or_default();
+                if !response_text.is_empty() {
+                    messages.push(ChatMessage::assistant(&response_text));
+                }
+                messages.push(ChatMessage::user(
+                    "Your previous response ended without tool calls. If the task is complete, provide a brief final answer. Otherwise continue executing.",
+                ));
+                continue;
+            }
+
             let text = clean_response(
                 &response
                     .text
@@ -1361,6 +1402,8 @@ pub async fn run_agent_loop_streaming(
     let native_tools = provider.supports_tools();
     let config = moltis_config::discover_and_load();
     let max_tool_result_bytes = config.tools.max_tool_result_bytes;
+    let max_auto_continues = config.tools.agent_max_auto_continues;
+    let auto_continue_min_tool_calls = config.tools.agent_auto_continue_min_tool_calls;
     let base_max_iterations = resolve_agent_max_iterations(config.tools.agent_max_iterations);
     // Lazy mode needs extra iterations for tool_search discovery round-trips.
     let max_iterations = if config.tools.registry_mode == moltis_config::ToolRegistryMode::Lazy {
@@ -1413,6 +1456,7 @@ pub async fn run_agent_loop_streaming(
     let mut last_answer_text = String::new();
     let mut malformed_retry_count: u8 = 0;
     let mut empty_tool_name_retry_count: u8 = 0;
+    let mut auto_continue_count: usize = 0;
 
     loop {
         iterations += 1;
@@ -1422,7 +1466,8 @@ pub async fn run_agent_loop_streaming(
                 max_iterations
             );
             return Err(AgentRunError::Other(anyhow::anyhow!(
-                "agent loop exceeded max iterations"
+                "agent loop exceeded max iterations ({})",
+                max_iterations
             )));
         }
 
@@ -1789,8 +1834,34 @@ pub async fn run_agent_loop_streaming(
             }
         }
 
-        // If no tool calls, return the text response.
+        // If no tool calls, auto-continue or return the text response.
         if tool_calls.is_empty() {
+            // Auto-continue: if the model made tool calls earlier in this run
+            // and we haven't exhausted nudges, ask it to keep going.
+            if total_tool_calls > 0
+                && total_tool_calls >= auto_continue_min_tool_calls
+                && auto_continue_count < max_auto_continues
+            {
+                auto_continue_count += 1;
+                info!(
+                    iterations,
+                    auto_continue_count, "model stopped without tool calls, auto-continuing"
+                );
+                if let Some(cb) = on_event {
+                    cb(RunnerEvent::AutoContinue {
+                        iteration: iterations,
+                        max_iterations,
+                    });
+                }
+                if !accumulated_text.is_empty() {
+                    messages.push(ChatMessage::assistant(&accumulated_text));
+                }
+                messages.push(ChatMessage::user(
+                    "Your previous response ended without tool calls. If the task is complete, provide a brief final answer. Otherwise continue executing.",
+                ));
+                continue;
+            }
+
             // When the final iteration produced no text but a previous iteration
             // streamed answer text alongside tool calls, use that as the response.
             let final_text = if accumulated_text.is_empty() && !last_answer_text.is_empty() {
@@ -6119,6 +6190,27 @@ mod tests {
     }
 
     #[test]
+    fn test_is_context_window_error() {
+        // Existing patterns
+        assert!(is_context_window_error(
+            "context_length_exceeded: max tokens 200000"
+        ));
+        assert!(is_context_window_error("request too large"));
+        assert!(is_context_window_error("maximum context length exceeded"));
+        // New Z.AI / provider-specific patterns
+        assert!(is_context_window_error("model_context_window_exceeded"));
+        assert!(is_context_window_error("context_window_exceeded"));
+        assert!(is_context_window_error("input_too_long"));
+        assert!(is_context_window_error("input too long"));
+        // Case insensitive
+        assert!(is_context_window_error("Model_Context_Window_Exceeded"));
+        assert!(is_context_window_error("INPUT_TOO_LONG"));
+        // Negative cases
+        assert!(!is_context_window_error("connection reset by peer"));
+        assert!(!is_context_window_error("invalid API key"));
+    }
+
+    #[test]
     fn test_is_billing_quota_error() {
         assert!(is_billing_quota_error(
             "You exceeded your current quota, please check your plan and billing details."
@@ -6640,5 +6732,166 @@ mod tests {
         // "functions_" with no trailing name should produce an empty string,
         // which is handled by find_empty_tool_name_call / EMPTY_TOOL_NAME_RETRY_PROMPT.
         assert_eq!(sanitize_tool_name("functions_"), "");
+    }
+
+    // ── Auto-continue tests ──────────────────────────────────────────
+
+    /// Provider that makes 3 tool calls (one per iteration), then stops with
+    /// text repeatedly. Used to test that auto-continue nudges the model and
+    /// caps at the configured limit. The default threshold for auto-continue
+    /// is `agent_auto_continue_min_tool_calls = 3`, so we need at least 3 tool calls.
+    struct AutoContinueProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for AutoContinueProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn id(&self) -> &str {
+            "mock-model"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count < 3 {
+                // First 3 calls: make a tool call each time.
+                Ok(CompletionResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: format!("call_{}", count + 1),
+                        name: "echo_tool".into(),
+                        arguments: serde_json::json!({"text": format!("step {}", count + 1)}),
+                    }],
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
+                })
+            } else {
+                // Subsequent calls: always return text without tool calls.
+                // This forces auto-continue to fire (until capped).
+                Ok(CompletionResponse {
+                    text: Some(format!("Partial result {count}")),
+                    tool_calls: vec![],
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
+                })
+            }
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_continue_triggers_after_tool_calls() {
+        let provider = Arc::new(AutoContinueProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(EchoTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(e);
+        });
+
+        let uc = UserContent::text("Do work");
+        let result = run_agent_loop(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &uc,
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Should have auto-continued `agent_max_auto_continues` (default 2) times,
+        // then returned.
+        let max_ac = moltis_config::discover_and_load()
+            .tools
+            .agent_max_auto_continues;
+        let events = events.lock().unwrap_or_else(|e| e.into_inner());
+        let auto_continue_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::AutoContinue { .. }))
+            .collect();
+        assert_eq!(auto_continue_events.len(), max_ac);
+
+        // The provider was called: 3 (tool calls) + 1 (text, auto-continued) +
+        // 1 (text, auto-continued) + 1 (text, returned) = 6 total iterations.
+        assert_eq!(result.iterations, 3 + max_ac + 1);
+        assert_eq!(result.tool_calls_made, 3);
+    }
+
+    #[tokio::test]
+    async fn test_auto_continue_does_not_trigger_for_pure_qa() {
+        // MockProvider returns text without tool calls on the first call.
+        let provider = Arc::new(MockProvider {
+            response_text: "Just a plain answer.".into(),
+        });
+        let tools = ToolRegistry::new();
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(e);
+        });
+
+        let uc = UserContent::text("What is 2+2?");
+        let result = run_agent_loop(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &uc,
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // No auto-continue for pure Q&A (total_tool_calls == 0).
+        let events = events.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::AutoContinue { .. })),
+            "auto-continue should not fire when no tool calls were made"
+        );
+        assert_eq!(result.iterations, 1);
+        assert_eq!(result.tool_calls_made, 0);
+        assert_eq!(result.text, "Just a plain answer.");
     }
 }

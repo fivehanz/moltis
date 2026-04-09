@@ -226,6 +226,8 @@ message_queue_mode = "followup"   # Default: process queued messages one-by-one 
 [tools]
 agent_timeout_secs = 600          # Max seconds for an agent run (0 = no timeout)
 agent_max_iterations = 25         # Max LLM/tool loop iterations before stopping
+agent_max_auto_continues = 2      # Auto-continue nudges when model stops mid-task (0 = off)
+agent_auto_continue_min_tool_calls = 3  # Min tool calls before auto-continue can trigger
 max_tool_result_bytes = 50000     # Max bytes per tool result before truncation (50KB)
 # registry_mode = "full"          # "full" = all schemas every turn, "lazy" = tool_search discovery
 
@@ -534,6 +536,17 @@ enabled = true                    # Enable metrics collection
 prometheus_endpoint = true        # Expose /metrics endpoint for Prometheus scraping
 # labels = {{ environment = "production", instance = "main" }}
                                   # Additional labels to add to all metrics
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CRON
+# ══════════════════════════════════════════════════════════════════════════════
+# Settings for the cron scheduler.
+
+# [cron]
+# rate_limit_max = 10                # Max jobs created per rate limit window
+# rate_limit_window_secs = 60        # Rate limit window in seconds
+# session_retention_days = 7         # Auto-clean cron sessions older than N days (0 or omit to disable)
+# auto_prune_cron_containers = true  # Auto-remove sandbox containers after cron job completion
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HEARTBEAT

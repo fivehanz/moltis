@@ -1408,6 +1408,7 @@ pub struct GatewayServices {
     pub channel: Arc<dyn ChannelService>,
     pub config: Arc<dyn ConfigService>,
     pub cron: Arc<dyn CronService>,
+    pub webhooks: Arc<dyn WebhooksService>,
     pub chat: Arc<dyn ChatService>,
     pub tts: Arc<dyn TtsService>,
     pub stt: Arc<dyn SttService>,
@@ -1459,6 +1460,11 @@ impl GatewayServices {
 
     pub fn with_cron(mut self, cron: Arc<dyn CronService>) -> Self {
         self.cron = cron;
+        self
+    }
+
+    pub fn with_webhooks(mut self, webhooks: Arc<dyn WebhooksService>) -> Self {
+        self.webhooks = webhooks;
         self
     }
 
@@ -1517,6 +1523,7 @@ impl GatewayServices {
             channel: Arc::new(NoopChannelService),
             config: Arc::new(NoopConfigService),
             cron: Arc::new(NoopCronService),
+            webhooks: Arc::new(NoopWebhooksService),
             chat: Arc::new(NoopChatService),
             tts: Arc::new(NoopTtsService),
             stt: Arc::new(NoopSttService),

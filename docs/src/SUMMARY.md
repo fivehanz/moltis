@@ -43,6 +43,7 @@
 - [Session Branching](session-branching.md)
 - [Checkpoints](checkpoints.md)
 - [Scheduling (Cron Jobs)](scheduling.md)
+- [Webhooks](webhooks.md)
 - [Skill Self-Extension](skill-tools.md)
 - [Mobile PWA](mobile-pwa.md)
 - [Native Swift Embedding (POC)](native-swift-embedding.md)

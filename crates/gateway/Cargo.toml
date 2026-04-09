@@ -28,6 +28,7 @@ moltis-chat            = { workspace = true }
 moltis-common          = { workspace = true }
 moltis-config          = { workspace = true }
 moltis-cron            = { workspace = true }
+moltis-webhooks        = { workspace = true }
 moltis-discord         = { workspace = true }
 moltis-matrix          = { optional = true, workspace = true }
 moltis-mcp             = { workspace = true }

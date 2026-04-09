@@ -273,6 +273,8 @@ fn build_schema_map() -> KnownKeys {
             ("maps", Struct(HashMap::from([("provider", Leaf)]))),
             ("agent_timeout_secs", Leaf),
             ("agent_max_iterations", Leaf),
+            ("agent_max_auto_continues", Leaf),
+            ("agent_auto_continue_min_tool_calls", Leaf),
             ("max_tool_result_bytes", Leaf),
             ("registry_mode", Leaf),
         ]))
@@ -533,6 +535,8 @@ fn build_schema_map() -> KnownKeys {
             Struct(HashMap::from([
                 ("rate_limit_max", Leaf),
                 ("rate_limit_window_secs", Leaf),
+                ("session_retention_days", Leaf),
+                ("auto_prune_cron_containers", Leaf),
             ])),
         ),
         ("env", Map(Box::new(Leaf))),

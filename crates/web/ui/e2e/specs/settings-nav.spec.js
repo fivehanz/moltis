@@ -30,6 +30,71 @@ function graphqlHttpStatus(page) {
 	});
 }
 
+function isRetryableNavigationError(error) {
+	const message = error?.message || String(error || "");
+	return (
+		message.includes("net::ERR_ABORTED") ||
+		message.includes("Execution context was destroyed") ||
+		message.includes("Target page, context or browser has been closed")
+	);
+}
+
+async function mockChannelsStatus(page, { channels, senders = [], allowRetryOwnership = false, label }) {
+	let lastError = null;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		try {
+			await expect.poll(() => new URL(page.url()).pathname).toBe("/settings/channels");
+			await page.waitForFunction(() => !!document.querySelector('script[type="module"][src*="js/app.js"]'));
+			await page.evaluate(
+				async ({ channels, senders, allowRetryOwnership, label }) => {
+					const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+					if (!appScript) throw new Error("app.js script not found");
+					const appUrl = new URL(appScript.src, window.location.origin).href;
+					const marker = "js/app.js";
+					const markerIdx = appUrl.indexOf(marker);
+					if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
+					const prefix = appUrl.slice(0, markerIdx);
+					const state = await import(`${prefix}js/state.js`);
+					const channelsPage = await import(`${prefix}js/page-channels.js`);
+					const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
+					window.__matrixOwnershipRetryRequest = null;
+					state.setWs({
+						readyState: wsOpen,
+						send(raw) {
+							const req = JSON.parse(raw || "{}");
+							const resolver = state.pending[req.id];
+							if (!resolver) return;
+							if (req.method === "channels.status") {
+								resolver({ ok: true, payload: { channels } });
+							} else if (req.method === "channels.senders.list") {
+								resolver({ ok: true, payload: { senders } });
+							} else if (req.method === "channels.retry_ownership" && allowRetryOwnership) {
+								window.__matrixOwnershipRetryRequest = req.params;
+								resolver({ ok: true, payload: { ok: true } });
+							} else {
+								resolver({
+									ok: false,
+									error: { message: `unexpected rpc in ${label}: ${req.method}` },
+								});
+							}
+							delete state.pending[req.id];
+						},
+					});
+					state.setConnected(true);
+					await channelsPage.prefetchChannels();
+					await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+				},
+				{ channels, senders, allowRetryOwnership, label },
+			);
+			return;
+		} catch (error) {
+			lastError = error;
+			if (!isRetryableNavigationError(error) || attempt === 2) break;
+		}
+	}
+	if (lastError) throw lastError;
+}
+
 test.describe("Settings navigation", () => {
 	async function openProvidersPage(page) {
 		await navigateAndWait(page, "/settings/providers");
@@ -764,70 +829,39 @@ test.describe("Settings navigation", () => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/channels");
 
-		await page.evaluate(async () => {
-			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-			if (!appScript) throw new Error("app.js script not found");
-			const appUrl = new URL(appScript.src, window.location.origin).href;
-			const marker = "js/app.js";
-			const markerIdx = appUrl.indexOf(marker);
-			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
-			const prefix = appUrl.slice(0, markerIdx);
-			const state = await import(`${prefix}js/state.js`);
-			const channelsPage = await import(`${prefix}js/page-channels.js`);
-			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
-			state.setWs({
-				readyState: wsOpen,
-				send(raw) {
-					const req = JSON.parse(raw || "{}");
-					const resolver = state.pending[req.id];
-					if (!resolver) return;
-					if (req.method === "channels.status") {
-						resolver({
-							ok: true,
-							payload: {
-								channels: [
-									{
-										type: "matrix",
-										account_id: "moltis-testbot",
-										name: "Matrix (moltis-testbot)",
-										status: "connected",
-										details: "@moltis-testbot:matrix.org on https://matrix.org",
-										sessions: [],
-										extra: {
-											matrix: {
-												verification_state: "unverified",
-												ownership_mode: "moltis_owned",
-												auth_mode: "password",
-												user_id: "@moltis-testbot:matrix.org",
-												device_id: "MOLTISBOT",
-												device_display_name: "Moltis Matrix Bot",
-												cross_signing_complete: true,
-												device_verified_by_owner: false,
-												recovery_state: "enabled",
-												pending_verifications: [
-													{
-														flow_id: "flow-1",
-														other_user_id: "@alice:matrix.org",
-														room_id: "!room:matrix.org",
-														emoji_lines: ["🐶 Dog", "🔥 Fire"],
-													},
-												],
-											},
-										},
-									},
-								],
-							},
-						});
-					} else if (req.method === "channels.senders.list") {
-						resolver({ ok: true, payload: { senders: [] } });
-					} else {
-						resolver({ ok: false, error: { message: `unexpected rpc in matrix status test: ${req.method}` } });
-					}
-					delete state.pending[req.id];
+		await mockChannelsStatus(page, {
+			label: "matrix status test",
+			channels: [
+				{
+					type: "matrix",
+					account_id: "moltis-testbot",
+					name: "Matrix (moltis-testbot)",
+					status: "connected",
+					details: "@moltis-testbot:matrix.org on https://matrix.org",
+					sessions: [],
+					extra: {
+						matrix: {
+							verification_state: "unverified",
+							ownership_mode: "moltis_owned",
+							auth_mode: "password",
+							user_id: "@moltis-testbot:matrix.org",
+							device_id: "MOLTISBOT",
+							device_display_name: "Moltis Matrix Bot",
+							cross_signing_complete: true,
+							device_verified_by_owner: false,
+							recovery_state: "enabled",
+							pending_verifications: [
+								{
+									flow_id: "flow-1",
+									other_user_id: "@alice:matrix.org",
+									room_id: "!room:matrix.org",
+									emoji_lines: ["🐶 Dog", "🔥 Fire"],
+								},
+							],
+						},
+					},
 				},
-			});
-			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			],
 		});
 
 		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();
@@ -851,69 +885,36 @@ test.describe("Settings navigation", () => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/channels");
 
-		await page.evaluate(async () => {
-			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-			if (!appScript) throw new Error("app.js script not found");
-			const appUrl = new URL(appScript.src, window.location.origin).href;
-			const marker = "js/app.js";
-			const markerIdx = appUrl.indexOf(marker);
-			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
-			const prefix = appUrl.slice(0, markerIdx);
-			const state = await import(`${prefix}js/state.js`);
-			const channelsPage = await import(`${prefix}js/page-channels.js`);
-			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
-			state.setWs({
-				readyState: wsOpen,
-				send(raw) {
-					const req = JSON.parse(raw || "{}");
-					const resolver = state.pending[req.id];
-					if (!resolver) return;
-					if (req.method === "channels.status") {
-						resolver({
-							ok: true,
-							payload: {
-								channels: [
-									{
-										type: "matrix",
-										account_id: "moltis-testbot",
-										name: "Matrix (moltis-testbot)",
-										status: "connected",
-										details: "@moltis-testbot:matrix.org on https://matrix.org",
-										sessions: [],
-										extra: {
-											matrix: {
-												verification_state: "unverified",
-												ownership_mode: "moltis_owned",
-												auth_mode: "password",
-												user_id: "@moltis-testbot:matrix.org",
-												device_id: "MOLTISBOT",
-												cross_signing_complete: false,
-												device_verified_by_owner: false,
-												recovery_state: "incomplete",
-												ownership_error:
-													"invalid channel input: matrix account already has incomplete secret storage that this password could not unlock; repair the account in Element or switch to user-managed mode",
-												pending_verifications: [],
-											},
-										},
-									},
-								],
-							},
-						});
-					} else if (req.method === "channels.senders.list") {
-						resolver({ ok: true, payload: { senders: [] } });
-					} else {
-						resolver({
-							ok: false,
-							error: { message: `unexpected rpc in blocked matrix ownership test: ${req.method}` },
-						});
-					}
-					delete state.pending[req.id];
+		await mockChannelsStatus(page, {
+			label: "blocked matrix ownership test",
+			channels: [
+				{
+					type: "matrix",
+					account_id: "moltis-testbot",
+					name: "Matrix (moltis-testbot)",
+					status: "connected",
+					details: "@moltis-testbot:matrix.org on https://matrix.org",
+					sessions: [],
+					extra: {
+						matrix: {
+							verification_state: "unverified",
+							ownership_mode: "moltis_owned",
+							auth_mode: "password",
+							user_id: "@moltis-testbot:matrix.org",
+							device_id: "MOLTISBOT",
+							cross_signing_complete: false,
+							device_verified_by_owner: false,
+							recovery_state: "incomplete",
+							ownership_error:
+								"invalid channel input: matrix account already has incomplete secret storage that this password could not unlock; repair the account in Element or switch to user-managed mode",
+							pending_verifications: [],
+						},
+					},
 				},
-			});
-			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			],
 		});
 
+		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();
 		await expect(page.getByText("Moltis ownership blocked", { exact: true })).toBeVisible();
 		await expect(
 			page.getByText(
@@ -934,70 +935,34 @@ test.describe("Settings navigation", () => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/channels");
 
-		await page.evaluate(async () => {
-			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-			if (!appScript) throw new Error("app.js script not found");
-			const appUrl = new URL(appScript.src, window.location.origin).href;
-			const marker = "js/app.js";
-			const markerIdx = appUrl.indexOf(marker);
-			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
-			const prefix = appUrl.slice(0, markerIdx);
-			const state = await import(`${prefix}js/state.js`);
-			const channelsPage = await import(`${prefix}js/page-channels.js`);
-			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
-			state.setWs({
-				readyState: wsOpen,
-				send(raw) {
-					const req = JSON.parse(raw || "{}");
-					const resolver = state.pending[req.id];
-					if (!resolver) return;
-					if (req.method === "channels.status") {
-						resolver({
-							ok: true,
-							payload: {
-								channels: [
-									{
-										type: "matrix",
-										account_id: "moltis-testbot",
-										name: "Matrix (moltis-testbot)",
-										status: "connected",
-										details: "@moltis-testbot:matrix.org on https://matrix.org",
-										sessions: [],
-										extra: {
-											matrix: {
-												verification_state: "unverified",
-												ownership_mode: "moltis_owned",
-												auth_mode: "password",
-												user_id: "@moltis-testbot:matrix.org",
-												device_id: "GT7YDd8CWl",
-												cross_signing_complete: false,
-												device_verified_by_owner: false,
-												recovery_state: "disabled",
-												ownership_error:
-													"invalid channel input: matrix account requires browser approval to reset cross-signing at https://account.matrix.org/account/?action=org.matrix.cross_signing_reset; complete that in Element or switch to user-managed mode",
-												pending_verifications: [],
-											},
-										},
-									},
-								],
-							},
-						});
-					} else if (req.method === "channels.senders.list") {
-						resolver({ ok: true, payload: { senders: [] } });
-					} else if (req.method === "channels.retry_ownership") {
-						window.__matrixOwnershipRetryRequest = req.params;
-						resolver({ ok: true, payload: { ok: true } });
-					} else {
-						resolver({
-							ok: false,
-							error: { message: `unexpected rpc in matrix ownership approval test: ${req.method}` },
-						});
-					}
-					delete state.pending[req.id];
+		await mockChannelsStatus(page, {
+			label: "matrix ownership approval test",
+			allowRetryOwnership: true,
+			channels: [
+				{
+					type: "matrix",
+					account_id: "moltis-testbot",
+					name: "Matrix (moltis-testbot)",
+					status: "connected",
+					details: "@moltis-testbot:matrix.org on https://matrix.org",
+					sessions: [],
+					extra: {
+						matrix: {
+							verification_state: "unverified",
+							ownership_mode: "moltis_owned",
+							auth_mode: "password",
+							user_id: "@moltis-testbot:matrix.org",
+							device_id: "GT7YDd8CWl",
+							cross_signing_complete: false,
+							device_verified_by_owner: false,
+							recovery_state: "disabled",
+							ownership_error:
+								"invalid channel input: matrix account requires browser approval to reset cross-signing at https://account.matrix.org/account/?action=org.matrix.cross_signing_reset; complete that in Element or switch to user-managed mode",
+							pending_verifications: [],
+						},
+					},
 				},
-			});
-			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			],
 		});
 
 		await expect(page.getByText("Ownership approval required", { exact: true })).toBeVisible();
@@ -1099,10 +1064,12 @@ test.describe("Settings navigation", () => {
 				},
 			});
 			state.setConnected(true);
-			channelsPage.prefetchChannels();
+			await channelsPage.prefetchChannels();
 		});
 
+		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();
 		await page.getByRole("button", { name: "Senders", exact: true }).click();
+		await expect.poll(() => page.locator(".senders-table tbody tr").count(), { timeout: 10_000 }).toBe(1);
 		await expect(page.getByText("Alice", { exact: true })).toBeVisible();
 		await expect(page.getByText("@alice:matrix.org", { exact: true })).toBeVisible();
 		await expect(page.getByText("@@alice:matrix.org", { exact: true })).toHaveCount(0);
@@ -1173,6 +1140,7 @@ test.describe("Settings navigation", () => {
 			"Memory",
 			"Notifications",
 			"Crons",
+			"Webhooks",
 			"Heartbeat",
 			"Authentication",
 		];

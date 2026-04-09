@@ -967,6 +967,14 @@ pub struct CronConfig {
     pub rate_limit_max: usize,
     /// Rate limit window in seconds. Defaults to 60 (1 minute).
     pub rate_limit_window_secs: u64,
+    /// Number of days to retain cron session data before auto-cleanup.
+    /// Set to `None` (or 0) to disable retention pruning. Defaults to 7 days.
+    pub session_retention_days: Option<u64>,
+    /// Whether to auto-prune sandbox containers after cron job completion.
+    /// Per-job `auto_prune_container` overrides this global default.
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub auto_prune_cron_containers: bool,
 }
 
 impl Default for CronConfig {
@@ -974,6 +982,8 @@ impl Default for CronConfig {
         Self {
             rate_limit_max: 10,
             rate_limit_window_secs: 60,
+            session_retention_days: Some(7),
+            auto_prune_cron_containers: true,
         }
     }
 }
@@ -1546,6 +1556,12 @@ pub struct ToolsConfig {
     /// Maximum number of agent loop iterations before aborting. Default 25.
     #[serde(default = "default_agent_max_iterations")]
     pub agent_max_iterations: usize,
+    /// Maximum auto-continue nudges when the model stops mid-task (0 = disabled). Default 2.
+    #[serde(default = "default_agent_max_auto_continues")]
+    pub agent_max_auto_continues: usize,
+    /// Minimum tool calls in the current run before auto-continue can trigger. Default 3.
+    #[serde(default = "default_agent_auto_continue_min_tool_calls")]
+    pub agent_auto_continue_min_tool_calls: usize,
     /// Maximum bytes for a single tool result before truncation. Default 50KB.
     #[serde(default = "default_max_tool_result_bytes")]
     pub max_tool_result_bytes: usize,
@@ -1564,6 +1580,8 @@ impl Default for ToolsConfig {
             browser: BrowserConfig::default(),
             agent_timeout_secs: default_agent_timeout_secs(),
             agent_max_iterations: default_agent_max_iterations(),
+            agent_max_auto_continues: default_agent_max_auto_continues(),
+            agent_auto_continue_min_tool_calls: default_agent_auto_continue_min_tool_calls(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
             registry_mode: ToolRegistryMode::default(),
         }
@@ -1576,6 +1594,14 @@ fn default_agent_timeout_secs() -> u64 {
 
 fn default_agent_max_iterations() -> usize {
     25
+}
+
+fn default_agent_max_auto_continues() -> usize {
+    2
+}
+
+fn default_agent_auto_continue_min_tool_calls() -> usize {
+    3
 }
 
 fn default_max_tool_result_bytes() -> usize {

@@ -300,6 +300,10 @@ fn merge_discovered_with_fallback_catalog(
         .collect()
 }
 
+fn anthropic_fallback_catalog() -> Vec<DiscoveredModel> {
+    catalog_to_discovered(ANTHROPIC_MODELS, 3)
+}
+
 fn normalize_ollama_api_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_string()
@@ -440,6 +444,24 @@ pub async fn fetch_discoverable_models(
         tasks.push((
             "openai".into(),
             Box::pin(openai::fetch_models_from_api(key, base_url)),
+        ));
+    }
+
+    // ── Anthropic builtin ─────────────────────────────────────────────
+    if filter_matches("anthropic")
+        && config.is_enabled("anthropic")
+        && !cfg!(test)
+        && let Some(key) = resolve_api_key(config, "anthropic", "ANTHROPIC_API_KEY", env_overrides)
+        && should_fetch_models(config, "anthropic")
+    {
+        let base_url = config
+            .get("anthropic")
+            .and_then(|e| e.base_url.clone())
+            .or_else(|| env_value(env_overrides, "ANTHROPIC_BASE_URL"))
+            .unwrap_or_else(|| "https://api.anthropic.com".into());
+        tasks.push((
+            "anthropic".into(),
+            Box::pin(anthropic::fetch_models_from_api(key, base_url)),
         ));
     }
 
@@ -937,6 +959,8 @@ pub fn is_chat_capable_model(model_id: &str) -> bool {
         "tts-",
         "whisper",
         "text-embedding",
+        "claude-embedding",
+        "claude-embeddings",
         "omni-moderation",
         "moderation-",
         "sora",
@@ -989,6 +1013,8 @@ pub fn supports_tools_for_model(model_id: &str) -> bool {
         || id.starts_with("tts-")
         || id.starts_with("whisper")
         || id.starts_with("text-embedding")
+        || id.starts_with("claude-embedding")
+        || id.starts_with("claude-embeddings")
         || id.starts_with("omni-moderation")
     {
         return false;
@@ -1084,9 +1110,11 @@ pub struct ModelInfo {
 /// Known Anthropic Claude models (model_id, display_name).
 /// Current models listed first, then legacy models.
 const ANTHROPIC_MODELS: &[(&str, &str)] = &[
-    ("claude-opus-4-6-20260301", "Claude Opus 4.6"),
-    ("claude-sonnet-4-6-20260301", "Claude Sonnet 4.6"),
-    ("claude-haiku-4-6-20260301", "Claude Haiku 4.6"),
+    // Anthropic currently documents Claude 4.6 using alias IDs rather than
+    // dated snapshot IDs. Register the documented aliases instead of
+    // inventing snapshot suffixes that the API rejects.
+    ("claude-opus-4-6", "Claude Opus 4.6"),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
     ("claude-opus-4-5-20251101", "Claude Opus 4.5"),
     ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5"),
     ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"),
@@ -1601,6 +1629,124 @@ impl ProviderRegistry {
         true
     }
 
+    fn desired_anthropic_models(
+        config: &ProvidersConfig,
+        prefetched: &HashMap<String, Vec<DiscoveredModel>>,
+    ) -> Vec<DiscoveredModel> {
+        let preferred = configured_models_for_provider(config, "anthropic");
+        let discovered = if should_fetch_models(config, "anthropic") {
+            match prefetched.get("anthropic") {
+                Some(live) => live.clone(),
+                None => anthropic_fallback_catalog(),
+            }
+        } else {
+            Vec::new()
+        };
+        merge_preferred_and_discovered_models(preferred, discovered)
+    }
+
+    fn register_anthropic_catalog(
+        &mut self,
+        models: Vec<DiscoveredModel>,
+        key: &secrecy::Secret<String>,
+        base_url: &str,
+        provider_label: &str,
+        alias: Option<String>,
+        cache_retention: moltis_config::CacheRetention,
+    ) -> usize {
+        let mut added = 0usize;
+
+        for model in models {
+            let (model_id, display_name, created_at, recommended) = (
+                model.id,
+                model.display_name,
+                model.created_at,
+                model.recommended,
+            );
+            if self.has_provider_model(provider_label, &model_id) {
+                continue;
+            }
+            let provider = Arc::new(
+                anthropic::AnthropicProvider::with_alias(
+                    key.clone(),
+                    model_id.clone(),
+                    base_url.to_string(),
+                    alias.clone(),
+                )
+                .with_cache_retention(cache_retention),
+            );
+            self.register(
+                ModelInfo {
+                    id: model_id,
+                    provider: provider_label.to_string(),
+                    display_name,
+                    created_at,
+                    recommended,
+                },
+                provider,
+            );
+            added += 1;
+        }
+
+        added
+    }
+
+    fn replace_anthropic_catalog(
+        &mut self,
+        models: Vec<DiscoveredModel>,
+        key: &secrecy::Secret<String>,
+        base_url: &str,
+        provider_label: &str,
+        alias: Option<String>,
+        cache_retention: moltis_config::CacheRetention,
+    ) -> usize {
+        let new_entries: Vec<(ModelInfo, Arc<dyn LlmProvider>)> = models
+            .into_iter()
+            .map(|model| {
+                let provider = Arc::new(
+                    anthropic::AnthropicProvider::with_alias(
+                        key.clone(),
+                        model.id.clone(),
+                        base_url.to_string(),
+                        alias.clone(),
+                    )
+                    .with_cache_retention(cache_retention),
+                );
+                (
+                    ModelInfo {
+                        id: model.id,
+                        provider: provider_label.to_string(),
+                        display_name: model.display_name,
+                        created_at: model.created_at,
+                        recommended: model.recommended,
+                    },
+                    provider as Arc<dyn LlmProvider>,
+                )
+            })
+            .collect();
+
+        let previous_ids: HashSet<String> = self
+            .models
+            .iter()
+            .filter(|m| m.provider == provider_label)
+            .map(|m| m.id.clone())
+            .collect();
+
+        self.models.retain(|m| m.provider != provider_label);
+        self.providers.retain(|id, _| !previous_ids.contains(id));
+
+        let next_ids: HashSet<String> = new_entries
+            .iter()
+            .map(|(info, _)| namespaced_model_id(provider_label, raw_model_id(&info.id)))
+            .collect();
+
+        for (info, provider) in new_entries {
+            self.register(info, provider);
+        }
+
+        next_ids.difference(&previous_ids).count()
+    }
+
     /// Register a provider manually.
     pub fn register(&mut self, mut info: ModelInfo, provider: Arc<dyn LlmProvider>) {
         let model_id = raw_model_id(&info.id).to_string();
@@ -1758,6 +1904,24 @@ impl ProviderRegistry {
             pending.push((
                 "openai".into(),
                 openai::start_model_discovery(key.clone(), base_url),
+            ));
+        }
+
+        // ── Anthropic builtin ───────────────────────────────────────────
+        if config.is_enabled("anthropic")
+            && !cfg!(test)
+            && let Some(key) =
+                resolve_api_key(config, "anthropic", "ANTHROPIC_API_KEY", env_overrides)
+            && should_fetch_models(config, "anthropic")
+        {
+            let base_url = config
+                .get("anthropic")
+                .and_then(|e| e.base_url.clone())
+                .or_else(|| env_value(env_overrides, "ANTHROPIC_BASE_URL"))
+                .unwrap_or_else(|| "https://api.anthropic.com".into());
+            pending.push((
+                "anthropic".into(),
+                anthropic::start_model_discovery(key.clone(), base_url),
             ));
         }
 
@@ -1927,6 +2091,35 @@ impl ProviderRegistry {
     ) -> usize {
         let fetched = &result.models;
         let mut added = 0usize;
+
+        // ── Anthropic builtin ─────────────────────────────────────────
+        if fetched.contains_key("anthropic")
+            && config.is_enabled("anthropic")
+            && let Some(key) =
+                resolve_api_key(config, "anthropic", "ANTHROPIC_API_KEY", env_overrides)
+        {
+            let base_url = config
+                .get("anthropic")
+                .and_then(|e| e.base_url.clone())
+                .or_else(|| env_value(env_overrides, "ANTHROPIC_BASE_URL"))
+                .unwrap_or_else(|| "https://api.anthropic.com".into());
+            let alias = config.get("anthropic").and_then(|e| e.alias.clone());
+            let provider_label = alias.clone().unwrap_or_else(|| "anthropic".into());
+            let cache_retention = config
+                .get("anthropic")
+                .map(|e| e.cache_retention)
+                .unwrap_or(moltis_config::CacheRetention::Short);
+            let models = Self::desired_anthropic_models(config, fetched);
+
+            added += self.replace_anthropic_catalog(
+                models,
+                &key,
+                &base_url,
+                &provider_label,
+                alias,
+                cache_retention,
+            );
+        }
 
         // ── OpenAI builtin ────────────────────────────────────────────
         if let Some(models) = fetched.get("openai")
@@ -2504,44 +2697,15 @@ impl ProviderRegistry {
                 .get("anthropic")
                 .map(|e| e.cache_retention)
                 .unwrap_or(moltis_config::CacheRetention::Short);
-            let preferred = configured_models_for_provider(config, "anthropic");
-            let discovered = if should_fetch_models(config, "anthropic") {
-                catalog_to_discovered(ANTHROPIC_MODELS, 3)
-            } else {
-                Vec::new()
-            };
-            let models = merge_preferred_and_discovered_models(preferred, discovered);
-
-            for model in models {
-                let (model_id, display_name, created_at, recommended) = (
-                    model.id,
-                    model.display_name,
-                    model.created_at,
-                    model.recommended,
-                );
-                if self.has_provider_model(&provider_label, &model_id) {
-                    continue;
-                }
-                let provider = Arc::new(
-                    anthropic::AnthropicProvider::with_alias(
-                        key.clone(),
-                        model_id.clone(),
-                        base_url.clone(),
-                        alias.clone(),
-                    )
-                    .with_cache_retention(cache_retention),
-                );
-                self.register(
-                    ModelInfo {
-                        id: model_id,
-                        provider: provider_label.clone(),
-                        display_name,
-                        created_at,
-                        recommended,
-                    },
-                    provider,
-                );
-            }
+            let models = Self::desired_anthropic_models(config, prefetched);
+            self.register_anthropic_catalog(
+                models,
+                &key,
+                &base_url,
+                &provider_label,
+                alias,
+                cache_retention,
+            );
         }
 
         // OpenAI — register all known OpenAI models when API key is available.
@@ -2826,7 +2990,8 @@ impl ProviderRegistry {
                     base_url.clone(),
                     name.clone(),
                 )
-                .with_stream_transport(entry.stream_transport);
+                .with_stream_transport(entry.stream_transport)
+                .with_cache_retention(entry.cache_retention);
                 if !matches!(entry.wire_api, moltis_config::WireApi::ChatCompletions) {
                     oai = oai.with_wire_api(entry.wire_api);
                 }
@@ -3228,6 +3393,7 @@ mod tests {
         assert!(!is_chat_capable_model("gpt-4o-realtime-preview"));
         assert!(!is_chat_capable_model("gpt-4o-mini-transcribe"));
         assert!(!is_chat_capable_model("sora"));
+        assert!(!is_chat_capable_model("claude-embeddings-v1"));
 
         // Google Gemini non-chat models
         assert!(!is_chat_capable_model("imagen-3.0-generate-002"));
@@ -3294,6 +3460,7 @@ mod tests {
         assert!(!supports_tools_for_model("tts-1-hd"));
         assert!(!supports_tools_for_model("whisper-1"));
         assert!(!supports_tools_for_model("text-embedding-3-large"));
+        assert!(!supports_tools_for_model("claude-embeddings-v1"));
         assert!(!supports_tools_for_model("omni-moderation-latest"));
         assert!(!supports_tools_for_model(
             "custom-openrouter::openai/text-embedding-3-large"
@@ -3383,6 +3550,17 @@ mod tests {
             ids.dedup();
             assert_eq!(ids.len(), models.len(), "duplicate model IDs found");
         }
+    }
+
+    #[test]
+    fn anthropic_catalog_uses_documented_claude_46_aliases() {
+        let anthropic_ids: Vec<&str> = ANTHROPIC_MODELS.iter().map(|(id, _)| *id).collect();
+
+        assert!(anthropic_ids.contains(&"claude-opus-4-6"));
+        assert!(anthropic_ids.contains(&"claude-sonnet-4-6"));
+        assert!(!anthropic_ids.contains(&"claude-opus-4-6-20260301"));
+        assert!(!anthropic_ids.contains(&"claude-sonnet-4-6-20260301"));
+        assert!(!anthropic_ids.contains(&"claude-haiku-4-6-20260301"));
     }
 
     #[test]
@@ -4744,6 +4922,87 @@ mod tests {
                 .iter()
                 .any(|m| m.id == "custom-mylocal::my-model" && m.provider == "custom-mylocal"),
             "explicit model should be registered even with empty prefetch, got: {models:?}"
+        );
+    }
+
+    #[test]
+    fn anthropic_prefetched_models_replace_static_fallback_at_startup() {
+        let mut config = ProvidersConfig::default();
+        config
+            .providers
+            .insert("anthropic".into(), moltis_config::schema::ProviderEntry {
+                enabled: true,
+                api_key: Some(secret("sk-ant-test")),
+                fetch_models: true,
+                ..Default::default()
+            });
+
+        let mut prefetched = HashMap::new();
+        prefetched.insert("anthropic".into(), vec![DiscoveredModel::new(
+            "claude-future-1",
+            "Claude Future 1",
+        )]);
+
+        let registry =
+            ProviderRegistry::from_config_with_prefetched(&config, &HashMap::new(), &prefetched);
+        let ids: Vec<&str> = registry
+            .list_models()
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+
+        assert!(ids.contains(&"anthropic::claude-future-1"));
+        assert!(
+            !ids.contains(&"anthropic::claude-sonnet-4-6"),
+            "live Anthropic discovery should be authoritative, got: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn anthropic_rediscovery_replaces_stale_static_models() {
+        let mut config = ProvidersConfig::default();
+        config
+            .providers
+            .insert("anthropic".into(), moltis_config::schema::ProviderEntry {
+                enabled: true,
+                api_key: Some(secret("sk-ant-test")),
+                fetch_models: true,
+                ..Default::default()
+            });
+
+        let env_overrides = HashMap::new();
+        let mut registry =
+            ProviderRegistry::from_config_with_static_catalogs(&config, &env_overrides);
+        assert!(
+            registry
+                .list_models()
+                .iter()
+                .any(|m| m.id == "anthropic::claude-sonnet-4-6"),
+            "expected startup fallback Anthropic model to be present"
+        );
+
+        let mut models = HashMap::new();
+        models.insert("anthropic".into(), vec![DiscoveredModel::new(
+            "claude-future-1",
+            "Claude Future 1",
+        )]);
+        let result = RediscoveryResult {
+            models,
+            ollama_probes: HashMap::new(),
+        };
+
+        let added = registry.register_rediscovered_models(&config, &env_overrides, &result);
+        assert_eq!(added, 1);
+
+        let ids: Vec<&str> = registry
+            .list_models()
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert!(ids.contains(&"anthropic::claude-future-1"));
+        assert!(
+            !ids.contains(&"anthropic::claude-sonnet-4-6"),
+            "runtime rediscovery should replace stale Anthropic catalog entries, got: {ids:?}"
         );
     }
 

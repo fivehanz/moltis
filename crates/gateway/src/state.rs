@@ -417,6 +417,14 @@ pub struct GatewayState {
     /// Per-(channel, account) rate limiter for channel webhooks.
     pub channel_webhook_rate_limiter: crate::channel_webhook_rate_limit::ChannelWebhookRateLimiter,
 
+    // ── Generic webhook ingress ───────────────────────────────────────────────
+    /// Webhook store for direct access from HTTP ingress handlers.
+    pub webhook_store: std::sync::OnceLock<Arc<dyn moltis_webhooks::store::WebhookStore>>,
+    /// Per-webhook rate limiter for generic webhook ingress.
+    pub webhook_rate_limiter: moltis_webhooks::rate_limit::WebhookRateLimiter,
+    /// Sender for queueing delivery IDs to the webhook worker.
+    pub webhook_worker_tx: std::sync::OnceLock<mpsc::Sender<i64>>,
+
     // ── Atomics (lock-free) ─────────────────────────────────────────────────
     /// Monotonically increasing sequence counter for broadcast events.
     pub seq: AtomicU64,
@@ -515,6 +523,9 @@ impl GatewayState {
             ),
             channel_webhook_rate_limiter:
                 crate::channel_webhook_rate_limit::ChannelWebhookRateLimiter::new(),
+            webhook_store: std::sync::OnceLock::new(),
+            webhook_rate_limiter: moltis_webhooks::rate_limit::WebhookRateLimiter::default(),
+            webhook_worker_tx: std::sync::OnceLock::new(),
             seq: AtomicU64::new(0),
             tts_phrase_counter: AtomicUsize::new(0),
             node_count: Arc::new(AtomicUsize::new(0)),

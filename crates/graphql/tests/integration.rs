@@ -643,6 +643,10 @@ impl moltis_service_traits::ModelService for MockModel {
         self.0.call("models.detect_supported", p)
     }
 
+    async fn cancel_detect(&self) -> ServiceResult {
+        self.0.call("models.cancel_detect", json!({}))
+    }
+
     async fn test(&self, p: Value) -> ServiceResult {
         self.0.call("models.test", p)
     }
@@ -1095,7 +1099,7 @@ async fn chat_send_mutation() {
 
     let res = schema
         .execute(Request::new(
-            r#"mutation { chat { send(message: "Hello") { ok } } }"#,
+            r#"mutation { chat { send(message: "Hello", sessionKey: "sess1") { ok } } }"#,
         ))
         .await;
 
@@ -1103,6 +1107,25 @@ async fn chat_send_mutation() {
     let (method, params) = mock.last_call().expect("should have called");
     assert_eq!(method, "chat.send");
     assert_eq!(params["message"], "Hello");
+    assert_eq!(params["sessionKey"], "sess1");
+}
+
+#[tokio::test]
+async fn chat_history_query_forwards_session_key() {
+    let mock = MockDispatch::new();
+    mock.set_response("chat.history", json!([]));
+    let (schema, _) = build_test_schema(mock.clone());
+
+    let res = schema
+        .execute(Request::new(
+            r#"query { chat { history(sessionKey: "sess1") } }"#,
+        ))
+        .await;
+
+    assert!(res.errors.is_empty(), "errors: {:?}", res.errors);
+    let (method, params) = mock.last_call().expect("should have called");
+    assert_eq!(method, "chat.history");
+    assert_eq!(params["sessionKey"], "sess1");
 }
 
 #[tokio::test]

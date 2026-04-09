@@ -19,7 +19,173 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-## [20260405.01] - 2026-04-05
+## [20260409.01] - 2026-04-09
+### Added
+- [matrix] Add slash command support
+- [models] Make model detection opt-in and add stop button
+
+
+### Fixed
+- [matrix] Match help command by exact name, not prefix
+- [models] Abort probe tasks on cancel, show feedback, await RPC
+- [tls] Include lan bind SANs in auto-generated certs
+- [tls] Address PR review feedback
+- [agents] Use system message for auto-continue nudge instead of user message
+- [common] Add default User-Agent header to shared HTTP client
+- [common] Use MOLTIS_VERSION for default user-agent and apply headers in apply_proxy
+- [agents] Keep auto-continue nudge as user message
+- [provider-setup] Include lmstudio in known_providers and replace ollama name checks
+- [provider-setup] Add dedicated local_only field to KnownProvider
+- Harden superset setup envrc handling
+
+## [20260408.01] - 2026-04-08
+### Added
+- [agents] Auto-continue when model stops mid-task + max iterations UX
+- [config] Make auto-continue tool-call threshold configurable
+
+
+### Fixed
+- Address PR review — translatable continue message, document tool-call threshold
+- Guard auto-continue against min_tool_calls=0 usize tautology
+- [minimax] Restore system prompts and null tool args
+- [providers] Discover live anthropic models
+- [providers] Mark anthropic recommendations globally
+
+## [20260407.01] - 2026-04-07
+### Added
+- [webhooks] Add generic webhook ingress for triggering AI agents
+- [web] Link to Hoppscotch for webhook testing
+- [web] Add CORS to webhook ingress and copy-curl button
+- [website] Add Webhooks to landing page features
+
+
+### Changed
+- [web] Extract webhooks nav icon to external SVG file
+
+
+### Fixed
+- [cli] Report release version in --version output
+- [providers] Propagate cache tokens in Responses API and custom providers
+- [providers] Read cached_tokens from input_tokens_details in non-streaming Responses SSE
+- [agents] Match provider-specific context window error strings
+- [chat] Honor public sessionKey in GraphQL flows
+- [chat] Address PR review — safer mock assertions and precedence test
+- [web] Use globe icon for webhooks settings nav
+- [web] Use ModelSelect and ComboSelect for webhook agent/model fields
+- [web] Use public URL (ngrok/tailscale) for webhook endpoint display
+- Improve webhook test script with verbose output and TLS support
+- Use OnceLock for webhook state fields instead of Arc::get_mut
+- [web] Show Hoppscotch link below webhook list, not only in empty state
+- [web] Match webhooks layout to cron/sandbox and fix nav icon
+- [web] Add missing space before Hoppscotch link
+- [web] Constrain webhooks list width with max-w-form
+- [web] Revert max-w-form, keep webhooks list full width
+- [web] Add webhooks icon to settings nav via components.css
+- [web] Recommend curl and Hoppscotch desktop for webhook testing
+- Use HeaderValue::from_static for CORS headers, remove warning
+- [web] Improve webhook test command button and footer text
+- Don't dedup generic webhooks by body hash, rebuild i18n
+- Address PR review comments
+- [security] Redact auth secrets from webhook API responses
+- Drain unprocessed webhook deliveries on worker startup
+- Include 'processing' deliveries in crash-recovery drain
+- Gitlab_token auth config key mismatch, add regression tests
+- [security] Fail closed on non-parseable Stripe signature timestamp
+- Enable foreign_keys pragma and explicit cascade delete
+- [ci] Restore CHANGELOG.md to main state (changelog guard)
+- Forward agent_id to chat.send_sync in webhook worker
+- Enforce CIDR allowlist, set foreign_keys on pool options
+- [security] Gate forwarded headers on behind_proxy, fix PagerDuty multi-sig
+- Use ConnectInfo for direct IP, disable source_profile on edit
+- [webhooks] Harden webhook execution and secrets
+- Proactive audit — 6 issues found and fixed
+- Wrap cascade deletes in transactions to prevent partial data loss
+- Resolve settings nav CI regression
+
+
+### Security
+- Add webhooks feature documentation
+
+## [20260406.05] - 2026-04-06
+### Added
+- [openclaw-import] Convert non-default agents to spawn_agent presets
+
+
+### Fixed
+- [web] Allow session sidebar links to open in new tabs
+- [web] Tighten session sidebar link accessibility
+- [docker] Add missing default features to Dockerfile build
+- [docker] Use default features instead of explicit list
+
+## [20260406.04] - 2026-04-06
+### Added
+- [website] Add provider/channel pills section and update branding
+- [website] Add positioning, how-it-works, use cases, and community quote
+
+
+### Changed
+- [providers] Avoid quadratic SSE buffer copies
+- [providers] Align copilot stream error handling
+
+
+### Fixed
+- [providers] Route Copilot enterprise tokens via proxy endpoint (#352)
+- [providers] Address PR review comments on Copilot enterprise
+- [providers] Harden Copilot enterprise proxy security
+- [providers] Reject bare IP addresses in Copilot proxy-ep
+- [providers] Address Copilot enterprise review feedback
+- [providers] Stream enterprise copilot responses
+- [website] Crop MiniMax icon, grayscale raster icons, official GraphQL logo
+- [website] Add Discord source links to community quote
+- [website] Update LoC stats on security page
+- [website] Update LoC stats in all locale files
+- [website] Regenerate all locale files with new homepage sections
+- [website] Update i18n titles and regenerate all locale files
+- [website] Translate new homepage sections in all 9 locale files
+- [website] Translate remaining English strings in all locale files
+- [website] Localize injected nav tabs
+- [website] Address greptile review feedback
+- [website] Sync i18n builder with locale pages
+- [website] Correct i18n generator keys
+
+
+### Security
+- [providers] Redact CopilotTokenResponse token in Debug output
+
+## [20260406.03] - 2026-04-06
+### Fixed
+- [web] Restore all-features build
+
+## [20260406.02] - 2026-04-06
+### Fixed
+- [web] Map config reload errors explicitly
+
+## [20260406.01] - 2026-04-06
+### Added
+- [cron] Auto-clean orphaned sessions and prune sandbox containers
+
+
+### Fixed
+- [swift-bridge] Await embedded httpd shutdown
+- [cron] Use time crate for retention math and fix named-session guard
+- [sandbox] Include remove_image_override in cleanup_session
+- [cron] Skip pruning cycle when session key lookup fails
+- [web] Reload offered channels from config
+- [ci] Await channel preload in settings e2e
+
+## [20260405.06] - 2026-04-05
+### Security
+- Add GitHub artifact attestations to release workflow
+
+## [20260405.05] - 2026-04-05
+
+## [20260405.04] - 2026-04-05
+
+## [20260405.03] - 2026-04-05
+### Fixed
+- [web] Restore matrix onboarding icon
+
+## [20260405.02] - 2026-04-05
 ### Added
 - [providers] Add zai-code provider for Z.AI Coding plan
 - [tools] Add cross-session search recall

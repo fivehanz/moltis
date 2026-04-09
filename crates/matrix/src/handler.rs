@@ -48,6 +48,20 @@ use crate::{
 
 const UTD_NOTICE_COOLDOWN: Duration = Duration::from_secs(300);
 
+const HELP_TEXT: &str = "Available commands:\n\
+    /new — Start a new session\n\
+    /sessions — List and switch sessions\n\
+    /agent — Switch session agent\n\
+    /model — Switch provider/model\n\
+    /sandbox — Toggle sandbox and choose image\n\
+    /sh — Enable command mode (/sh off to exit)\n\
+    /clear — Clear session history\n\
+    /compact — Compact session (summarize)\n\
+    /context — Show session context info\n\
+    /peek — Show current thinking/tool status\n\
+    /stop — Abort the current running agent\n\
+    /help — Show this help";
+
 fn should_ignore_initial_sync_history(accounts: &AccountStateMap, account_id: &str) -> bool {
     let guard = accounts.read().unwrap_or_else(|error| error.into_inner());
     guard
@@ -371,6 +385,30 @@ pub async fn handle_room_message(
                 }
                 return;
             }
+        }
+
+        // Intercept slash commands before dispatching to LLM.
+        if matches!(kind, ChannelMessageKind::Text)
+            && let Some(cmd_text) = body.strip_prefix('/')
+        {
+            let cmd_name = cmd_text.split_whitespace().next().unwrap_or("");
+            let response = if cmd_name == "help" {
+                Ok(HELP_TEXT.to_string())
+            } else {
+                sink.dispatch_command(cmd_text, reply_to).await
+            };
+            let text = match response {
+                Ok(msg) => msg,
+                Err(e) => format!("Error: {e}"),
+            };
+            if let Err(error) = send_text(&room, &text).await {
+                warn!(
+                    account_id,
+                    room = %room_id,
+                    "failed to send Matrix command response: {error}"
+                );
+            }
+            return;
         }
 
         sink.dispatch_to_chat(&body, reply_to, meta).await;
@@ -1862,5 +1900,43 @@ mod tests {
         assert!(message.contains("Channels -> Senders"));
         assert!(!message.contains("approve code"));
         assert!(!message.contains("enter it here"));
+    }
+
+    #[test]
+    fn help_text_lists_all_commands() {
+        use super::HELP_TEXT;
+        for cmd in [
+            "/new",
+            "/sessions",
+            "/agent",
+            "/model",
+            "/sandbox",
+            "/sh",
+            "/clear",
+            "/compact",
+            "/context",
+            "/peek",
+            "/stop",
+            "/help",
+        ] {
+            assert!(HELP_TEXT.contains(cmd), "HELP_TEXT should mention {cmd}");
+        }
+    }
+
+    #[test]
+    fn slash_prefix_detection_matches_commands() {
+        let body = "/new";
+        assert!(body.strip_prefix('/').is_some());
+
+        let body = "/compact some args";
+        if let Some(cmd) = body.strip_prefix('/') {
+            assert!(cmd.starts_with("compact"));
+        } else {
+            panic!("expected slash-prefixed command");
+        }
+
+        // Not a command
+        let body = "hello world";
+        assert!(body.strip_prefix('/').is_none());
     }
 }

@@ -609,6 +609,33 @@ test.describe("Onboarding wizard", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("matrix onboarding renders a real mask icon", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.goto("/onboarding");
+		await expect.poll(() => new URL(page.url()).pathname, { timeout: 15_000 }).toMatch(/^\/(?:onboarding|chats\/.+)$/);
+		await page.waitForLoadState("networkidle");
+
+		await page.evaluate(() => {
+			const probe = document.createElement("span");
+			probe.className = "icon icon-xl icon-matrix";
+			probe.id = "matrix-icon-probe";
+			document.body.append(probe);
+		});
+
+		const matrixIcon = page.locator("#matrix-icon-probe");
+		await expect(matrixIcon).toBeVisible();
+		await expect
+			.poll(() => {
+				return matrixIcon.evaluate((node) => {
+					const style = window.getComputedStyle(node);
+					return style.maskImage || style.webkitMaskImage || "";
+				});
+			})
+			.not.toBe("none");
+
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("matrix onboarding exposes advanced config patch and storage note", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await page.goto("/onboarding");

@@ -1217,6 +1217,10 @@ pub async fn prepare_gateway_core(
 
     // Load config file (moltis.toml / .yaml / .json) if present.
     let mut config = moltis_config::discover_and_load();
+    info!(
+        offered_channels = ?config.channels.offered,
+        "loaded offered channels from config"
+    );
     let config_env_overrides = config.env.clone();
     let instance_slug_value = instance_slug(&config);
     let browser_container_prefix = browser_container_prefix(&instance_slug_value);
@@ -1560,6 +1564,7 @@ pub async fn prepare_gateway_core(
         let mut options = SqliteConnectOptions::from_str(&format!("sqlite:{}", db_path.display()))
             .expect("invalid database path")
             .create_if_missing(true)
+            .foreign_keys(true)
             .synchronous(SqliteSynchronous::Normal)
             .busy_timeout(std::time::Duration::from_secs(5));
         if !db_exists {
@@ -1594,6 +1599,9 @@ pub async fn prepare_gateway_core(
     moltis_cron::run_migrations(&db_pool)
         .await
         .expect("failed to run cron migrations");
+    moltis_webhooks::run_migrations(&db_pool)
+        .await
+        .expect("failed to run webhooks migrations");
     // Gateway's own tables (auth, message_log, channels).
     crate::run_migrations(&db_pool)
         .await
@@ -1908,6 +1916,7 @@ pub async fn prepare_gateway_core(
     // Agent turn: run an LLM turn in a session determined by the job's session_target.
     let agent_state = Arc::clone(&deferred_state);
     let agent_events_queue = Arc::clone(&events_queue);
+    let global_auto_prune_containers = config.cron.auto_prune_cron_containers;
     let on_agent_turn: moltis_cron::service::AgentTurnFn = Arc::new(move |req| {
         let st = Arc::clone(&agent_state);
         let eq = Arc::clone(&agent_events_queue);
@@ -1943,6 +1952,7 @@ pub async fn prepare_gateway_core(
                         output: moltis_cron::heartbeat::HEARTBEAT_OK.to_string(),
                         input_tokens: None,
                         output_tokens: None,
+                        session_key: None,
                     });
                 }
             }
@@ -2015,8 +2025,23 @@ pub async fn prepare_gateway_core(
                 .await
                 .map_err(|e| moltis_cron::Error::message(e.to_string()));
 
-            // Clean up sandbox overrides.
-            if let Some(ref router) = state.sandbox_router {
+            // Auto-prune sandbox container if configured (before clearing overrides).
+            let auto_prune = req
+                .sandbox
+                .auto_prune_container
+                .unwrap_or(global_auto_prune_containers);
+            if req.sandbox.enabled && auto_prune {
+                if let Some(ref router) = state.sandbox_router
+                    && let Err(e) = router.cleanup_session(&session_key).await
+                {
+                    tracing::debug!(
+                        session_key = %session_key,
+                        error = %e,
+                        "cron sandbox container cleanup failed"
+                    );
+                }
+            } else if let Some(ref router) = state.sandbox_router {
+                // Just clean up sandbox overrides (not the container).
                 router.remove_override(&session_key).await;
                 router.remove_image_override(&session_key).await;
             }
@@ -2048,6 +2073,7 @@ pub async fn prepare_gateway_core(
                 output: text,
                 input_tokens,
                 output_tokens,
+                session_key: Some(session_key),
             })
         })
     });
@@ -2088,6 +2114,7 @@ pub async fn prepare_gateway_core(
         window_ms: config.cron.rate_limit_window_secs * 1000,
     };
 
+    let cron_store_for_pruning = Arc::clone(&cron_store);
     let cron_service = moltis_cron::service::CronService::with_events_queue(
         cron_store,
         on_system_event,
@@ -2100,6 +2127,21 @@ pub async fn prepare_gateway_core(
     // Wire cron into gateway services.
     let live_cron = Arc::new(crate::cron::LiveCronService::new(Arc::clone(&cron_service)));
     services = services.with_cron(live_cron);
+
+    // Webhooks
+    let webhook_store_inner: Arc<dyn moltis_webhooks::store::WebhookStore> = Arc::new(
+        moltis_webhooks::store::SqliteWebhookStore::with_pool(db_pool.clone()),
+    );
+    #[cfg(feature = "vault")]
+    let webhook_store: Arc<dyn moltis_webhooks::store::WebhookStore> = Arc::new(
+        crate::webhooks::VaultWebhookStore::new(Arc::clone(&webhook_store_inner), vault.clone()),
+    );
+    #[cfg(not(feature = "vault"))]
+    let webhook_store = webhook_store_inner;
+    let live_webhooks = Arc::new(crate::webhooks::LiveWebhooksService::new(Arc::clone(
+        &webhook_store,
+    )));
+    services = services.with_webhooks(live_webhooks);
 
     // Build sandbox router from config (shared across sessions).
     let mut sandbox_config = moltis_tools::sandbox::SandboxConfig::from(&config.tools.exec.sandbox);
@@ -2385,6 +2427,75 @@ pub async fn prepare_gateway_core(
                         "startup GC: cleaned orphaned session containers"
                     ),
                     Err(e) => debug!("startup GC: container cleanup skipped: {e}"),
+                }
+            }
+        });
+    }
+
+    // Periodic cron session retention pruning.
+    if let Some(retention_days) = config.cron.session_retention_days
+        && retention_days > 0
+    {
+        let prune_store = Arc::clone(&cron_store_for_pruning);
+        let prune_session_store = Arc::clone(&session_store);
+        let prune_session_metadata = Arc::clone(&session_metadata);
+        let prune_sandbox = Arc::clone(&sandbox_router);
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(60 * 60); // hourly
+            loop {
+                tokio::time::sleep(interval).await;
+                let retention_ms = time::Duration::days(retention_days as i64)
+                    .whole_milliseconds()
+                    .unsigned_abs() as u64;
+                let cutoff_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let before_ms = cutoff_ms.saturating_sub(retention_ms);
+
+                // Collect session keys from old runs before pruning.
+                // On failure, skip this cycle entirely to avoid orphaning sessions.
+                let session_keys = match prune_store.list_session_keys_before(before_ms).await {
+                    Ok(keys) => keys,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "cron session pruning: failed to list session keys");
+                        continue;
+                    },
+                };
+
+                // Clean up sessions and their sandbox containers.
+                let mut cleaned = 0u64;
+                for key in &session_keys {
+                    // Only prune isolated (UUID) sessions; named sessions are reused.
+                    let suffix = key.strip_prefix("cron:").unwrap_or(key.as_str());
+                    if uuid::Uuid::parse_str(suffix).is_err() {
+                        continue;
+                    }
+                    // Clear session file.
+                    if let Err(e) = prune_session_store.clear(key).await {
+                        tracing::debug!(key, error = %e, "cron prune: failed to clear session");
+                    }
+                    // Remove session metadata.
+                    prune_session_metadata.remove(key).await;
+                    // Clean up sandbox container.
+                    if let Err(e) = prune_sandbox.cleanup_session(key).await {
+                        tracing::debug!(key, error = %e, "cron prune: sandbox cleanup failed");
+                    }
+                    cleaned += 1;
+                }
+
+                // Prune old run records.
+                match prune_store.prune_runs_before(before_ms).await {
+                    Ok(0) => {},
+                    Ok(n) => tracing::info!(
+                        pruned_runs = n,
+                        pruned_sessions = cleaned,
+                        retention_days,
+                        "cron retention: pruned old runs and sessions"
+                    ),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "cron retention: failed to prune runs")
+                    },
                 }
             }
         });
@@ -3160,6 +3271,59 @@ pub async fn prepare_gateway_core(
         #[cfg(feature = "vault")]
         vault.clone(),
     );
+
+    // Wire webhook store and worker into gateway state.
+    {
+        let (webhook_tx, webhook_rx) = tokio::sync::mpsc::channel::<i64>(256);
+        let _ = state.webhook_store.set(Arc::clone(&webhook_store));
+        let _ = state.webhook_worker_tx.set(webhook_tx);
+
+        // Spawn webhook background worker.
+        let worker_store = Arc::clone(&webhook_store);
+        let worker_state_ref = Arc::clone(&state);
+        let worker = moltis_webhooks::worker::WebhookWorker::new(
+            webhook_rx,
+            worker_store,
+            Arc::new(move |req: moltis_webhooks::worker::ExecuteRequest| {
+                let chat_state = Arc::clone(&worker_state_ref);
+                Box::pin(async move {
+                    let chat = chat_state.chat().await;
+                    let mut params = serde_json::json!({
+                        "text": req.message,
+                        "_session_key": req.session_key,
+                    });
+                    if let Some(ref model) = req.model {
+                        params["model"] = serde_json::Value::String(model.clone());
+                    }
+                    if let Some(ref agent_id) = req.agent_id {
+                        params["agent_id"] = serde_json::Value::String(agent_id.clone());
+                    }
+                    if let Some(ref tool_policy) = req.tool_policy {
+                        params["_tool_policy"] = serde_json::to_value(tool_policy)
+                            .map_err(|error| anyhow::anyhow!(error))?;
+                    }
+                    let result = chat
+                        .send_sync(params)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let input_tokens = result.get("inputTokens").and_then(|v| v.as_i64());
+                    let output_tokens = result.get("outputTokens").and_then(|v| v.as_i64());
+                    let output = result
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    Ok(moltis_webhooks::worker::ProcessResult {
+                        output,
+                        input_tokens,
+                        output_tokens,
+                        session_key: req.session_key,
+                    })
+                })
+            }),
+        );
+        tokio::spawn(worker.run());
+    }
+
     startup_mem_probe.checkpoint("gateway_state.created");
 
     #[cfg(feature = "tailscale")]

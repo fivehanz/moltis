@@ -53,6 +53,7 @@ default-members = [
   "crates/wasm-tools/web-fetch",
   "crates/wasm-tools/web-search",
   "crates/web",
+  "crates/webhooks",
   "crates/whatsapp",
 ]
 members = [
@@ -108,6 +109,7 @@ members = [
   "crates/wasm-tools/web-fetch",
   "crates/wasm-tools/web-search",
   "crates/web",
+  "crates/webhooks",
   "crates/whatsapp",
 ]
 resolver = "2"
@@ -194,6 +196,7 @@ genai        = "0.5"
 async-graphql      = "7"
 async-graphql-axum = "7"
 gix                = "0.78"
+hex                = "0.4"
 hmac               = "0.12"
 jsonwebtoken       = "9"
 llama-cpp-2        = "0.1"
@@ -353,6 +356,7 @@ moltis-tools           = { path = "crates/tools" }
 moltis-vault           = { path = "crates/vault" }
 moltis-voice           = { path = "crates/voice" }
 moltis-web             = { default-features = false, path = "crates/web" }
+moltis-webhooks        = { path = "crates/webhooks" }
 moltis-whatsapp        = { path = "crates/whatsapp" }
 
 [profile.release]

@@ -68,6 +68,10 @@ Channels can be configured in two places:
 
 The web UI does not write channel settings back into `moltis.toml`. It includes an advanced JSON config editor so channel-specific settings remain reachable even when a dedicated form field has not been added yet.
 
+The channel picker itself is controlled by `[channels].offered` in
+`moltis.toml`. If you edit that list by hand, reload the page so the web UI
+re-reads the current picker options.
+
 Channel configs stored through the web UI currently live as JSON records in the
 internal `channels` table in `data_dir()/moltis.db`. They are not currently
 wrapped by the Moltis vault, so treat local access to that database as access
