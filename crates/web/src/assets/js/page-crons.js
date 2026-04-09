@@ -104,9 +104,9 @@ function loadJobs() {
 }
 
 function formatSchedule(sched) {
-	if (sched.kind === "at") return `At ${new Date(sched.atMs).toLocaleString()}`;
+	if (sched.kind === "at") return `At ${new Date(sched.at_ms).toLocaleString()}`;
 	if (sched.kind === "every") {
-		var ms = sched.everyMs;
+		var ms = sched.every_ms;
 		if (ms >= 3600000) return `Every ${ms / 3600000}h`;
 		if (ms >= 60000) return `Every ${ms / 60000}m`;
 		return `Every ${ms / 1000}s`;
@@ -645,8 +645,8 @@ function CronModal() {
 			deliverTo.value = j.payload?.to || "";
 			schedCronExpr.value = j.schedule.kind === "cron" ? j.schedule.expr || "" : "";
 			schedCronTz.value = j.schedule.kind === "cron" ? j.schedule.tz || "" : "";
-			schedEverySecs.value = j.schedule.kind === "every" ? Math.round(j.schedule.everyMs / 1000) : "";
-			schedAtTimestamp.value = j.schedule.kind === "at" ? new Date(j.schedule.atMs).toISOString().slice(0, 16) : "";
+			schedEverySecs.value = j.schedule.kind === "every" ? Math.round(j.schedule.every_ms / 1000) : "";
+			schedAtTimestamp.value = j.schedule.kind === "at" ? new Date(j.schedule.at_ms).toISOString().slice(0, 16) : "";
 		} else {
 			saving.value = false;
 			errorField.value = null;
