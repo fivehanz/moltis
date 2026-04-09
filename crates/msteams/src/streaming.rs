@@ -29,6 +29,7 @@ pub struct StreamSession {
     last_edit: Option<Instant>,
     throttle: Duration,
     finalized: bool,
+    initial_post_failed: bool,
 }
 
 impl StreamSession {
@@ -39,6 +40,7 @@ impl StreamSession {
             last_edit: None,
             throttle,
             finalized: false,
+            initial_post_failed: false,
         }
     }
 
@@ -49,7 +51,14 @@ impl StreamSession {
 
     /// Whether the session has enough text to post the initial message.
     pub fn ready_for_initial_post(&self) -> bool {
-        self.activity_id.is_none() && self.accumulated.len() >= MIN_INITIAL_CHARS
+        self.activity_id.is_none()
+            && !self.initial_post_failed
+            && self.accumulated.len() >= MIN_INITIAL_CHARS
+    }
+
+    /// Mark that the initial post attempt failed, preventing retries on every delta.
+    pub fn mark_initial_post_failed(&mut self) {
+        self.initial_post_failed = true;
     }
 
     /// Whether enough time has passed to send an edit update.
@@ -196,5 +205,20 @@ mod tests {
 
         session.push_delta(" but now it is long enough");
         assert!(session.ready_for_initial_post());
+    }
+
+    #[test]
+    fn initial_post_failed_prevents_retry() {
+        let mut session = StreamSession::new(Duration::from_secs(1));
+        session.push_delta("Hello, this is enough text for initial post");
+        assert!(session.ready_for_initial_post());
+
+        // Simulate a failed initial post.
+        session.mark_initial_post_failed();
+        assert!(!session.ready_for_initial_post());
+
+        // Additional deltas should not trigger another initial post attempt.
+        session.push_delta(" more text arriving");
+        assert!(!session.ready_for_initial_post());
     }
 }

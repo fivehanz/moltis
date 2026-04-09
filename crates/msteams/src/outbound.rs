@@ -366,6 +366,7 @@ impl MsTeamsOutbound {
                             },
                             Err(e) => {
                                 warn!(account_id, to, "Teams stream initial post failed: {e}");
+                                session.mark_initial_post_failed();
                                 // Fall through — will send final text when done.
                             },
                         }

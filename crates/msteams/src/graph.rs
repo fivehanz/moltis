@@ -229,18 +229,22 @@ pub async fn search_messages(
     let sanitized = query.replace('"', "");
     let top = limit.clamp(1, 50);
 
-    let mut url = format!(
-        "{GRAPH_API_BASE}/chats/{}/messages?$search=\"{sanitized}\"&$top={top}",
+    let base_url = format!(
+        "{GRAPH_API_BASE}/chats/{}/messages",
         urlencoding::encode(chat_id),
     );
 
+    let search_val = format!("\"{sanitized}\"");
+    let mut query_params: Vec<(&str, String)> =
+        vec![("$search", search_val), ("$top", top.to_string())];
     if let Some(user) = from_user {
         let escaped = user.replace('\'', "''");
-        url.push_str(&format!("&$filter=from/user/displayName eq '{escaped}'"));
+        query_params.push(("$filter", format!("from/user/displayName eq '{escaped}'")));
     }
 
     let resp = http
-        .get(&url)
+        .get(&base_url)
+        .query(&query_params)
         .bearer_auth(token.expose_secret())
         .header("ConsistencyLevel", "eventual")
         .send()
