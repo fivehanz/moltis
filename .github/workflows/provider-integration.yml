@@ -31,50 +31,162 @@ jobs:
         include:
           - provider: minimax
             test: minimax_integration
-            secret_key: MINIMAX_API_KEY
           - provider: moonshot
             test: moonshot_integration
-            secret_key: MOONSHOT_API_KEY
           - provider: fireworks
             test: fireworks_integration
-            secret_key: FIREWORKS_API_KEY
           - provider: anthropic
             test: anthropic_integration
-            secret_key: ANTHROPIC_API_KEY
           - provider: openai
             test: openai_integration
-            secret_key: OPENAI_API_KEY
           - provider: mistral
             test: mistral_integration
-            secret_key: MISTRAL_API_KEY
           - provider: openrouter
             test: openrouter_integration
-            secret_key: OPENROUTER_API_KEY
           - provider: kimi-code
             test: kimi_code_integration
-            secret_key: KIMI_API_KEY
           - provider: deepseek
             test: deepseek_integration
-            secret_key: DEEPSEEK_API_KEY
           - provider: gemini
             test: gemini_integration
-            secret_key: GEMINI_API_KEY
           - provider: zai
             test: zai_integration
-            secret_key: Z_API_KEY
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
-      - name: Check secret is configured
+      - name: Configure provider secret (minimax)
+        if: matrix.provider == 'minimax'
         env:
-          HAS_SECRET: ${{ secrets[matrix.secret_key] != '' }}
+          PROVIDER_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
         run: |
-          if [ "$HAS_SECRET" != "true" ]; then
+          if [ -z "$PROVIDER_API_KEY" ]; then
             echo "::warning::Secret not configured — skipping tests"
             echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
           fi
+          echo "MINIMAX_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (moonshot)
+        if: matrix.provider == 'moonshot'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "MOONSHOT_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (fireworks)
+        if: matrix.provider == 'fireworks'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "FIREWORKS_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (anthropic)
+        if: matrix.provider == 'anthropic'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "ANTHROPIC_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (openai)
+        if: matrix.provider == 'openai'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "OPENAI_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (mistral)
+        if: matrix.provider == 'mistral'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "MISTRAL_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (openrouter)
+        if: matrix.provider == 'openrouter'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "OPENROUTER_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (kimi-code)
+        if: matrix.provider == 'kimi-code'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.KIMI_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "KIMI_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (deepseek)
+        if: matrix.provider == 'deepseek'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "DEEPSEEK_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (gemini)
+        if: matrix.provider == 'gemini'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "GEMINI_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
+
+      - name: Configure provider secret (zai)
+        if: matrix.provider == 'zai'
+        env:
+          PROVIDER_API_KEY: ${{ secrets.Z_API_KEY }}
+        run: |
+          if [ -z "$PROVIDER_API_KEY" ]; then
+            echo "::warning::Secret not configured — skipping tests"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "Z_API_KEY=$PROVIDER_API_KEY" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
         if: env.SKIP != 'true'
@@ -92,13 +204,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake build-essential clang libclang-dev pkg-config
-
-      - name: Export provider secret
-        if: env.SKIP != 'true'
-        env:
-          SECRET_VALUE: ${{ secrets[matrix.secret_key] }}
-          SECRET_NAME: ${{ matrix.secret_key }}
-        run: echo "$SECRET_NAME=$SECRET_VALUE" >> "$GITHUB_ENV"
 
       - name: Run integration tests
         if: env.SKIP != 'true'
