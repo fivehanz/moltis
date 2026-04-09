@@ -129,7 +129,7 @@ test.describe("OAuth provider connection", () => {
 
 		// Back in the main page, wait for the polling to detect the authenticated state.
 		// The UI should either show "connected" or transition to a model selector.
-		await expect(page.getByText(/connected successfully|Select Model/i)).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator("#providerModalTitle").getByText(/connected successfully|Select Model/i)).toBeVisible({ timeout: 15_000 });
 
 		// Verify mock server received the expected calls
 		var calls = await getMockCalls(mockPort);
@@ -182,7 +182,7 @@ test.describe("OAuth provider connection", () => {
 		await callbackInput.fill(redirectUrl);
 		await page.getByRole("button", { name: "Submit Callback" }).click();
 
-		await expect(page.getByText(/connected successfully|Select Model/i)).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator("#providerModalTitle").getByText(/connected successfully|Select Model/i)).toBeVisible({ timeout: 15_000 });
 
 		var calls = await getMockCalls(mockPort);
 		var tokenCalls = calls.filter((c) => c.path === "/token");
@@ -224,7 +224,7 @@ test.describe("OAuth provider connection", () => {
 		}
 
 		// Wait for connection to complete.
-		await expect(page.getByText(/connected successfully|Select Model/i)).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator("#providerModalTitle").getByText(/connected successfully|Select Model/i)).toBeVisible({ timeout: 15_000 });
 
 		// Close the modal if a model picker is still open.
 		var modalClose = page.locator("#providerModalClose");
