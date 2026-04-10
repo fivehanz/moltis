@@ -624,29 +624,19 @@ test.describe("Session management", () => {
 		const pageErrors = await navigateAndWait(page, "/");
 		await waitForWsConnected(page);
 
-		// Create a session so we're not on "main" (Delete button is hidden for main)
+		// Create a parent session, then fork it for a real unmodified fork.
 		await createSession(page);
-		const sessionUrl = page.url();
+		await openChatMoreModal(page);
+		const forkBtn = page.locator('#chatMoreModal button[title="Fork session"]');
+		await expect(forkBtn).toBeVisible({ timeout: 10_000 });
+		const parentSessionUrl = page.url();
+		await forkBtn.click();
+		await expect.poll(() => page.url(), { timeout: 10_000 }).not.toBe(parentSessionUrl);
+
+		const forkSessionUrl = page.url();
 		await openChatMoreModal(page);
 		const deleteBtn = page.locator('#chatMoreModal button[title="Delete session"]');
 		await expect(deleteBtn).toBeVisible({ timeout: 10_000 });
-
-		// Simulate an unmodified fork before deleting.
-		await expect
-			.poll(
-				() =>
-					page.evaluate(() => {
-						const store = window.__moltis_stores?.sessionStore;
-						const session = store?.activeSession?.value;
-						if (!session) return false;
-						session.forkPoint = 5;
-						session.messageCount = 5;
-						session.dataVersion.value++;
-						return true;
-					}),
-				{ timeout: 10_000 },
-			)
-			.toBe(true);
 		await deleteBtn.click();
 		await expect(page.locator("#chatMoreModal")).toBeHidden({ timeout: 10_000 });
 
@@ -657,10 +647,10 @@ test.describe("Session management", () => {
 		await expect(confirmModal).toHaveCount(0);
 
 		// The session should be deleted immediately (no dialog appeared)
-		// so we should navigate away from the current session URL.
+		// so we should navigate away from the fork session URL.
 		// switchSession uses history.replaceState (no navigation event),
 		// so poll the URL rather than using waitForURL which waits for "load".
-		await expect.poll(() => page.url(), { timeout: 10_000 }).not.toBe(sessionUrl);
+		await expect.poll(() => page.url(), { timeout: 10_000 }).not.toBe(forkSessionUrl);
 
 		expect(pageErrors).toEqual([]);
 	});

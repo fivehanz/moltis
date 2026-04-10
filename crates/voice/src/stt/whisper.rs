@@ -31,6 +31,7 @@ pub struct WhisperStt {
     client: Client,
     api_key: Option<Secret<String>>,
     model: String,
+    language: Option<String>,
 }
 
 impl std::fmt::Debug for WhisperStt {
@@ -38,6 +39,7 @@ impl std::fmt::Debug for WhisperStt {
         f.debug_struct("WhisperStt")
             .field("api_key", &"[REDACTED]")
             .field("model", &self.model)
+            .field("language", &self.language)
             .finish()
     }
 }
@@ -52,20 +54,27 @@ impl WhisperStt {
     /// Create a new Whisper STT provider.
     #[must_use]
     pub fn new(api_key: Option<Secret<String>>) -> Self {
-        Self {
-            client: Client::new(),
-            api_key,
-            model: DEFAULT_MODEL.into(),
-        }
+        Self::with_options(api_key, None, None)
     }
 
     /// Create with custom model.
     #[must_use]
     pub fn with_model(api_key: Option<Secret<String>>, model: Option<String>) -> Self {
+        Self::with_options(api_key, model, None)
+    }
+
+    /// Create with custom model and language.
+    #[must_use]
+    pub fn with_options(
+        api_key: Option<Secret<String>>,
+        model: Option<String>,
+        language: Option<String>,
+    ) -> Self {
         Self {
             client: Client::new(),
             api_key,
             model: model.unwrap_or_else(|| DEFAULT_MODEL.into()),
+            language,
         }
     }
 
@@ -118,7 +127,8 @@ impl SttProvider for WhisperStt {
             .text("model", self.model.clone())
             .text("response_format", "verbose_json");
 
-        if let Some(language) = request.language {
+        // Request language overrides the configured language, otherwise fall back.
+        if let Some(language) = request.language.or_else(|| self.language.clone()) {
             form = form.text("language", language);
         }
 
@@ -244,6 +254,46 @@ mod tests {
             Some("whisper-large-v3".into()),
         );
         assert_eq!(provider.model, "whisper-large-v3");
+        assert!(provider.language.is_none());
+    }
+
+    #[test]
+    fn test_with_options_sets_model_and_language() {
+        let provider = WhisperStt::with_options(
+            Some(Secret::new("key".into())),
+            Some("whisper-large-v3".into()),
+            Some("ru".into()),
+        );
+        assert_eq!(provider.model, "whisper-large-v3");
+        assert_eq!(provider.language, Some("ru".into()));
+    }
+
+    #[test]
+    fn test_with_options_defaults() {
+        let provider = WhisperStt::with_options(Some(Secret::new("key".into())), None, None);
+        assert_eq!(provider.model, DEFAULT_MODEL);
+        assert!(provider.language.is_none());
+    }
+
+    #[test]
+    fn test_new_delegates_to_with_options() {
+        let provider = WhisperStt::new(Some(Secret::new("key".into())));
+        assert_eq!(provider.model, DEFAULT_MODEL);
+        assert!(provider.language.is_none());
+    }
+
+    #[test]
+    fn test_debug_includes_language() {
+        let provider = WhisperStt::with_options(
+            Some(Secret::new("super-secret-key".into())),
+            Some("whisper-large-v3".into()),
+            Some("ru".into()),
+        );
+        let debug_output = format!("{:?}", provider);
+        assert!(debug_output.contains("[REDACTED]"));
+        assert!(!debug_output.contains("super-secret-key"));
+        assert!(debug_output.contains("whisper-large-v3"));
+        assert!(debug_output.contains("ru"));
     }
 
     #[test]

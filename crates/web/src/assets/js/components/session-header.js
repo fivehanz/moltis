@@ -78,6 +78,7 @@ export function SessionHeader({
 	onBeforeDelete = null,
 } = {}) {
 	var session = sessionStore.activeSession.value;
+	var sessionDataVersion = session?.dataVersion.value || 0;
 	var currentKey = sessionStore.activeSessionKey.value;
 	var gonAgentsPayload = parseAgentsListPayload(gon.get("agents"));
 	var initialAgentOptions = Array.isArray(gonAgentsPayload?.agents) ? gonAgentsPayload.agents : [];
@@ -191,7 +192,8 @@ export function SessionHeader({
 		if (typeof onBeforeDelete === "function") {
 			onBeforeDelete();
 		}
-		var msgCount = session ? session.messageCount || 0 : 0;
+		var currentSession = sessionStore.getByKey(currentKey);
+		var msgCount = currentSession ? currentSession.messageCount || 0 : 0;
 		var nextKey = nextSessionKey(currentKey);
 		var doDelete = () => {
 			sendRpc("sessions.delete", { key: currentKey }).then((res) => {
@@ -209,7 +211,7 @@ export function SessionHeader({
 				fetchSessions();
 			});
 		};
-		var isUnmodifiedFork = session && session.forkPoint != null && msgCount <= session.forkPoint;
+		var isUnmodifiedFork = currentSession && currentSession.forkPoint != null && msgCount <= currentSession.forkPoint;
 		if (msgCount > 0 && !isUnmodifiedFork) {
 			confirmDialog("Delete this session?").then((yes) => {
 				if (yes) doDelete();
@@ -217,7 +219,7 @@ export function SessionHeader({
 		} else {
 			doDelete();
 		}
-	}, [currentKey, onBeforeDelete, session]);
+	}, [currentKey, onBeforeDelete, sessionDataVersion]);
 
 	var onClear = useCallback(() => {
 		if (clearing) return;

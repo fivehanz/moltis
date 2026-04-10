@@ -519,7 +519,11 @@ impl LiveSttService {
             SttProviderId::Whisper => {
                 let key = resolve_openai_key(cfg.voice.stt.whisper.api_key.as_ref(), &cfg);
                 key.map(|k| {
-                    Box::new(WhisperStt::new(Some(k))) as Box<dyn SttProvider + Send + Sync>
+                    Box::new(WhisperStt::with_options(
+                        Some(k),
+                        cfg.voice.stt.whisper.model.clone(),
+                        cfg.voice.stt.whisper.language.clone(),
+                    )) as Box<dyn SttProvider + Send + Sync>
                 })
             },
             SttProviderId::Groq => cfg.voice.stt.groq.api_key.as_ref().map(|key| {

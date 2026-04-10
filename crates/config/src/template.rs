@@ -609,6 +609,10 @@ providers = ["whisper", "mistral", "elevenlabs"] # UI allowlist (empty = show al
 # voice = "alloy"                 # alloy, echo, fable, onyx, nova, shimmer
 # model = "tts-1"                 # tts-1 or tts-1-hd
 
+# [voice.stt.whisper]
+# model = "whisper-1"             # default; override when using an OpenAI-compatible proxy
+# language = "en"                 # Optional ISO 639-1 hint; omit for auto-detect
+
 # ══════════════════════════════════════════════════════════════════════════════
 # NGROK
 # ══════════════════════════════════════════════════════════════════════════════

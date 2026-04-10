@@ -4502,8 +4502,13 @@ echo "$(date -Iseconds) tool=$tool" >> /tmp/moltis-hook.log
 
 **Can modify or block (sequential dispatch):**
 - `BeforeAgentStart` — before a new agent run begins
+- `BeforeLLMCall` — before a prompt is sent to the LLM provider
+- `AfterLLMCall` — after an LLM response arrives, before any tool execution
 - `BeforeToolCall` — before executing a tool (inspect/modify arguments)
 - `BeforeCompaction` — before compacting chat history
+- `MessageReceived` — when an inbound channel/UI message arrives;
+  `Block(reason)` rejects it, `ModifyPayload({"content": "..."})` rewrites
+  the text before the turn begins
 - `MessageSending` — before sending a message to the LLM
 - `ToolResultPersist` — before persisting a tool result
 
@@ -4511,7 +4516,6 @@ echo "$(date -Iseconds) tool=$tool" >> /tmp/moltis-hook.log
 - `AgentEnd` — after an agent run completes
 - `AfterToolCall` — after a tool finishes (observe result)
 - `AfterCompaction` — after compaction completes
-- `MessageReceived` — after receiving an LLM response
 - `MessageSent` — after a message is sent
 - `SessionStart` / `SessionEnd` — session lifecycle
 - `GatewayStart` / `GatewayStop` — server lifecycle

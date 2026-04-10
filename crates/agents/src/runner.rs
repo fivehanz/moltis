@@ -1390,7 +1390,7 @@ pub async fn run_agent_loop_with_context(
         let results = futures::future::join_all(tool_futures).await;
 
         // Process results in original order: emit events, append messages.
-        for (tc, (success, result, error)) in response.tool_calls.iter().zip(results) {
+        for (tc, (success, mut result, error)) in response.tool_calls.iter().zip(results) {
             if success {
                 info!(tool = %tc.name, id = %tc.id, "tool execution succeeded");
                 trace!(tool = %tc.name, result = %result, "tool result");
@@ -1410,6 +1410,37 @@ pub async fn run_agent_loop_with_context(
                         None
                     },
                 });
+            }
+
+            // Dispatch ToolResultPersist hook — the last opportunity for a handler
+            // to sanitize, redact, or block attacker-controlled tool output before
+            // it enters the messages array and is reasoned on by the next LLM
+            // iteration. Block substitutes an error marker instead of aborting the
+            // run, so a single hostile tool result cannot kill a long-running
+            // autonomous agent.
+            if let Some(ref hooks) = hook_registry {
+                let payload = HookPayload::ToolResultPersist {
+                    session_key: session_key_for_hooks.clone(),
+                    tool_name: sanitize_tool_name(&tc.name).into_owned(),
+                    result: result.clone(),
+                    channel: channel_for_hooks.clone(),
+                };
+                match hooks.dispatch(&payload).await {
+                    Ok(HookAction::ModifyPayload(v)) => {
+                        debug!(tool = %tc.name, "ToolResultPersist replaced tool result");
+                        result = v;
+                    },
+                    Ok(HookAction::Block(reason)) => {
+                        warn!(tool = %tc.name, reason = %reason, "ToolResultPersist blocked result — substituting error marker");
+                        result = serde_json::json!({
+                            "error": format!("blocked by hook: {reason}")
+                        });
+                    },
+                    Ok(HookAction::Continue) => {},
+                    Err(e) => {
+                        warn!(tool = %tc.name, error = %e, "ToolResultPersist hook dispatch failed");
+                    },
+                }
             }
 
             // Always sanitize tool results as strings - most LLM APIs don't support
@@ -2113,7 +2144,7 @@ pub async fn run_agent_loop_streaming(
         let results = futures::future::join_all(tool_futures).await;
 
         // Process results in original order: emit events, append messages.
-        for (tc, (success, result, error)) in tool_calls.iter().zip(results) {
+        for (tc, (success, mut result, error)) in tool_calls.iter().zip(results) {
             if success {
                 info!(tool = %tc.name, id = %tc.id, "tool execution succeeded");
                 trace!(tool = %tc.name, result = %result, "tool result");
@@ -2133,6 +2164,37 @@ pub async fn run_agent_loop_streaming(
                         None
                     },
                 });
+            }
+
+            // Dispatch ToolResultPersist hook — the last opportunity for a handler
+            // to sanitize, redact, or block attacker-controlled tool output before
+            // it enters the messages array and is reasoned on by the next LLM
+            // iteration. Block substitutes an error marker instead of aborting the
+            // run, so a single hostile tool result cannot kill a long-running
+            // autonomous agent.
+            if let Some(ref hooks) = hook_registry {
+                let payload = HookPayload::ToolResultPersist {
+                    session_key: session_key_for_hooks.clone(),
+                    tool_name: sanitize_tool_name(&tc.name).into_owned(),
+                    result: result.clone(),
+                    channel: channel_for_hooks.clone(),
+                };
+                match hooks.dispatch(&payload).await {
+                    Ok(HookAction::ModifyPayload(v)) => {
+                        debug!(tool = %tc.name, "ToolResultPersist replaced tool result");
+                        result = v;
+                    },
+                    Ok(HookAction::Block(reason)) => {
+                        warn!(tool = %tc.name, reason = %reason, "ToolResultPersist blocked result — substituting error marker");
+                        result = serde_json::json!({
+                            "error": format!("blocked by hook: {reason}")
+                        });
+                    },
+                    Ok(HookAction::Continue) => {},
+                    Err(e) => {
+                        warn!(tool = %tc.name, error = %e, "ToolResultPersist hook dispatch failed");
+                    },
+                }
             }
 
             // Always sanitize tool results as strings - most LLM APIs don't support
@@ -7591,5 +7653,812 @@ mod tests {
         // At threshold (40 chars).
         assert!(is_substantive_answer_text(&"x".repeat(40)));
         assert!(is_substantive_answer_text(GH_628_LONG_ANSWER));
+    }
+
+    // ── ToolResultPersist hook dispatch (GH #638) ────────────────────────────
+    //
+    // These tests pin down the contract that `ToolResultPersist` fires on the
+    // last leg of the tool-result path — after execution, before the result
+    // lands in the messages array — and that handlers can modify, block
+    // (with graceful error substitution), or fail non-fatally.
+
+    mod tool_result_persist_hook {
+        use {
+            super::*,
+            moltis_common::{
+                Result as HookResult,
+                hooks::{
+                    HookAction as HA, HookEvent as HE, HookHandler, HookPayload as HP,
+                    HookRegistry as HR,
+                },
+            },
+            std::sync::{
+                Mutex,
+                atomic::{AtomicUsize, Ordering},
+            },
+        };
+
+        /// Handler that just counts invocations.
+        struct CountingHandler {
+            count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl HookHandler for CountingHandler {
+            fn name(&self) -> &str {
+                "counter"
+            }
+
+            fn events(&self) -> &[HE] {
+                &[HE::ToolResultPersist]
+            }
+
+            async fn handle(&self, _event: HE, _payload: &HP) -> HookResult<HA> {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                Ok(HA::Continue)
+            }
+        }
+
+        /// Handler that replaces the tool result with a fixed sanitized value.
+        struct ReplacingHandler;
+
+        #[async_trait]
+        impl HookHandler for ReplacingHandler {
+            fn name(&self) -> &str {
+                "replacer"
+            }
+
+            fn events(&self) -> &[HE] {
+                &[HE::ToolResultPersist]
+            }
+
+            async fn handle(&self, _event: HE, _payload: &HP) -> HookResult<HA> {
+                Ok(HA::ModifyPayload(serde_json::json!({
+                    "sanitized": "safe-replacement"
+                })))
+            }
+        }
+
+        /// Handler that blocks persistence with a reason.
+        struct BlockingHandler {
+            reason: String,
+        }
+
+        #[async_trait]
+        impl HookHandler for BlockingHandler {
+            fn name(&self) -> &str {
+                "blocker"
+            }
+
+            fn events(&self) -> &[HE] {
+                &[HE::ToolResultPersist]
+            }
+
+            async fn handle(&self, _event: HE, _payload: &HP) -> HookResult<HA> {
+                Ok(HA::Block(self.reason.clone()))
+            }
+        }
+
+        /// Handler that always errors — runner must treat this as non-fatal.
+        struct ErroringHandler;
+
+        #[async_trait]
+        impl HookHandler for ErroringHandler {
+            fn name(&self) -> &str {
+                "errorer"
+            }
+
+            fn events(&self) -> &[HE] {
+                &[HE::ToolResultPersist]
+            }
+
+            async fn handle(&self, _event: HE, _payload: &HP) -> HookResult<HA> {
+                Err(moltis_common::Error::message("boom"))
+            }
+        }
+
+        /// Handler that records the tool name seen in the hook payload.
+        struct ToolNameRecordingHandler {
+            tool_names: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl HookHandler for ToolNameRecordingHandler {
+            fn name(&self) -> &str {
+                "tool-name-recorder"
+            }
+
+            fn events(&self) -> &[HE] {
+                &[HE::ToolResultPersist]
+            }
+
+            async fn handle(&self, _event: HE, payload: &HP) -> HookResult<HA> {
+                if let HP::ToolResultPersist { tool_name, .. } = payload {
+                    self.tool_names
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(tool_name.clone());
+                }
+                Ok(HA::Continue)
+            }
+        }
+
+        /// Provider that makes one tool call, then on its second invocation
+        /// captures the messages it receives (so the test can inspect the
+        /// exact tool-message content the hook produced) and returns final
+        /// text.
+        struct CapturingProvider {
+            call_count: AtomicUsize,
+            captured: Arc<Mutex<Vec<ChatMessage>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for CapturingProvider {
+            fn name(&self) -> &str {
+                "capture"
+            }
+
+            fn id(&self) -> &str {
+                "capture-model"
+            }
+
+            fn supports_tools(&self) -> bool {
+                true
+            }
+
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                _tools: &[serde_json::Value],
+            ) -> Result<CompletionResponse> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Ok(CompletionResponse {
+                        text: None,
+                        tool_calls: vec![ToolCall {
+                            id: "call_1".into(),
+                            name: "echo_tool".into(),
+                            arguments: serde_json::json!({"text": "unsanitized-original"}),
+                        }],
+                        usage: Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        },
+                    })
+                } else {
+                    *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
+                    Ok(CompletionResponse {
+                        text: Some("done".into()),
+                        tool_calls: vec![],
+                        usage: Usage {
+                            input_tokens: 20,
+                            output_tokens: 10,
+                            ..Default::default()
+                        },
+                    })
+                }
+            }
+
+            fn stream(
+                &self,
+                _messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                Box::pin(tokio_stream::empty())
+            }
+        }
+
+        fn tool_message_content(messages: &[ChatMessage]) -> Option<String> {
+            messages.iter().find_map(|m| {
+                if let ChatMessage::Tool { content, .. } = m {
+                    Some(content.clone())
+                } else {
+                    None
+                }
+            })
+        }
+
+        #[tokio::test]
+        async fn dispatch_fires_exactly_once_per_tool_result() {
+            let count = Arc::new(AtomicUsize::new(0));
+            let mut registry = HR::new();
+            registry.register(Arc::new(CountingHandler {
+                count: Arc::clone(&count),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(CapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_with_context(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.tool_calls_made, 1);
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "ToolResultPersist must fire once per tool result"
+            );
+
+            // Unmodified result reaches the next iteration intact.
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages)
+                .expect("tool message must reach the next LLM iteration");
+            assert!(
+                tool_msg.contains("unsanitized-original"),
+                "Continue must leave the result unchanged, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn modify_payload_replaces_tool_message_content() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(ReplacingHandler));
+
+            let (result, captured) = {
+                // Use the async path directly since run_once uses block_on.
+                let captured = Arc::new(Mutex::new(Vec::new()));
+                let provider = Arc::new(CapturingProvider {
+                    call_count: AtomicUsize::new(0),
+                    captured: Arc::clone(&captured),
+                });
+                let mut tools = ToolRegistry::new();
+                tools.register(Box::new(EchoTool));
+                let uc = UserContent::text("run the tool");
+                let result = run_agent_loop_with_context(
+                    provider,
+                    &tools,
+                    "You are a test bot.",
+                    &uc,
+                    None,
+                    None,
+                    None,
+                    Some(Arc::new(registry)),
+                )
+                .await
+                .unwrap();
+                (result, captured)
+            };
+
+            assert_eq!(result.tool_calls_made, 1);
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages).expect("tool message must be present");
+            assert!(
+                tool_msg.contains("safe-replacement"),
+                "ModifyPayload must rewrite the persisted result, got: {tool_msg}"
+            );
+            assert!(
+                !tool_msg.contains("unsanitized-original"),
+                "original result must not leak through, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn block_substitutes_error_marker_without_aborting() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(BlockingHandler {
+                reason: "injection detected".into(),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(CapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+            let result = run_agent_loop_with_context(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .expect("Block must NOT abort the agent run");
+
+            // Agent reached the final text iteration successfully.
+            assert_eq!(result.tool_calls_made, 1);
+            assert_eq!(result.text, "done");
+
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages).expect("tool message must be present");
+            assert!(
+                tool_msg.contains("blocked by hook: injection detected"),
+                "Block must substitute an error marker, got: {tool_msg}"
+            );
+            assert!(
+                !tool_msg.contains("unsanitized-original"),
+                "original hostile result must not leak through, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn handler_error_is_non_fatal_and_preserves_original_result() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(ErroringHandler));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(CapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+            let result = run_agent_loop_with_context(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .expect("handler error must not kill the agent run");
+
+            assert_eq!(result.tool_calls_made, 1);
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages).expect("tool message must be present");
+            assert!(
+                tool_msg.contains("unsanitized-original"),
+                "handler error must leave original result intact, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn dispatch_uses_sanitized_tool_name_in_payload() {
+            let tool_names = Arc::new(Mutex::new(Vec::new()));
+            let mut registry = HR::new();
+            registry.register(Arc::new(ToolNameRecordingHandler {
+                tool_names: Arc::clone(&tool_names),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(MangledCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured,
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+            let result = run_agent_loop_with_context(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.tool_calls_made, 1);
+            let tool_names = tool_names.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(tool_names.as_slice(), ["echo_tool"]);
+        }
+
+        // ── Streaming-path coverage ──────────────────────────────────────
+
+        /// Streaming equivalent of `CapturingProvider`: first call emits a
+        /// native tool call via stream events, second call captures the
+        /// messages it receives and emits final text.
+        struct StreamingCapturingProvider {
+            call_count: AtomicUsize,
+            captured: Arc<Mutex<Vec<ChatMessage>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for StreamingCapturingProvider {
+            fn name(&self) -> &str {
+                "stream-capture"
+            }
+
+            fn id(&self) -> &str {
+                "stream-capture-model"
+            }
+
+            fn supports_tools(&self) -> bool {
+                true
+            }
+
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[serde_json::Value],
+            ) -> Result<CompletionResponse> {
+                Ok(CompletionResponse {
+                    text: Some("fallback".into()),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                })
+            }
+
+            fn stream(
+                &self,
+                messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Box::pin(tokio_stream::iter(vec![
+                        StreamEvent::ToolCallStart {
+                            id: "call_1".into(),
+                            name: "echo_tool".into(),
+                            index: 0,
+                        },
+                        StreamEvent::ToolCallArgumentsDelta {
+                            index: 0,
+                            delta: r#"{"text":"unsanitized-original"}"#.into(),
+                        },
+                        StreamEvent::ToolCallComplete { index: 0 },
+                        StreamEvent::Done(Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        }),
+                    ]))
+                } else {
+                    *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = messages;
+                    Box::pin(tokio_stream::iter(vec![
+                        StreamEvent::Delta("done".into()),
+                        StreamEvent::Done(Usage {
+                            input_tokens: 5,
+                            output_tokens: 3,
+                            ..Default::default()
+                        }),
+                    ]))
+                }
+            }
+        }
+
+        struct MangledCapturingProvider {
+            call_count: AtomicUsize,
+            captured: Arc<Mutex<Vec<ChatMessage>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for MangledCapturingProvider {
+            fn name(&self) -> &str {
+                "mangled-capture"
+            }
+
+            fn id(&self) -> &str {
+                "mangled-capture-model"
+            }
+
+            fn supports_tools(&self) -> bool {
+                true
+            }
+
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                _tools: &[serde_json::Value],
+            ) -> Result<CompletionResponse> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Ok(CompletionResponse {
+                        text: None,
+                        tool_calls: vec![ToolCall {
+                            id: "call_1".into(),
+                            name: "echo_tool_2".into(),
+                            arguments: serde_json::json!({"text": "unsanitized-original"}),
+                        }],
+                        usage: Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        },
+                    })
+                } else {
+                    *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
+                    Ok(CompletionResponse {
+                        text: Some("done".into()),
+                        tool_calls: vec![],
+                        usage: Usage {
+                            input_tokens: 20,
+                            output_tokens: 10,
+                            ..Default::default()
+                        },
+                    })
+                }
+            }
+
+            fn stream(
+                &self,
+                _messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                Box::pin(tokio_stream::empty())
+            }
+        }
+
+        struct MangledStreamingCapturingProvider {
+            call_count: AtomicUsize,
+            captured: Arc<Mutex<Vec<ChatMessage>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for MangledStreamingCapturingProvider {
+            fn name(&self) -> &str {
+                "mangled-stream-capture"
+            }
+
+            fn id(&self) -> &str {
+                "mangled-stream-capture-model"
+            }
+
+            fn supports_tools(&self) -> bool {
+                true
+            }
+
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[serde_json::Value],
+            ) -> Result<CompletionResponse> {
+                Ok(CompletionResponse {
+                    text: Some("fallback".into()),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                })
+            }
+
+            fn stream(
+                &self,
+                messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Box::pin(tokio_stream::iter(vec![
+                        StreamEvent::ToolCallStart {
+                            id: "call_1".into(),
+                            name: "echo_tool_2".into(),
+                            index: 0,
+                        },
+                        StreamEvent::ToolCallArgumentsDelta {
+                            index: 0,
+                            delta: r#"{"text":"unsanitized-original"}"#.into(),
+                        },
+                        StreamEvent::ToolCallComplete { index: 0 },
+                        StreamEvent::Done(Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        }),
+                    ]))
+                } else {
+                    *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = messages;
+                    Box::pin(tokio_stream::iter(vec![
+                        StreamEvent::Delta("done".into()),
+                        StreamEvent::Done(Usage {
+                            input_tokens: 5,
+                            output_tokens: 3,
+                            ..Default::default()
+                        }),
+                    ]))
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn streaming_dispatch_fires_exactly_once_per_tool_result() {
+            let count = Arc::new(AtomicUsize::new(0));
+            let mut registry = HR::new();
+            registry.register(Arc::new(CountingHandler {
+                count: Arc::clone(&count),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(StreamingCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_streaming(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.tool_calls_made, 1);
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "streaming: ToolResultPersist must fire once per tool result"
+            );
+
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages)
+                .expect("tool message must reach the next LLM iteration");
+            assert!(
+                tool_msg.contains("unsanitized-original"),
+                "streaming: Continue must leave the result unchanged, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn streaming_modify_payload_replaces_tool_message_content() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(ReplacingHandler));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(StreamingCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_streaming(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.tool_calls_made, 1);
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages)
+                .expect("tool message must be present in streaming path");
+            assert!(
+                tool_msg.contains("safe-replacement"),
+                "streaming: ModifyPayload must rewrite the persisted result, got: {tool_msg}"
+            );
+            assert!(
+                !tool_msg.contains("unsanitized-original"),
+                "streaming: original result must not leak, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn streaming_block_substitutes_error_marker_without_aborting() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(BlockingHandler {
+                reason: "injection detected".into(),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(StreamingCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_streaming(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .expect("streaming: Block must NOT abort the agent run");
+
+            assert_eq!(result.tool_calls_made, 1);
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages)
+                .expect("tool message must be present in streaming path");
+            assert!(
+                tool_msg.contains("blocked by hook: injection detected"),
+                "streaming: Block must substitute an error marker, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn streaming_handler_error_is_non_fatal_and_preserves_original_result() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(ErroringHandler));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(StreamingCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_streaming(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .expect("streaming: handler error must not kill the agent run");
+
+            assert_eq!(result.tool_calls_made, 1);
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages)
+                .expect("tool message must be present in streaming path");
+            assert!(
+                tool_msg.contains("unsanitized-original"),
+                "streaming: handler error must leave original result intact, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn streaming_dispatch_uses_sanitized_tool_name_in_payload() {
+            let tool_names = Arc::new(Mutex::new(Vec::new()));
+            let mut registry = HR::new();
+            registry.register(Arc::new(ToolNameRecordingHandler {
+                tool_names: Arc::clone(&tool_names),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(MangledStreamingCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured,
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_streaming(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.tool_calls_made, 1);
+            let tool_names = tool_names.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(tool_names.as_slice(), ["echo_tool"]);
+        }
     }
 }

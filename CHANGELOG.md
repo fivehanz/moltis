@@ -19,6 +19,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260410.01] - 2026-04-10
+### Added
+- [oauth] Log loopback redirect URI rewrites at debug level
+- [skills] Ship native read_skill tool
+- [skills] Harden read_skill with assets/, binary files, and metadata surfacing
+
+
+### Changed
+- [oauth] Share loopback redirect normalizer and apply to provider setup
+- [oauth] Eliminate dead branches in normalize_loopback_redirect
+
+
+### Removed
+- [web] Stabilize node selector and fork delete e2e
+
+
+### Fixed
+- [gateway] Dcg-guard PATH augmentation and loud missing-dcg warning
+- [gateway] Refresh stale dcg-guard files and use async subprocess
+- [gateway] Dcg-guard HOME fallback and unconditional startup log
+- [agents] Suppress auto-continue after substantive final answer
+- [agents] Address review feedback on auto-continue fix
+- [mcp] Normalize loopback redirect URIs to http for OAuth registration
+- [provider-setup] Normalize pre-loaded loopback redirect URIs
+- [skills] Address Greptile review feedback on read_skill
+- [skills] Address greptile review feedback (greploop iteration 2)
+- [skills] Cap skill body size in read_primary (greploop iteration 3)
+- [skills] Per-subdir sidecar cap + data_dir-scoped discoverer
+- [voice] Honor whisper.model and whisper.language in STT factory
+
+
+### Security
+- [hooks] Pin dcg install to tag and verify checksum
+
 ## [20260409.04] - 2026-04-09
 ### Added
 - [providers] Add Alibaba Cloud Coding Plan provider

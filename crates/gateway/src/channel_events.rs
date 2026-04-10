@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use {
     async_trait::async_trait,
@@ -1373,14 +1373,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 };
 
                 if args.is_empty() {
-                    // List unique providers.
-                    let mut providers: Vec<String> = models
-                        .iter()
-                        .filter_map(|m| {
-                            m.get("provider").and_then(|v| v.as_str()).map(String::from)
-                        })
-                        .collect();
-                    providers.dedup();
+                    // List unique providers (sorted, deduplicated).
+                    let providers = unique_providers(models);
 
                     if providers.len() <= 1 {
                         // Single provider — list models directly.
@@ -1719,6 +1713,19 @@ impl ChannelEventSink for GatewayChannelEventSink {
     }
 }
 
+/// Collect the set of distinct `provider` values from a model list.
+///
+/// A `BTreeSet` makes the contract explicit: provider names are unique and
+/// returned in deterministic order for the Telegram `/model` inline keyboard.
+fn unique_providers(models: &[serde_json::Value]) -> Vec<String> {
+    models
+        .iter()
+        .filter_map(|m| m.get("provider").and_then(|v| v.as_str()).map(String::from))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Format a numbered model list, optionally filtered by provider.
 ///
 /// Each line is: `N. DisplayName [provider] *` (where `*` marks the current model).
@@ -1859,5 +1866,49 @@ mod tests {
     fn shell_mode_rewrite_skips_peek_and_stop() {
         assert!(rewrite_for_shell_mode("/peek").is_none());
         assert!(rewrite_for_shell_mode("/stop").is_none());
+    }
+
+    // ── unique_providers ───────────────────────────────────────────
+
+    /// Regression test for GitHub issue #637: providers must be deduplicated
+    /// even when duplicates are not adjacent in the model list. Prior to the
+    /// fix, a bare `Vec::dedup` left non-consecutive duplicates in place,
+    /// surfacing as duplicate Telegram `/model` inline keyboard buttons.
+    #[test]
+    fn unique_providers_dedups_non_adjacent() {
+        let models = vec![
+            serde_json::json!({"id": "gpt-4o", "provider": "openai"}),
+            serde_json::json!({"id": "claude-3.5", "provider": "anthropic"}),
+            serde_json::json!({"id": "gpt-4o-mini", "provider": "openai"}),
+            serde_json::json!({"id": "gemini-pro", "provider": "google"}),
+            serde_json::json!({"id": "claude-3.7", "provider": "anthropic"}),
+        ];
+        let providers = unique_providers(&models);
+        assert_eq!(providers, vec!["anthropic", "google", "openai"]);
+    }
+
+    #[test]
+    fn unique_providers_sorted_alphabetically() {
+        let models = vec![
+            serde_json::json!({"id": "m1", "provider": "zeta"}),
+            serde_json::json!({"id": "m2", "provider": "alpha"}),
+            serde_json::json!({"id": "m3", "provider": "mu"}),
+        ];
+        assert_eq!(unique_providers(&models), vec!["alpha", "mu", "zeta"]);
+    }
+
+    #[test]
+    fn unique_providers_skips_entries_without_provider() {
+        let models = vec![
+            serde_json::json!({"id": "m1"}),
+            serde_json::json!({"id": "m2", "provider": "openai"}),
+            serde_json::json!({"id": "m3", "provider": serde_json::Value::Null}),
+        ];
+        assert_eq!(unique_providers(&models), vec!["openai"]);
+    }
+
+    #[test]
+    fn unique_providers_empty_input() {
+        assert!(unique_providers(&[]).is_empty());
     }
 }

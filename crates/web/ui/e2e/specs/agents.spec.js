@@ -47,17 +47,24 @@ async function waitForWelcomeOrNoProvidersCard(page) {
 		timeout: 10_000,
 	});
 
-	const noProvidersCard = page.locator("#noProvidersCard");
-	const noProvidersVisible = await noProvidersCard.isVisible().catch(() => false);
-	if (noProvidersVisible) {
-		await expect(noProvidersCard.getByRole("heading", { name: "No LLMs Connected", exact: true })).toBeVisible();
-		await expect(noProvidersCard.getByRole("link", { name: "Go to LLMs", exact: true })).toBeVisible();
-		return null;
+	// The two cards can swap during load: if models haven't arrived yet when the
+	// session opens, #noProvidersCard is rendered first and then replaced with
+	// #welcomeCard once models load (see refreshWelcomeCardIfNeeded in
+	// sessions.js). Prefer the welcome card if it eventually appears, and only
+	// treat the no-providers state as final when the welcome card never shows.
+	const welcomeCard = page.locator("#welcomeCard");
+	try {
+		await expect(welcomeCard).toBeVisible({ timeout: 5_000 });
+		return welcomeCard;
+	} catch {
+		// Welcome card never materialized — we're in the no-providers state.
 	}
 
-	const welcomeCard = page.locator("#welcomeCard");
-	await expect(welcomeCard).toBeVisible({ timeout: 10_000 });
-	return welcomeCard;
+	const noProvidersCard = page.locator("#noProvidersCard");
+	await expect(noProvidersCard).toBeVisible();
+	await expect(noProvidersCard.getByRole("heading", { name: "No LLMs Connected", exact: true })).toBeVisible();
+	await expect(noProvidersCard.getByRole("link", { name: "Go to LLMs", exact: true })).toBeVisible();
+	return null;
 }
 
 async function deleteAgentByName(page, agentName) {
