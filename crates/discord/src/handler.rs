@@ -17,19 +17,22 @@ use crate::config::{
 
 use crate::access;
 
-use moltis_channels::{
-    ChannelEvent, ChannelType, Error as ChannelError, InboundMediaDownloader, InboundMediaSource,
-    Result as ChannelsResult,
-    gating::DmPolicy,
-    message_log::MessageLogEntry,
-    otp::{
-        OtpInitResult, OtpVerifyResult, approve_sender_via_otp, emit_otp_challenge,
-        emit_otp_resolution,
+use {
+    moltis_channels::{
+        ChannelEvent, ChannelType, Error as ChannelError, InboundMediaDownloader,
+        InboundMediaSource, Result as ChannelsResult,
+        gating::DmPolicy,
+        message_log::MessageLogEntry,
+        otp::{
+            OtpInitResult, OtpVerifyResult, approve_sender_via_otp, emit_otp_challenge,
+            emit_otp_resolution,
+        },
+        plugin::{
+            ChannelAttachment, ChannelEventSink, ChannelMessageKind, ChannelMessageMeta,
+            ChannelReplyTarget,
+        },
     },
-    plugin::{
-        ChannelAttachment, ChannelEventSink, ChannelMessageKind, ChannelMessageMeta,
-        ChannelReplyTarget,
-    },
+    moltis_common::{http_client::build_default_http_client, ssrf::ssrf_check},
 };
 
 use crate::state::AccountStateMap;
@@ -204,8 +207,18 @@ enum MediaResolveOutcome {
     VoiceSttUnavailable,
 }
 
-#[derive(Debug, Default)]
-struct DiscordInboundMediaDownloader;
+#[derive(Debug, Clone)]
+struct DiscordInboundMediaDownloader {
+    client: reqwest::Client,
+}
+
+impl DiscordInboundMediaDownloader {
+    fn new() -> Self {
+        Self {
+            client: build_default_http_client(),
+        }
+    }
+}
 
 /// Returns true if the attachment looks like an audio/voice file.
 fn attachment_is_audio(a: &Attachment) -> bool {
@@ -300,8 +313,21 @@ fn image_media_type_fallback(content_type: Option<&str>, filename: &str) -> Stri
 }
 
 /// Download a Discord CDN attachment, enforcing a size cap.
-async fn download_discord_attachment(url: &str, max_bytes: usize) -> ChannelsResult<Vec<u8>> {
-    let response = reqwest::get(url)
+async fn download_discord_attachment(
+    client: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+) -> ChannelsResult<Vec<u8>> {
+    let parsed_url = reqwest::Url::parse(url).map_err(|error| {
+        ChannelError::invalid_input(format!("invalid discord attachment URL: {error}"))
+    })?;
+    ssrf_check(&parsed_url, &[])
+        .await
+        .map_err(|error| ChannelError::external("discord attachment ssrf check", error))?;
+
+    let response = client
+        .get(parsed_url)
+        .send()
         .await
         .map_err(|e| ChannelError::external("discord attachment request", e))?;
     if !response.status().is_success() {
@@ -339,12 +365,46 @@ impl InboundMediaDownloader for DiscordInboundMediaDownloader {
     ) -> ChannelsResult<Vec<u8>> {
         match source {
             InboundMediaSource::RemoteUrl { url } => {
-                download_discord_attachment(url, max_bytes).await
+                download_discord_attachment(&self.client, url, max_bytes).await
             },
             _ => Err(ChannelError::invalid_input(
                 "discord downloader received unsupported media source",
             )),
         }
+    }
+}
+
+async fn log_discord_message(
+    message_log: Option<&std::sync::Arc<dyn moltis_channels::message_log::MessageLog>>,
+    account_id: &str,
+    peer_id: &str,
+    username: &Option<String>,
+    sender_name: &Option<String>,
+    chat_id: &str,
+    is_guild: bool,
+    body: &str,
+    access_granted: bool,
+) {
+    if let Some(log) = message_log {
+        let _ = log
+            .log(MessageLogEntry {
+                id: 0,
+                account_id: account_id.to_string(),
+                channel_type: "discord".into(),
+                peer_id: peer_id.to_string(),
+                username: username.clone(),
+                sender_name: sender_name.clone(),
+                chat_id: chat_id.to_string(),
+                chat_type: if is_guild {
+                    "group".into()
+                } else {
+                    "private".into()
+                },
+                body: body.to_string(),
+                access_granted,
+                created_at: unix_now(),
+            })
+            .await;
     }
 }
 
@@ -667,29 +727,6 @@ impl EventHandler for Handler {
         .is_ok();
         let access_granted = policy_allowed;
 
-        // Log the message.
-        if let Some(log) = message_log {
-            let _ = log
-                .log(MessageLogEntry {
-                    id: 0,
-                    account_id: self.account_id.clone(),
-                    channel_type: "discord".into(),
-                    peer_id: peer_id.clone(),
-                    username: username.clone(),
-                    sender_name: sender_name.clone(),
-                    chat_id: chat_id.clone(),
-                    chat_type: if is_guild {
-                        "group".into()
-                    } else {
-                        "private".into()
-                    },
-                    body: text.clone(),
-                    access_granted,
-                    created_at: unix_now(),
-                })
-                .await;
-        }
-
         // Emit inbound message event.
         if let Some(sink) = event_sink.as_ref() {
             sink.emit(ChannelEvent::InboundMessage {
@@ -705,6 +742,19 @@ impl EventHandler for Handler {
         }
 
         if !access_granted {
+            log_discord_message(
+                message_log.as_ref(),
+                &self.account_id,
+                &peer_id,
+                &username,
+                &sender_name,
+                &chat_id,
+                is_guild,
+                &text,
+                access_granted,
+            )
+            .await;
+
             // OTP self-approval for non-allowlisted DM users.
             if !is_guild
                 && !policy_allowed
@@ -757,6 +807,19 @@ impl EventHandler for Handler {
 
         // Handle slash commands.
         if let Some(command) = text.strip_prefix('/') {
+            log_discord_message(
+                message_log.as_ref(),
+                &self.account_id,
+                &peer_id,
+                &username,
+                &sender_name,
+                &chat_id,
+                is_guild,
+                &text,
+                access_granted,
+            )
+            .await;
+
             let response_text = match sink
                 .dispatch_command(command.trim(), reply_to.clone())
                 .await
@@ -783,7 +846,7 @@ impl EventHandler for Handler {
         // Resolve inbound media attachments (voice transcription, image
         // optimization) before further processing. This mirrors the Telegram
         // flow in `crates/telegram/src/handlers.rs`.
-        let downloader = DiscordInboundMediaDownloader;
+        let downloader = DiscordInboundMediaDownloader::new();
         let (body, attachments, voice_audio, mut inferred_kind) =
             match resolve_discord_inbound_media(
                 &msg.attachments,
@@ -817,6 +880,19 @@ impl EventHandler for Handler {
                     return;
                 },
             };
+
+        log_discord_message(
+            message_log.as_ref(),
+            &self.account_id,
+            &peer_id,
+            &username,
+            &sender_name,
+            &chat_id,
+            is_guild,
+            &body,
+            access_granted,
+        )
+        .await;
 
         if let Some((latitude, longitude)) = extract_location_coordinates(&body) {
             let resolved = sink
