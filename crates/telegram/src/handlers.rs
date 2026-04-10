@@ -1547,6 +1547,9 @@ async fn handle_voice_message(
 
     // STT provider not configured. Send setup guidance and skip dispatch.
     if !sink.voice_stt_available().await {
+        if let Some(caption) = caption_text {
+            return Some((caption, Vec::new(), None));
+        }
         if let Err(e) = outbound
             .send_text(
                 account_id,
@@ -2152,9 +2155,13 @@ mod tests {
 
     impl MockSink {
         fn with_stt(transcription: Result<String>) -> Self {
+            Self::with_voice_stt(true, Some(transcription))
+        }
+
+        fn with_voice_stt(stt_available: bool, transcription: Option<Result<String>>) -> Self {
             Self {
-                stt_available: true,
-                transcription_result: Mutex::new(Some(transcription)),
+                stt_available,
+                transcription_result: Mutex::new(transcription),
                 ..Default::default()
             }
         }
@@ -2865,6 +2872,7 @@ mod tests {
     /// the Bot API.
     async fn run_voice_scenario(
         caption: Option<&str>,
+        stt_available: bool,
         download: VoiceDownloadOutcome,
         transcription: VoiceTranscriptionOutcome,
     ) -> VoiceScenarioResult {
@@ -2931,12 +2939,18 @@ mod tests {
             accounts: Arc::clone(&accounts),
         });
 
-        let transcription_result: Result<String> = match transcription {
-            VoiceTranscriptionOutcome::Ok(text) => Ok(text.to_string()),
-            VoiceTranscriptionOutcome::Empty => Ok(String::new()),
-            VoiceTranscriptionOutcome::Err => Err(ChannelError::unavailable("mock stt failure")),
-        };
-        let sink = Arc::new(MockSink::with_stt(transcription_result));
+        let sink = Arc::new(if stt_available {
+            let transcription_result = match transcription {
+                VoiceTranscriptionOutcome::Ok(text) => Ok(text.to_string()),
+                VoiceTranscriptionOutcome::Empty => Ok(String::new()),
+                VoiceTranscriptionOutcome::Err => {
+                    Err(ChannelError::unavailable("mock stt failure"))
+                },
+            };
+            MockSink::with_stt(transcription_result)
+        } else {
+            MockSink::with_voice_stt(false, None)
+        });
         let account_id = "test-account";
 
         {
@@ -3021,6 +3035,7 @@ mod tests {
     async fn voice_empty_transcription_sends_direct_reply_and_skips_dispatch() {
         let result = run_voice_scenario(
             None,
+            true,
             VoiceDownloadOutcome::Ok,
             VoiceTranscriptionOutcome::Empty,
         )
@@ -3047,6 +3062,7 @@ mod tests {
     async fn voice_empty_transcription_with_caption_dispatches_caption() {
         let result = run_voice_scenario(
             Some("please review the attached audio"),
+            true,
             VoiceDownloadOutcome::Ok,
             VoiceTranscriptionOutcome::Empty,
         )
@@ -3076,6 +3092,7 @@ mod tests {
     async fn voice_transcription_error_sends_direct_reply_and_skips_dispatch() {
         let result = run_voice_scenario(
             None,
+            true,
             VoiceDownloadOutcome::Ok,
             VoiceTranscriptionOutcome::Err,
         )
@@ -3101,6 +3118,7 @@ mod tests {
     async fn voice_transcription_error_with_caption_dispatches_caption() {
         let result = run_voice_scenario(
             Some("summarize this clip"),
+            true,
             VoiceDownloadOutcome::Ok,
             VoiceTranscriptionOutcome::Err,
         )
@@ -3129,6 +3147,7 @@ mod tests {
     async fn voice_download_failure_sends_direct_reply_and_skips_dispatch() {
         let result = run_voice_scenario(
             None,
+            true,
             VoiceDownloadOutcome::Fail,
             // transcription outcome is irrelevant because we never reach it.
             VoiceTranscriptionOutcome::Ok("unused"),
@@ -3155,6 +3174,7 @@ mod tests {
     async fn voice_download_failure_with_caption_dispatches_caption() {
         let result = run_voice_scenario(
             Some("voice note about the design"),
+            true,
             VoiceDownloadOutcome::Fail,
             VoiceTranscriptionOutcome::Ok("unused"),
         )
@@ -3184,6 +3204,7 @@ mod tests {
     async fn voice_successful_transcription_dispatches_transcript() {
         let result = run_voice_scenario(
             None,
+            true,
             VoiceDownloadOutcome::Ok,
             VoiceTranscriptionOutcome::Ok("hello world"),
         )
@@ -3199,6 +3220,7 @@ mod tests {
     async fn voice_successful_transcription_with_caption_combines_both() {
         let result = run_voice_scenario(
             Some("context: meeting notes"),
+            true,
             VoiceDownloadOutcome::Ok,
             VoiceTranscriptionOutcome::Ok("we decided to ship on friday"),
         )
@@ -3208,6 +3230,52 @@ mod tests {
         assert_eq!(result.dispatched_texts, vec![
             "context: meeting notes\n\n[Voice message]: we decided to ship on friday".to_string()
         ]);
+    }
+
+    #[tokio::test]
+    async fn voice_stt_unavailable_without_caption_sends_setup_hint_and_skips_dispatch() {
+        let result = run_voice_scenario(
+            None,
+            false,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Ok("unused"),
+        )
+        .await;
+
+        assert_eq!(result.dispatch_calls, 0);
+        assert!(
+            result.sent_messages.iter().any(|m| {
+                m.chat_id == 42
+                    && m.text
+                        .contains("I can't understand voice, you did not configure it")
+            }),
+            "expected STT setup hint, got: {:?}",
+            result.sent_messages
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_stt_unavailable_with_caption_dispatches_caption() {
+        let result = run_voice_scenario(
+            Some("summarize this anyway"),
+            false,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Ok("unused"),
+        )
+        .await;
+
+        assert_eq!(result.dispatch_calls, 1);
+        assert_eq!(result.dispatched_texts, vec![
+            "summarize this anyway".to_string()
+        ]);
+        assert!(
+            result.sent_messages.iter().all(|m| {
+                m.text
+                    != "I can't understand voice, you did not configure it, please visit Settings -> Voice"
+            }),
+            "setup hint should not be sent when caption is present: {:?}",
+            result.sent_messages
+        );
     }
 
     #[test]
