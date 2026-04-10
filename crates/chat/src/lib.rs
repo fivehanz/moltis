@@ -860,7 +860,7 @@ fn compress_summary(text: &str) -> String {
     let mut deduped: Vec<String> = Vec::with_capacity(lines.len());
     for line in lines {
         let key = line.trim().to_ascii_lowercase();
-        if key.is_empty() || seen.insert(key) {
+        if seen.insert(key) {
             deduped.push(if line.len() <= SUMMARY_MAX_LINE_CHARS {
                 line.to_string()
             } else {
@@ -913,7 +913,9 @@ fn compress_summary(text: &str) -> String {
     if header_count + candidates.len() <= SUMMARY_MAX_LINES {
         let total_len = headers.iter().chain(candidates.iter()).fold(0, |acc, l| {
             acc + l.len() + 1 // +1 for newline
-        });
+        })
+        // fold overcounts by 1 (N newlines vs N-1 for join); subtract to correct.
+        .saturating_sub(1);
         if total_len <= SUMMARY_MAX_CHARS {
             let mut result = headers;
             result.extend(candidates);
@@ -940,6 +942,8 @@ fn compress_summary(text: &str) -> String {
             .iter()
             .chain(kept_candidates.iter())
             .fold(0, |acc, l| acc + l.len() + 1)
+            // fold overcounts by 1 (N newlines vs N-1 for join); subtract to correct.
+            .saturating_sub(1)
             + notice.len()
             + 1; // +1 for newline before notice
 
@@ -954,9 +958,10 @@ fn compress_summary(text: &str) -> String {
     // Edge case: even dropping all candidates, headers alone are too long.
     // Force-truncate headers from the end.
     let all_dropped_count = candidates.len();
-    let notice = make_notice(all_dropped_count);
     let mut result: Vec<String> = Vec::new();
-    let mut char_budget = SUMMARY_MAX_CHARS.saturating_sub(notice.len() + 1); // +1 for newline
+    let mut header_drop_count = 0usize;
+    // Pre-compute budget assuming 0 header drops; notice rebuilt after loop with actual count.
+    let mut char_budget = SUMMARY_MAX_CHARS.saturating_sub(make_notice(all_dropped_count).len() + 1);
     for line in &headers {
         let needed = line.len()
             + if result.is_empty() {
@@ -965,11 +970,13 @@ fn compress_summary(text: &str) -> String {
                 1
             };
         if needed > char_budget || result.len() + 1 >= SUMMARY_MAX_LINES {
-            break;
+            header_drop_count += 1;
+            continue;
         }
         char_budget -= needed;
         result.push(line.clone());
     }
+    let notice = make_notice(all_dropped_count + header_drop_count);
     result.push(notice);
     result.join("\n")
 }
