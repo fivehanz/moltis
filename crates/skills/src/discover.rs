@@ -31,13 +31,23 @@ impl FsSkillDiscoverer {
     ///
     /// Workspace root is always the configured data directory.
     pub fn default_paths() -> Vec<(PathBuf, SkillSource)> {
-        let workspace_root = moltis_config::data_dir();
-        let data = workspace_root.clone();
+        Self::default_paths_for(&moltis_config::data_dir())
+    }
+
+    /// Build the default search paths rooted at an explicit workspace / data
+    /// directory.
+    ///
+    /// Prefer this over [`default_paths`](Self::default_paths) when the caller
+    /// already has a `data_dir` in hand (e.g. the gateway's `bootstrap` scope)
+    /// so the read and write sides stay consistent even if
+    /// `moltis_config::data_dir()` is ever reconfigured at runtime.
+    #[must_use]
+    pub fn default_paths_for(data_dir: &Path) -> Vec<(PathBuf, SkillSource)> {
         vec![
-            (workspace_root.join(".moltis/skills"), SkillSource::Project),
-            (data.join("skills"), SkillSource::Personal),
-            (data.join("installed-skills"), SkillSource::Registry),
-            (data.join("installed-plugins"), SkillSource::Plugin),
+            (data_dir.join(".moltis/skills"), SkillSource::Project),
+            (data_dir.join("skills"), SkillSource::Personal),
+            (data_dir.join("installed-skills"), SkillSource::Registry),
+            (data_dir.join("installed-plugins"), SkillSource::Plugin),
         ]
     }
 }

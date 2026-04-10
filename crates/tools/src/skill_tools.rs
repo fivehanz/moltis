@@ -16,7 +16,14 @@ use {
 
 use crate::{checkpoints::CheckpointManager, error::Error};
 
-const MAX_SIDECAR_FILES_PER_CALL: usize = 16;
+const MAX_SIDECAR_FILES_PER_CALL: usize = 32;
+/// Per-sidecar-subdirectory cap used by the read path's listing. The previous
+/// implementation enforced only a single global cap, which meant a
+/// `references/` directory containing 32 files would silently swallow the
+/// entire quota before `templates/`, `assets/`, or `scripts/` ever got a
+/// chance to contribute entries. Enforcing a per-subdir quota guarantees
+/// every populated subdirectory shows up in the listing.
+const MAX_SIDECAR_FILES_PER_SUBDIR: usize = 8;
 const MAX_SIDECAR_FILE_BYTES: usize = 128 * 1024;
 const MAX_SIDECAR_TOTAL_BYTES: usize = 512 * 1024;
 
@@ -783,6 +790,11 @@ async fn collect_sidecar_entries(skill_dir: &Path) -> crate::Result<Vec<SidecarE
     let mut out: Vec<SidecarEntry> = Vec::new();
 
     for sub in SIDECAR_SUBDIRS {
+        // Stop early if the global cap is already exhausted so we don't
+        // over-report, but *do* enter each subdir as long as it has free
+        // budget — the per-subdir cap below guarantees every populated
+        // subdirectory gets its fair share even when one dir contains
+        // hundreds of files.
         if out.len() >= MAX_SIDECAR_FILES_PER_CALL {
             break;
         }
@@ -794,8 +806,15 @@ async fn collect_sidecar_entries(skill_dir: &Path) -> crate::Result<Vec<SidecarE
             Ok(e) => e,
             Err(_) => continue,
         };
+        let mut this_subdir = 0usize;
         while let Some(entry) = entries.next_entry().await? {
-            if out.len() >= MAX_SIDECAR_FILES_PER_CALL {
+            // Enforce both the per-subdir cap (so `references/` can't
+            // swallow the entire listing and hide `templates/` or
+            // `scripts/`) and the global cap (so a pathological skill
+            // can't return thousands of entries).
+            if this_subdir >= MAX_SIDECAR_FILES_PER_SUBDIR
+                || out.len() >= MAX_SIDECAR_FILES_PER_CALL
+            {
                 break;
             }
             // Reject symlinks so the listing only shows real in-skill files.
@@ -821,6 +840,7 @@ async fn collect_sidecar_entries(skill_dir: &Path) -> crate::Result<Vec<SidecarE
                 relative_path: format!("{sub}/{file_name}"),
                 bytes: meta.len(),
             });
+            this_subdir += 1;
         }
     }
 
@@ -2363,26 +2383,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_skill_listing_caps_at_max_files_per_call() {
-        // Seed more than the cap so we can verify the listing is bounded.
+    async fn test_read_skill_listing_caps_per_subdir_not_globally() {
+        // A `references/` directory with 100 files must NOT starve the other
+        // sidecar subdirectories. Each populated subdir should get its own
+        // per-subdir quota (MAX_SIDECAR_FILES_PER_SUBDIR) so the agent still
+        // sees at least one entry from every populated sidecar directory.
         let tmp = tempfile::tempdir().unwrap();
         let skill_dir = seed_personal_skill(tmp.path(), "many", "# Many\n");
         std::fs::create_dir_all(skill_dir.join("references")).unwrap();
-        for i in 0..(MAX_SIDECAR_FILES_PER_CALL + 5) {
-            std::fs::write(
-                skill_dir.join(format!("references/file-{i:03}.md")),
-                "body\n",
-            )
-            .unwrap();
+        std::fs::create_dir_all(skill_dir.join("templates")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("assets")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        // 100 references would, under the old single-global-cap logic,
+        // have swallowed the entire quota and hidden all other subdirs.
+        for i in 0..100 {
+            std::fs::write(skill_dir.join(format!("references/ref-{i:03}.md")), "r\n").unwrap();
         }
+        // One file in each of the other subdirs.
+        std::fs::write(skill_dir.join("templates/t.md"), "t\n").unwrap();
+        std::fs::write(skill_dir.join("assets/a.md"), "a\n").unwrap();
+        std::fs::write(skill_dir.join("scripts/s.sh"), "s\n").unwrap();
 
         let tool = read_tool_for(tmp.path());
         let result = tool.execute(json!({ "name": "many" })).await.unwrap();
-        let linked = result["linked_files"].as_array().unwrap();
+        let linked: Vec<String> = result["linked_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["path"].as_str().unwrap().to_string())
+            .collect();
+
+        // Global cap still applies.
         assert!(
             linked.len() <= MAX_SIDECAR_FILES_PER_CALL,
-            "listing must cap at {MAX_SIDECAR_FILES_PER_CALL}, got {}",
+            "listing must cap at global limit {MAX_SIDECAR_FILES_PER_CALL}, got {}",
             linked.len()
+        );
+        // references/ must not exceed its per-subdir quota.
+        let ref_count = linked
+            .iter()
+            .filter(|p| p.starts_with("references/"))
+            .count();
+        assert!(
+            ref_count <= MAX_SIDECAR_FILES_PER_SUBDIR,
+            "references/ must cap at per-subdir limit {MAX_SIDECAR_FILES_PER_SUBDIR}, got {ref_count}"
+        );
+        // Every populated subdir must appear — that's the whole point of
+        // per-subdir quotas.
+        for dir in ["references/", "templates/", "assets/", "scripts/"] {
+            assert!(
+                linked.iter().any(|p| p.starts_with(dir)),
+                "{dir} must not be silently dropped by the listing cap: {linked:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_skill_listing_respects_per_subdir_cap_with_fair_sort() {
+        // With MAX_SIDECAR_FILES_PER_SUBDIR = 8, seeding 20 files in a single
+        // subdir should yield exactly 8, not 20.
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = seed_personal_skill(tmp.path(), "packed", "# Packed\n");
+        std::fs::create_dir_all(skill_dir.join("templates")).unwrap();
+        for i in 0..20 {
+            std::fs::write(skill_dir.join(format!("templates/t-{i:03}.md")), "t\n").unwrap();
+        }
+
+        let tool = read_tool_for(tmp.path());
+        let result = tool.execute(json!({ "name": "packed" })).await.unwrap();
+        let count = result["linked_files"].as_array().unwrap().len();
+        assert_eq!(
+            count, MAX_SIDECAR_FILES_PER_SUBDIR,
+            "single subdir must cap at {MAX_SIDECAR_FILES_PER_SUBDIR}, got {count}"
         );
     }
 

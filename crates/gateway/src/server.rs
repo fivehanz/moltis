@@ -3879,9 +3879,13 @@ pub async fn prepare_gateway_core(
             // Read-side tool: resolves skill names against the same filesystem
             // layout the prompt builder uses, so names listed in
             // <available_skills> always resolve without an external filesystem
-            // MCP server.
-            let read_discoverer =
-                Arc::new(FsSkillDiscoverer::new(FsSkillDiscoverer::default_paths()));
+            // MCP server. Use the explicit-`data_dir` variant so the read
+            // path stays consistent with create/update/delete (which are
+            // already constructed from `data_dir`) even if
+            // `moltis_config::data_dir()` is ever reconfigured at runtime.
+            let read_discoverer = Arc::new(FsSkillDiscoverer::new(
+                FsSkillDiscoverer::default_paths_for(&data_dir),
+            ));
             tool_registry.register(Box::new(moltis_tools::skill_tools::ReadSkillTool::new(
                 read_discoverer,
             )));
