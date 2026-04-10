@@ -1958,6 +1958,19 @@ impl ProviderSetupService for LiveProviderSetupService {
         let mut oauth_config = load_oauth_config(&provider_name)
             .ok_or_else(|| format!("no OAuth config for provider: {provider_name}"))?;
 
+        // Also normalize any loopback `redirect_uri` loaded from the
+        // user config file (`~/.config/moltis/oauth_providers.json`) or
+        // `MOLTIS_OAUTH_{PROVIDER}_REDIRECT_URI`. Built-in defaults
+        // already use `http://localhost:1455/auth/callback`, but a
+        // custom config could accidentally specify `https://localhost`.
+        // Without normalization here, `callback_port` would parse from
+        // the wrong scheme and the `CallbackServer` would attempt to
+        // bind on Moltis's main TLS port, or a strict AS would reject
+        // the pre-registered redirect during authorization.
+        if !oauth_config.redirect_uri.is_empty() {
+            oauth_config.redirect_uri = normalize_loopback_redirect(&oauth_config.redirect_uri);
+        }
+
         // User explicitly initiated OAuth for this provider; ensure it is enabled.
         set_provider_enabled_in_config(&provider_name, true)?;
         self.set_provider_enabled_in_memory(&provider_name, true);
@@ -1994,6 +2007,10 @@ impl ProviderSetupService for LiveProviderSetupService {
         // Overriding it with the gateway URL causes OAuth providers to
         // reject the request with "unknown_error".
         // For these providers we always use the local callback server.
+        //
+        // The pre-registered URI has already been loopback-normalized
+        // above, so strict authorization servers accept it even if the
+        // user's custom config file used the `https://` form.
         let has_registered_redirect = !oauth_config.redirect_uri.is_empty();
         let use_server_callback = redirect_uri.is_some() && !has_registered_redirect;
         if !has_registered_redirect && let Some(uri) = redirect_uri {
