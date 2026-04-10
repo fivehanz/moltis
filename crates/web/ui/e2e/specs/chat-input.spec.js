@@ -7,10 +7,16 @@ function isRetryableRpcError(message) {
 }
 
 function isNoProvidersConfiguredResponse(response) {
+	// `localizeRpcError` in helpers.js replaces `error.message` with a locale
+	// string (e.g. "An internal server error occurred.") and moves the original
+	// backend message to `serverMessage`. Check both so the test still skips
+	// when providers are unconfigured.
+	const err = response?.error;
+	const message = err?.serverMessage || err?.message || "";
 	return (
-		response?.error?.code === "UNAVAILABLE" ||
-		response?.error?.message?.includes("no LLM providers configured") ||
-		response?.error?.message?.includes("chat not configured")
+		err?.code === "UNAVAILABLE" ||
+		message.includes("no LLM providers configured") ||
+		message.includes("chat not configured")
 	);
 }
 
