@@ -428,6 +428,24 @@ impl AgentTool for ReadSkillTool {
         })?;
 
         if let Some(rel) = file_path {
+            // Plugin-backed skills can be a single `.md` file rather than
+            // a directory containing SKILL.md. Reject sidecar requests on
+            // such skills with a clear error — otherwise `read_sidecar`
+            // would canonicalise the `.md` file and join the relative
+            // path, producing nonsense like `/plugin/demo.md/references/api.md`
+            // that would fail with an opaque I/O error.
+            if meta.source.as_ref() == Some(&SkillSource::Plugin)
+                && tokio::fs::metadata(&meta.path)
+                    .await
+                    .map(|m| m.is_file())
+                    .unwrap_or(false)
+            {
+                return Err(Error::message(format!(
+                    "plugin skill '{name}' is a single .md file and has no \
+                     sidecar directory; omit file_path to read the body"
+                ))
+                .into());
+            }
             return read_sidecar(name, &meta.path, rel).await;
         }
 
@@ -750,8 +768,11 @@ async fn read_sidecar(name: &str, skill_dir: &Path, rel: &str) -> anyhow::Result
 }
 
 /// Sidecar subdirectories that are walked for the primary-read linked-files
-/// listing. Matches the agentskills.io standard used by hermes-agent.
-const SIDECAR_SUBDIRS: &[&str] = &["references", "templates", "assets", "scripts"];
+/// listing. Re-exported from [`moltis_skills::SIDECAR_SUBDIRS`] so the prompt
+/// generator and the read-side walker stay in lockstep — adding a new entry
+/// in the skills crate automatically propagates to both the activation
+/// instruction and this walker, eliminating a whole class of drift bugs.
+const SIDECAR_SUBDIRS: &[&str] = moltis_skills::SIDECAR_SUBDIRS;
 
 /// Entry returned by [`list_skill_sidecar_files`]. Sorted-for-determinism and
 /// kept as a typed struct so both the primary read path and the sidecar
@@ -2614,6 +2635,93 @@ mod tests {
         let result = tool.execute(json!({})).await;
         let err = result.expect_err("missing 'name' must error");
         assert!(format!("{err}").contains("name"));
+    }
+
+    #[tokio::test]
+    async fn test_read_skill_hot_discovers_newly_added_skill() {
+        // Freshness invariant: the tool runs `discoverer.discover()` on
+        // every call, so a skill added to disk after the tool is
+        // constructed must be visible on the next read. Without this
+        // invariant, a long-running session would silently fail to see any
+        // new skill installed mid-session.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("skills")).unwrap();
+        let tool = read_tool_for(tmp.path());
+
+        // First call: registry is empty, lookup must fail.
+        let err = tool
+            .execute(json!({ "name": "newcomer" }))
+            .await
+            .expect_err("no skills seeded yet → must error");
+        assert!(format!("{err}").contains("'newcomer'"));
+
+        // Now write the skill to disk with the tool still alive and
+        // pointing at the same discoverer.
+        seed_personal_skill(tmp.path(), "newcomer", "# Freshly discovered\n");
+
+        // Second call must succeed — the discoverer re-scans on every
+        // execute().
+        let result = tool
+            .execute(json!({ "name": "newcomer" }))
+            .await
+            .expect("hot-added skill must be discovered");
+        assert!(
+            result["body"]
+                .as_str()
+                .unwrap()
+                .contains("Freshly discovered"),
+            "body must reflect the hot-added skill: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_skill_plugin_as_file_rejects_sidecar_request() {
+        // Plugin-backed single-.md skills have no sidecar directory at all.
+        // A `file_path` argument must be rejected with a clear error rather
+        // than producing an opaque I/O failure from joining a relative
+        // path to a `.md` file.
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("plugin-root");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let plugin_md = plugin_dir.join("demo.md");
+        std::fs::write(&plugin_md, "# Plugin body\n").unwrap();
+
+        let discoverer: Arc<dyn SkillDiscoverer> = Arc::new(StaticDiscoverer::new(vec![
+            moltis_skills::types::SkillMetadata {
+                name: "demo".into(),
+                description: "stub".into(),
+                path: plugin_md,
+                source: Some(SkillSource::Plugin),
+                ..Default::default()
+            },
+        ]));
+        let tool = ReadSkillTool::new(discoverer);
+
+        let result = tool
+            .execute(json!({
+                "name": "demo",
+                "file_path": "references/api.md"
+            }))
+            .await;
+        let err = result.expect_err("sidecar read on plugin-as-file must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no sidecar directory"),
+            "error must explain the plugin-file shape: {msg}"
+        );
+        assert!(
+            msg.contains("omit file_path"),
+            "error must hint at the fix: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_skill_uses_shared_sidecar_subdirs_constant() {
+        // Parity guard: the read-side walker must reference the exact
+        // same `SIDECAR_SUBDIRS` list the skills crate exports. This
+        // catches any future divergence between the prompt's advertised
+        // subdirs and the walker's actual coverage.
+        assert_eq!(SIDECAR_SUBDIRS, moltis_skills::SIDECAR_SUBDIRS);
     }
 
     #[tokio::test]

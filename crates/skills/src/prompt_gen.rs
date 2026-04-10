@@ -1,4 +1,12 @@
-use crate::types::{SkillMetadata, SkillSource};
+use crate::{
+    SIDECAR_SUBDIRS,
+    types::{SkillMetadata, SkillSource},
+};
+
+/// Name of the native read tool advertised in the activation instruction.
+/// Kept as a constant so the gateway can assert a parity invariant between
+/// this string and the registered tool's [`AgentTool::name`] at test time.
+pub const READ_SKILL_TOOL_NAME: &str = "read_skill";
 
 /// Generate the `<available_skills>` XML block for injection into the system prompt.
 ///
@@ -25,13 +33,22 @@ pub fn generate_skills_prompt(skills: &[SkillMetadata]) -> String {
         ));
     }
     out.push_str("</available_skills>\n\n");
-    out.push_str(
-        "To activate a skill, call the `read_skill` tool with its name \
-         (e.g. `read_skill(name=\"<skill-name>\")`). To load a sidecar file \
-         inside a skill directory (references/, templates/, assets/, scripts/), \
-         pass the `file_path` argument as well \
-         (e.g. `read_skill(name=\"<skill-name>\", file_path=\"references/api.md\")`).\n\n",
-    );
+    // Format the per-subdir list directly from the shared SIDECAR_SUBDIRS
+    // constant so adding a subdir in `moltis_skills::SIDECAR_SUBDIRS`
+    // automatically updates the instruction. No drift between what the
+    // prompt advertises and what the read tool actually walks.
+    let subdir_list = SIDECAR_SUBDIRS
+        .iter()
+        .map(|s| format!("{s}/"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&format!(
+        "To activate a skill, call the `{READ_SKILL_TOOL_NAME}` tool with its name \
+         (e.g. `{READ_SKILL_TOOL_NAME}(name=\"<skill-name>\")`). To load a sidecar \
+         file inside a skill directory ({subdir_list}), pass the `file_path` \
+         argument as well \
+         (e.g. `{READ_SKILL_TOOL_NAME}(name=\"<skill-name>\", file_path=\"references/api.md\")`).\n\n",
+    ));
     out
 }
 
@@ -48,10 +65,12 @@ mod tests {
 
     #[test]
     fn test_activation_instruction_mentions_all_sidecar_dirs() {
-        // Must keep parity with `SIDECAR_SUBDIRS` in
-        // `crates/tools/src/skill_tools.rs`. Without `assets/` in the
-        // activation instruction, models following the system prompt would
-        // never know to ask for agentskills.io-standard sidecars.
+        // Parity guard: every entry in `moltis_skills::SIDECAR_SUBDIRS` must
+        // be mentioned in the activation instruction. Iterating over the
+        // shared constant means adding a new subdir in one place is enough
+        // — the drift path is closed at compile time. Without this check,
+        // models following the system prompt would never know to ask for
+        // a new agentskills.io-standard sidecar.
         let skills = vec![SkillMetadata {
             name: "demo".into(),
             description: "demo".into(),
@@ -60,12 +79,36 @@ mod tests {
             ..Default::default()
         }];
         let prompt = generate_skills_prompt(&skills);
-        for dir in ["references/", "templates/", "assets/", "scripts/"] {
+        for sub in SIDECAR_SUBDIRS {
+            let needle = format!("{sub}/");
             assert!(
-                prompt.contains(dir),
-                "activation instruction should mention {dir}: {prompt}"
+                prompt.contains(&needle),
+                "activation instruction should mention {needle}: {prompt}"
             );
         }
+    }
+
+    #[test]
+    fn test_activation_instruction_uses_read_skill_tool_name_constant() {
+        // The activation instruction must name `READ_SKILL_TOOL_NAME`
+        // verbatim so the gateway's tool-registration/parity assertion can
+        // pin the string. If someone ever renames the tool, this test (and
+        // the gateway-side parity test) will fail together.
+        let skills = vec![SkillMetadata {
+            name: "demo".into(),
+            description: "demo".into(),
+            path: PathBuf::from("/a"),
+            source: Some(SkillSource::Personal),
+            ..Default::default()
+        }];
+        let prompt = generate_skills_prompt(&skills);
+        assert!(prompt.contains(READ_SKILL_TOOL_NAME));
+        // Also assert the concrete call shape so documentation stays in
+        // sync: `read_skill(name="...")`.
+        assert!(
+            prompt.contains(&format!("{READ_SKILL_TOOL_NAME}(name=\"")),
+            "instruction must include a concrete call example: {prompt}"
+        );
     }
 
     #[test]
