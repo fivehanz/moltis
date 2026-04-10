@@ -86,6 +86,29 @@ const MALFORMED_TOOL_RETRY_PROMPT: &str = "Your tool call was malformed. Retry w
      ```tool_call\n{\"tool\": \"name\", \"arguments\": {...}}\n```";
 const EMPTY_TOOL_NAME_RETRY_PROMPT: &str = "Your structured tool call had an empty tool name. Retry the same tool call using the intended tool's exact name and the same arguments.";
 
+/// Nudge sent to the model when auto-continue fires after it stopped mid-task
+/// without emitting a substantive final answer.
+///
+/// Deliberately avoids phrasing like "provide a brief final answer" because
+/// that invites the model to overwrite an already-emitted long response with
+/// a terse summary (see GH #628).
+const AUTO_CONTINUE_NUDGE: &str = "Your previous response ended without tool calls and without a final answer. \
+     If there are still steps to run, continue executing them. \
+     Otherwise reply with exactly: done";
+
+/// Minimum character count (after trimming) that qualifies an assistant text
+/// response as a "substantive final answer" — at or above this length the
+/// auto-continue nudge is suppressed because the model has clearly finished
+/// talking and nudging it risks losing the answer (GH #628).
+const AUTO_CONTINUE_SUBSTANTIVE_TEXT_THRESHOLD: usize = 40;
+
+/// Returns `true` if `text` (trimmed) is long enough to be considered a real
+/// final answer rather than an empty/terse pause.
+#[must_use]
+fn is_substantive_answer_text(text: &str) -> bool {
+    text.trim().chars().count() >= AUTO_CONTINUE_SUBSTANTIVE_TEXT_THRESHOLD
+}
+
 fn find_empty_tool_name_call(tool_calls: &[ToolCall]) -> Option<&ToolCall> {
     tool_calls
         .iter()
@@ -1134,9 +1157,18 @@ pub async fn run_agent_loop_with_context(
 
         // If no tool calls, auto-continue or return the text response.
         if response.tool_calls.is_empty() {
+            let response_text = response
+                .text
+                .clone()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_default();
+
             // Auto-continue: if the model made tool calls earlier in this run
-            // and we haven't exhausted nudges, ask it to keep going.
-            if total_tool_calls > 0
+            // and we haven't exhausted nudges, ask it to keep going. Suppress
+            // the nudge when the model already produced a substantive final
+            // answer — nudging in that case risks losing the answer (GH #628).
+            if !is_substantive_answer_text(&response_text)
+                && total_tool_calls > 0
                 && total_tool_calls >= auto_continue_min_tool_calls
                 && auto_continue_count < max_auto_continues
             {
@@ -1151,22 +1183,18 @@ pub async fn run_agent_loop_with_context(
                         max_iterations,
                     });
                 }
-                let response_text = response.text.filter(|t| !t.is_empty()).unwrap_or_default();
                 if !response_text.is_empty() {
                     messages.push(ChatMessage::assistant(&response_text));
                 }
-                messages.push(ChatMessage::user(
-                    "Your previous response ended without tool calls. If the task is complete, provide a brief final answer. Otherwise continue executing.",
-                ));
+                messages.push(ChatMessage::user(AUTO_CONTINUE_NUDGE));
                 continue;
             }
 
-            let text = clean_response(
-                &response
-                    .text
-                    .filter(|t| !t.is_empty())
-                    .unwrap_or(std::mem::take(&mut last_answer_text)),
-            );
+            let text = clean_response(&if !response_text.is_empty() {
+                response_text
+            } else {
+                std::mem::take(&mut last_answer_text)
+            });
 
             info!(
                 iterations,
@@ -1837,8 +1865,11 @@ pub async fn run_agent_loop_streaming(
         // If no tool calls, auto-continue or return the text response.
         if tool_calls.is_empty() {
             // Auto-continue: if the model made tool calls earlier in this run
-            // and we haven't exhausted nudges, ask it to keep going.
-            if total_tool_calls > 0
+            // and we haven't exhausted nudges, ask it to keep going. Suppress
+            // the nudge when the model already produced a substantive final
+            // answer — nudging in that case risks losing the answer (GH #628).
+            if !is_substantive_answer_text(&accumulated_text)
+                && total_tool_calls > 0
                 && total_tool_calls >= auto_continue_min_tool_calls
                 && auto_continue_count < max_auto_continues
             {
@@ -1856,9 +1887,7 @@ pub async fn run_agent_loop_streaming(
                 if !accumulated_text.is_empty() {
                     messages.push(ChatMessage::assistant(&accumulated_text));
                 }
-                messages.push(ChatMessage::user(
-                    "Your previous response ended without tool calls. If the task is complete, provide a brief final answer. Otherwise continue executing.",
-                ));
+                messages.push(ChatMessage::user(AUTO_CONTINUE_NUDGE));
                 continue;
             }
 
@@ -6893,5 +6922,473 @@ mod tests {
         assert_eq!(result.iterations, 1);
         assert_eq!(result.tool_calls_made, 0);
         assert_eq!(result.text, "Just a plain answer.");
+    }
+
+    /// Long text emitted after a few tool calls should be returned verbatim
+    /// without auto-continue firing (GH #628). Prior to the fix, auto-continue
+    /// would nudge the model into overwriting the long answer with a terse
+    /// confirmation.
+    const GH_628_LONG_ANSWER: &str = "Your volume is still down compared to last week. \
+        Squat volume dropped from 12 sets to 8 sets, bench press held steady at 10 sets, \
+        and deadlift volume fell from 6 to 4 sets. Consider adding an accessory day to \
+        recover weekly tonnage before the next overload block.";
+
+    /// Provider that makes 3 tool calls then returns a substantive long text
+    /// response. Auto-continue should NOT fire in this case.
+    struct AutoContinueLongAnswerProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for AutoContinueLongAnswerProvider {
+        fn name(&self) -> &str {
+            "mock-long-answer"
+        }
+
+        fn id(&self) -> &str {
+            "mock-long-answer"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count < 3 {
+                Ok(CompletionResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: format!("call_{}", count + 1),
+                        name: "echo_tool".into(),
+                        arguments: serde_json::json!({"text": format!("step {}", count + 1)}),
+                    }],
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
+                })
+            } else {
+                Ok(CompletionResponse {
+                    text: Some(GH_628_LONG_ANSWER.into()),
+                    tool_calls: vec![],
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 80,
+                        ..Default::default()
+                    },
+                })
+            }
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_continue_skipped_when_substantive_text_non_streaming() {
+        let provider = Arc::new(AutoContinueLongAnswerProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(EchoTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(e);
+        });
+
+        let uc = UserContent::text("Analyze my training volume");
+        let result = run_agent_loop(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &uc,
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let events = events.lock().unwrap_or_else(|e| e.into_inner());
+        let auto_continue_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::AutoContinue { .. }))
+            .collect();
+        assert!(
+            auto_continue_events.is_empty(),
+            "auto-continue should not fire after a substantive final answer"
+        );
+        assert_eq!(result.tool_calls_made, 3);
+        // 3 tool-call iterations + 1 text iteration = 4 total.
+        assert_eq!(result.iterations, 4);
+        assert_eq!(result.text, GH_628_LONG_ANSWER);
+    }
+
+    /// Provider that makes 3 tool calls, then a short "ok" (count 3) that
+    /// triggers one auto-continue nudge, then the long `GH_628_LONG_ANSWER`
+    /// (count 4), then "done" (count 5+) as a guard against further nudges.
+    ///
+    /// Verifies the GH #628 regression: once auto-continue has fired and the
+    /// model produces a substantive long answer on the next iteration, that
+    /// long answer must be returned as-is rather than being clobbered by
+    /// another round of nudging that would leave "done" as `result.text`.
+    struct AutoContinueLongThenShortProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for AutoContinueLongThenShortProvider {
+        fn name(&self) -> &str {
+            "mock-long-then-short"
+        }
+
+        fn id(&self) -> &str {
+            "mock-long-then-short"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count < 3 {
+                Ok(CompletionResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: format!("call_{}", count + 1),
+                        name: "echo_tool".into(),
+                        arguments: serde_json::json!({"text": format!("step {}", count + 1)}),
+                    }],
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
+                })
+            } else if count == 3 {
+                // Short text — below the substantive-answer threshold, so
+                // auto-continue should still fire here.
+                Ok(CompletionResponse {
+                    text: Some("ok".into()),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                })
+            } else if count == 4 {
+                // Long substantive answer on the next iteration.
+                Ok(CompletionResponse {
+                    text: Some(GH_628_LONG_ANSWER.into()),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                })
+            } else {
+                // If the runner keeps nudging, return a short "done" marker
+                // that must NOT clobber the prior long answer.
+                Ok(CompletionResponse {
+                    text: Some("done".into()),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                })
+            }
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_continue_preserves_prior_long_text_non_streaming() {
+        let provider = Arc::new(AutoContinueLongThenShortProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(EchoTool));
+
+        let uc = UserContent::text("Analyze my training volume");
+        let result = run_agent_loop(provider, &tools, "You are a test bot.", &uc, None, None)
+            .await
+            .unwrap();
+
+        // The long answer emitted mid-run must survive a terse trailing
+        // iteration — regression guard for GH #628.
+        assert_eq!(
+            result.text, GH_628_LONG_ANSWER,
+            "long answer from earlier iteration must not be clobbered"
+        );
+    }
+
+    /// Streaming provider mirroring AutoContinueLongAnswerProvider.
+    struct AutoContinueLongAnswerStreamProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for AutoContinueLongAnswerStreamProvider {
+        fn name(&self) -> &str {
+            "mock-long-answer-stream"
+        }
+
+        fn id(&self) -> &str {
+            "mock-long-answer-stream"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            Ok(CompletionResponse {
+                text: Some("fallback".into()),
+                tool_calls: vec![],
+                usage: Usage::default(),
+            })
+        }
+
+        fn stream(
+            &self,
+            messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            self.stream_with_tools(messages, vec![])
+        }
+
+        fn stream_with_tools(
+            &self,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count < 3 {
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::ToolCallStart {
+                        id: format!("call_{}", count + 1),
+                        name: "echo_tool".into(),
+                        index: 0,
+                    },
+                    StreamEvent::ToolCallArgumentsDelta {
+                        index: 0,
+                        delta: format!(r#"{{"text":"step {}"}}"#, count + 1),
+                    },
+                    StreamEvent::ToolCallComplete { index: 0 },
+                    StreamEvent::Done(Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        ..Default::default()
+                    }),
+                ]))
+            } else {
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta(GH_628_LONG_ANSWER.into()),
+                    StreamEvent::Done(Usage {
+                        input_tokens: 10,
+                        output_tokens: 80,
+                        ..Default::default()
+                    }),
+                ]))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_continue_skipped_when_substantive_text_streaming() {
+        let provider = Arc::new(AutoContinueLongAnswerStreamProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(EchoTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(e);
+        });
+
+        let uc = UserContent::text("Analyze my training volume");
+        let result = run_agent_loop_streaming(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &uc,
+            Some(&on_event),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let events = events.lock().unwrap_or_else(|e| e.into_inner());
+        let auto_continue_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::AutoContinue { .. }))
+            .collect();
+        assert!(
+            auto_continue_events.is_empty(),
+            "streaming auto-continue should not fire after a substantive final answer"
+        );
+        assert_eq!(result.tool_calls_made, 3);
+        assert_eq!(result.iterations, 4);
+        assert_eq!(result.text, GH_628_LONG_ANSWER);
+    }
+
+    /// Streaming provider mirroring AutoContinueLongThenShortProvider.
+    struct AutoContinueLongThenShortStreamProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for AutoContinueLongThenShortStreamProvider {
+        fn name(&self) -> &str {
+            "mock-long-then-short-stream"
+        }
+
+        fn id(&self) -> &str {
+            "mock-long-then-short-stream"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            Ok(CompletionResponse {
+                text: Some("fallback".into()),
+                tool_calls: vec![],
+                usage: Usage::default(),
+            })
+        }
+
+        fn stream(
+            &self,
+            messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            self.stream_with_tools(messages, vec![])
+        }
+
+        fn stream_with_tools(
+            &self,
+            _messages: Vec<ChatMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            let count = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count < 3 {
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::ToolCallStart {
+                        id: format!("call_{}", count + 1),
+                        name: "echo_tool".into(),
+                        index: 0,
+                    },
+                    StreamEvent::ToolCallArgumentsDelta {
+                        index: 0,
+                        delta: format!(r#"{{"text":"step {}"}}"#, count + 1),
+                    },
+                    StreamEvent::ToolCallComplete { index: 0 },
+                    StreamEvent::Done(Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        ..Default::default()
+                    }),
+                ]))
+            } else if count == 3 {
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta("ok".into()),
+                    StreamEvent::Done(Usage::default()),
+                ]))
+            } else if count == 4 {
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta(GH_628_LONG_ANSWER.into()),
+                    StreamEvent::Done(Usage::default()),
+                ]))
+            } else {
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta("done".into()),
+                    StreamEvent::Done(Usage::default()),
+                ]))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_continue_preserves_prior_long_text_streaming() {
+        let provider = Arc::new(AutoContinueLongThenShortStreamProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(EchoTool));
+
+        let uc = UserContent::text("Analyze my training volume");
+        let result = run_agent_loop_streaming(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &uc,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.text, GH_628_LONG_ANSWER,
+            "streaming: long answer from earlier iteration must not be clobbered (GH #628)"
+        );
+    }
+
+    #[test]
+    fn test_is_substantive_answer_text() {
+        assert!(!is_substantive_answer_text(""));
+        assert!(!is_substantive_answer_text("   "));
+        assert!(!is_substantive_answer_text("ok"));
+        assert!(!is_substantive_answer_text("Task is complete."));
+        assert!(!is_substantive_answer_text("done"));
+        // Below threshold (39 chars).
+        assert!(!is_substantive_answer_text(&"x".repeat(39)));
+        // At threshold (40 chars).
+        assert!(is_substantive_answer_text(&"x".repeat(40)));
+        assert!(is_substantive_answer_text(GH_628_LONG_ANSWER));
     }
 }
