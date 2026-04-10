@@ -399,7 +399,7 @@ infrastructure patterns.
 **Install:**
 
 ```bash
-cargo install dcg
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/main/install.sh?$(date +%s)" | bash
 ```
 
 **Hook setup:**
