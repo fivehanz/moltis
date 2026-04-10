@@ -173,6 +173,64 @@ fn to_user_content(mc: &MessageContent) -> UserContent {
     }
 }
 
+fn rewrite_multimodal_text_blocks(blocks: &[ContentBlock], new_text: &str) -> Vec<ContentBlock> {
+    let mut rewritten = Vec::with_capacity(blocks.len().max(1));
+    let mut inserted_text = false;
+
+    for block in blocks {
+        match block {
+            ContentBlock::Text { .. } if !inserted_text => {
+                rewritten.push(ContentBlock::Text {
+                    text: new_text.to_string(),
+                });
+                inserted_text = true;
+            },
+            ContentBlock::Text { .. } => {},
+            _ => rewritten.push(block.clone()),
+        }
+    }
+
+    if !inserted_text {
+        rewritten.insert(0, ContentBlock::Text {
+            text: new_text.to_string(),
+        });
+    }
+
+    rewritten
+}
+
+fn apply_message_received_rewrite(
+    message_content: &mut MessageContent,
+    params: &mut Value,
+    new_text: &str,
+) {
+    match message_content {
+        MessageContent::Text(text) => {
+            *text = new_text.to_string();
+            if let Some(params_obj) = params.as_object_mut() {
+                params_obj.insert("text".to_string(), serde_json::json!(new_text));
+                params_obj.remove("content");
+            }
+        },
+        MessageContent::Multimodal(blocks) => {
+            let rewritten_blocks = rewrite_multimodal_text_blocks(blocks, new_text);
+            match serde_json::to_value(&rewritten_blocks) {
+                Ok(content_value) => {
+                    *blocks = rewritten_blocks;
+                    if let Some(params_obj) = params.as_object_mut() {
+                        params_obj.insert("content".to_string(), content_value);
+                        params_obj.remove("text");
+                        params_obj.remove("message");
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, "failed to serialize rewritten multimodal content");
+                },
+            }
+        },
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ReplyMedium {
@@ -2918,7 +2976,11 @@ impl ChatService for LiveChatService {
         // Support both text-only and multimodal content.
         // - "text": string → plain text message
         // - "content": array → multimodal content (text + images)
-        let (text, message_content) = if let Some(content) = params.get("content") {
+        //
+        // Note: `text` and `message_content` are `mut` because a
+        // `MessageReceived` hook may return `ModifyPayload` to rewrite the
+        // inbound message before the turn begins (see GH #639).
+        let (mut text, mut message_content) = if let Some(content) = params.get("content") {
             // Multimodal content - extract text for logging/hooks, parse into typed blocks
             let text_part = content
                 .as_array()
@@ -3435,42 +3497,8 @@ impl ChatService for LiveChatService {
             .resolve_project_context(&session_key, conn_id.as_deref())
             .await;
 
-        // Dispatch MessageReceived hook (read-only).
-        if let Some(ref hooks) = self.hook_registry {
-            let channel = params
-                .get("channel")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let payload = moltis_common::hooks::HookPayload::MessageReceived {
-                session_key: session_key.clone(),
-                content: text.clone(),
-                channel,
-            };
-            if let Err(e) = hooks.dispatch(&payload).await {
-                warn!(session = %session_key, error = %e, "MessageReceived hook failed");
-            }
-        }
-
         // Generate run_id early so we can link the user message to its agent run.
         let run_id = uuid::Uuid::new_v4().to_string();
-
-        // Convert session-crate content to agents-crate content for the LLM.
-        // Must happen before `message_content` is moved into `user_msg`.
-        let user_content = to_user_content(&message_content);
-
-        // Build the user message for later persistence (deferred until we
-        // know the message won't be queued — avoids double-persist when a
-        // queued message is replayed via send()).
-        let channel_meta = params.get("channel").cloned();
-        let user_audio = user_audio_path_from_params(&params, &session_key);
-        let user_msg = PersistedMessage::User {
-            content: message_content,
-            created_at: Some(now_ms()),
-            audio: user_audio,
-            channel: channel_meta,
-            seq: client_seq,
-            run_id: Some(run_id.clone()),
-        };
 
         // Load conversation history (the current user message is NOT yet
         // persisted — run_streaming / run_agent_loop add it themselves).
@@ -3545,6 +3573,122 @@ impl ChatService for LiveChatService {
                         },
                     }
                 });
+
+        // Dispatch the `MessageReceived` hook before the turn starts. The
+        // hook can:
+        //   - return `Continue` → proceed normally;
+        //   - return `ModifyPayload({"content": "..."})` → rewrite the
+        //     inbound text before it is persisted or sent to the model;
+        //   - return `Block(reason)` → abort this turn entirely. The user
+        //     message is NOT persisted, no run is started, and the reason
+        //     is surfaced to the channel/web sender.
+        //
+        // Hook errors are treated as fail-open: a broken hook must not be
+        // able to wedge every inbound message. See GH #639.
+        if let Some(ref hooks) = self.hook_registry {
+            let channel = params
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let payload = moltis_common::hooks::HookPayload::MessageReceived {
+                session_key: session_key.clone(),
+                content: text.clone(),
+                channel,
+            };
+            match hooks.dispatch(&payload).await {
+                Ok(moltis_common::hooks::HookAction::Continue) => {},
+                Ok(moltis_common::hooks::HookAction::ModifyPayload(new_payload)) => {
+                    match new_payload.get("content").and_then(|v| v.as_str()) {
+                        Some(new_text) => {
+                            info!(
+                                session = %session_key,
+                                "MessageReceived hook rewrote inbound content"
+                            );
+                            text = new_text.to_string();
+                            apply_message_received_rewrite(
+                                &mut message_content,
+                                &mut params,
+                                new_text,
+                            );
+                        },
+                        None => {
+                            warn!(
+                                session = %session_key,
+                                "MessageReceived hook ModifyPayload ignored: expected object with `content` string"
+                            );
+                        },
+                    }
+                },
+                Ok(moltis_common::hooks::HookAction::Block(reason)) => {
+                    info!(
+                        session = %session_key,
+                        reason = %reason,
+                        "MessageReceived hook blocked inbound message"
+                    );
+
+                    // Surface the rejection to channel senders via the
+                    // existing channel-error delivery path. If the caller
+                    // attached a reply target (web-UI-on-bound-session or an
+                    // inbound channel message), re-register it so
+                    // `deliver_channel_error` has a destination to drain.
+                    if let Some(target) = deferred_channel_target.clone() {
+                        self.state.push_channel_reply(&session_key, target).await;
+                        let error_obj = serde_json::json!({
+                            "type": "message_rejected",
+                            "message": reason,
+                        });
+                        deliver_channel_error(&self.state, &session_key, &error_obj).await;
+                    }
+
+                    // Broadcast a rejection event so web UI clients see it.
+                    broadcast(
+                        &self.state,
+                        "chat",
+                        serde_json::json!({
+                            "state": "rejected",
+                            "sessionKey": session_key,
+                            "reason": reason,
+                        }),
+                        BroadcastOpts::default(),
+                    )
+                    .await;
+
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "rejected": true,
+                        "reason": reason,
+                    }));
+                },
+                Err(e) => {
+                    warn!(
+                        session = %session_key,
+                        error = %e,
+                        "MessageReceived hook failed; proceeding fail-open"
+                    );
+                },
+            }
+        }
+
+        // Convert session-crate content to agents-crate content for the LLM.
+        // Must happen before `message_content` is moved into `user_msg`, and
+        // must happen AFTER the MessageReceived hook dispatch so a
+        // `ModifyPayload` rewrite is reflected in both `user_content` (what
+        // the LLM sees) and `user_msg` (what gets persisted).
+        let user_content = to_user_content(&message_content);
+
+        // Build the user message for later persistence (deferred until we
+        // know the message won't be queued — avoids double-persist when a
+        // queued message is replayed via send()).
+        let channel_meta = params.get("channel").cloned();
+        let user_audio = user_audio_path_from_params(&params, &session_key);
+        let user_msg = PersistedMessage::User {
+            content: message_content,
+            created_at: Some(now_ms()),
+            audio: user_audio,
+            channel: channel_meta,
+            seq: client_seq,
+            run_id: Some(run_id.clone()),
+        };
 
         // Discover enabled skills/plugins for prompt injection.
         let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
@@ -7781,10 +7925,15 @@ fn format_channel_error_message(error_obj: &Value) -> String {
     let title = error_obj
         .get("title")
         .and_then(|v| v.as_str())
+        .or_else(|| match error_obj.get("type").and_then(|v| v.as_str()) {
+            Some("message_rejected") => Some("Message rejected"),
+            _ => None,
+        })
         .unwrap_or("Request failed");
     let detail = error_obj
         .get("detail")
         .and_then(|v| v.as_str())
+        .or_else(|| error_obj.get("message").and_then(|v| v.as_str()))
         .unwrap_or("Please try again.");
     format!("⚠️ {title}: {detail}")
 }
@@ -9024,6 +9173,8 @@ mod tests {
     struct RecordingChannelOutbound {
         text_calls: Arc<AtomicUsize>,
         suffix_calls: Arc<AtomicUsize>,
+        text_payloads: Arc<Mutex<Vec<String>>>,
+        text_with_suffix_payloads: Arc<Mutex<Vec<(String, String)>>>,
         html_payloads: Arc<Mutex<Vec<String>>>,
     }
 
@@ -9038,6 +9189,7 @@ mod tests {
     struct MockChatRuntime {
         channel_replies: Mutex<HashMap<String, Vec<moltis_channels::ChannelReplyTarget>>>,
         channel_status_log: Mutex<HashMap<String, Vec<String>>>,
+        broadcasts: Mutex<Vec<(String, Value)>>,
         channel_outbound: Option<Arc<dyn moltis_channels::ChannelOutbound>>,
         channel_stream_outbound: Option<Arc<dyn moltis_channels::ChannelStreamOutbound>>,
         active_sessions: HashMap<String, String>,
@@ -9051,6 +9203,7 @@ mod tests {
             Self {
                 channel_replies: Mutex::new(HashMap::new()),
                 channel_status_log: Mutex::new(HashMap::new()),
+                broadcasts: Mutex::new(Vec::new()),
                 channel_outbound: None,
                 channel_stream_outbound: None,
                 active_sessions: HashMap::new(),
@@ -9085,7 +9238,12 @@ mod tests {
 
     #[async_trait]
     impl ChatRuntime for MockChatRuntime {
-        async fn broadcast(&self, _topic: &str, _payload: Value) {}
+        async fn broadcast(&self, topic: &str, payload: Value) {
+            self.broadcasts
+                .lock()
+                .await
+                .push((topic.to_string(), payload));
+        }
 
         async fn push_channel_reply(
             &self,
@@ -9551,10 +9709,11 @@ mod tests {
             &self,
             _account_id: &str,
             _to: &str,
-            _text: &str,
+            text: &str,
             _reply_to: Option<&str>,
         ) -> moltis_channels::Result<()> {
             self.text_calls.fetch_add(1, Ordering::SeqCst);
+            self.text_payloads.lock().await.push(text.to_string());
             Ok(())
         }
 
@@ -9572,11 +9731,15 @@ mod tests {
             &self,
             _account_id: &str,
             _to: &str,
-            _text: &str,
-            _suffix_html: &str,
+            text: &str,
+            suffix_html: &str,
             _reply_to: Option<&str>,
         ) -> moltis_channels::Result<()> {
             self.suffix_calls.fetch_add(1, Ordering::SeqCst);
+            self.text_with_suffix_payloads
+                .lock()
+                .await
+                .push((text.to_string(), suffix_html.to_string()));
             Ok(())
         }
 
@@ -9775,6 +9938,8 @@ mod tests {
         let outbound_impl = Arc::new(RecordingChannelOutbound {
             text_calls: Arc::clone(&text_calls),
             suffix_calls: Arc::clone(&suffix_calls),
+            text_payloads: Arc::new(Mutex::new(Vec::new())),
+            text_with_suffix_payloads: Arc::new(Mutex::new(Vec::new())),
             html_payloads: Arc::clone(&html_payloads),
         });
         let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = outbound_impl;
@@ -9825,6 +9990,8 @@ mod tests {
         let outbound_impl = Arc::new(RecordingChannelOutbound {
             text_calls: Arc::clone(&text_calls),
             suffix_calls: Arc::clone(&suffix_calls),
+            text_payloads: Arc::new(Mutex::new(Vec::new())),
+            text_with_suffix_payloads: Arc::new(Mutex::new(Vec::new())),
             html_payloads: Arc::clone(&html_payloads),
         });
         let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = outbound_impl;
@@ -9872,6 +10039,8 @@ mod tests {
         let outbound_impl = Arc::new(RecordingChannelOutbound {
             text_calls: Arc::clone(&text_calls),
             suffix_calls: Arc::clone(&suffix_calls),
+            text_payloads: Arc::new(Mutex::new(Vec::new())),
+            text_with_suffix_payloads: Arc::new(Mutex::new(Vec::new())),
             html_payloads: Arc::clone(&html_payloads),
         });
         let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = outbound_impl;
@@ -10099,6 +10268,540 @@ mod tests {
             "completed targets must be reported regardless of reply medium"
         );
         assert_eq!(completions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn send_message_received_hook_block_rejects_without_persisting_or_running() {
+        struct BlockMessageReceivedHook;
+
+        #[async_trait]
+        impl moltis_common::hooks::HookHandler for BlockMessageReceivedHook {
+            fn name(&self) -> &str {
+                "block-message-received"
+            }
+
+            fn events(&self) -> &[moltis_common::hooks::HookEvent] {
+                &[moltis_common::hooks::HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: moltis_common::hooks::HookEvent,
+                _payload: &moltis_common::hooks::HookPayload,
+            ) -> moltis_common::error::Result<moltis_common::hooks::HookAction> {
+                Ok(moltis_common::hooks::HookAction::Block(
+                    "rejected by hook".to_string(),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let runtime = Arc::new(MockChatRuntime::new());
+        let state: Arc<dyn ChatRuntime> = runtime.clone();
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "block-test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Block Test Model".to_string(),
+                created_at: None,
+                recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
+            },
+            Arc::new(StaticProvider {
+                name: "test".to_string(),
+                id: "block-test-model".to_string(),
+            }),
+        );
+
+        let mut hooks = moltis_common::hooks::HookRegistry::new();
+        hooks.register(Arc::new(BlockMessageReceivedHook));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_hooks(hooks);
+
+        let result = chat
+            .send(serde_json::json!({ "text": "please reject this" }))
+            .await
+            .expect("chat.send should return a rejection payload");
+
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["rejected"], true);
+        assert_eq!(result["reason"], "rejected by hook");
+        assert!(
+            chat.active_runs.read().await.is_empty(),
+            "blocked messages must not spawn runs"
+        );
+        assert!(
+            chat.active_runs_by_session.read().await.is_empty(),
+            "blocked messages must not reserve a session run slot"
+        );
+        assert!(
+            store.read("main").await.unwrap_or_default().is_empty(),
+            "blocked messages must not be persisted"
+        );
+        let broadcasts = runtime.broadcasts.lock().await.clone();
+        assert_eq!(
+            broadcasts.len(),
+            1,
+            "blocked messages should broadcast a rejection"
+        );
+        assert_eq!(broadcasts[0].0, "chat");
+        assert_eq!(
+            broadcasts[0].1,
+            serde_json::json!({
+                "state": "rejected",
+                "sessionKey": "main",
+                "reason": "rejected by hook",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_received_hook_modify_rewrites_persisted_and_provider_input() {
+        struct RewriteMessageReceivedHook;
+
+        #[async_trait]
+        impl moltis_common::hooks::HookHandler for RewriteMessageReceivedHook {
+            fn name(&self) -> &str {
+                "rewrite-message-received"
+            }
+
+            fn events(&self) -> &[moltis_common::hooks::HookEvent] {
+                &[moltis_common::hooks::HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: moltis_common::hooks::HookEvent,
+                _payload: &moltis_common::hooks::HookPayload,
+            ) -> moltis_common::error::Result<moltis_common::hooks::HookAction> {
+                Ok(moltis_common::hooks::HookAction::ModifyPayload(
+                    serde_json::json!({ "content": "sanitized prompt" }),
+                ))
+            }
+        }
+
+        struct RecordingReplyProvider {
+            seen_messages: Arc<std::sync::Mutex<Vec<Vec<ChatMessage>>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for RecordingReplyProvider {
+            fn name(&self) -> &str {
+                "recording"
+            }
+
+            fn id(&self) -> &str {
+                "recording::rewrite"
+            }
+
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[Value],
+            ) -> Result<moltis_agents::model::CompletionResponse> {
+                anyhow::bail!("not implemented for test")
+            }
+
+            fn stream(
+                &self,
+                messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                self.seen_messages
+                    .lock()
+                    .expect("recording provider seen_messages mutex poisoned")
+                    .push(messages);
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta("hook reply".to_string()),
+                    StreamEvent::Done(moltis_agents::model::Usage::default()),
+                ]))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let state: Arc<dyn ChatRuntime> = Arc::new(MockChatRuntime::new());
+        let seen_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "recording::rewrite".to_string(),
+                provider: "recording".to_string(),
+                display_name: "Recording Rewrite Test".to_string(),
+                created_at: None,
+                recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
+            },
+            Arc::new(RecordingReplyProvider {
+                seen_messages: Arc::clone(&seen_messages),
+            }),
+        );
+
+        let mut hooks = moltis_common::hooks::HookRegistry::new();
+        hooks.register(Arc::new(RewriteMessageReceivedHook));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_hooks(hooks);
+
+        let send_result = chat
+            .send(serde_json::json!({ "text": "original prompt" }))
+            .await
+            .expect("chat.send should succeed");
+        assert!(
+            send_result
+                .get("runId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        );
+
+        let history = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let messages = store.read("main").await.unwrap_or_default();
+                let has_user = messages.iter().any(|msg| {
+                    msg.get("role").and_then(Value::as_str) == Some("user")
+                        && msg.get("content").and_then(Value::as_str) == Some("sanitized prompt")
+                });
+                let has_assistant = messages.iter().any(|msg| {
+                    msg.get("role").and_then(Value::as_str) == Some("assistant")
+                        && msg.get("content").and_then(Value::as_str) == Some("hook reply")
+                });
+                if has_user && has_assistant {
+                    return messages;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rewritten user and assistant messages should be persisted");
+
+        assert!(
+            history.iter().any(|msg| {
+                msg.get("role").and_then(Value::as_str) == Some("user")
+                    && msg.get("content").and_then(Value::as_str) == Some("sanitized prompt")
+            }),
+            "session history must persist the rewritten user text"
+        );
+        assert!(
+            !history.iter().any(|msg| {
+                msg.get("role").and_then(Value::as_str) == Some("user")
+                    && msg.get("content").and_then(Value::as_str) == Some("original prompt")
+            }),
+            "original user text must not survive after hook rewrite"
+        );
+
+        let provider_messages = seen_messages
+            .lock()
+            .expect("recording provider seen_messages mutex poisoned")
+            .clone();
+        assert_eq!(
+            provider_messages.len(),
+            1,
+            "provider should receive one turn"
+        );
+        assert!(
+            provider_messages[0].iter().any(|msg| matches!(
+                msg,
+                ChatMessage::User {
+                    content: UserContent::Text(text),
+                } if text == "sanitized prompt"
+            )),
+            "provider input must use the rewritten user text"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_received_hook_modify_preserves_multimodal_images() {
+        struct RewriteMessageReceivedHook;
+
+        #[async_trait]
+        impl moltis_common::hooks::HookHandler for RewriteMessageReceivedHook {
+            fn name(&self) -> &str {
+                "rewrite-message-received"
+            }
+
+            fn events(&self) -> &[moltis_common::hooks::HookEvent] {
+                &[moltis_common::hooks::HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: moltis_common::hooks::HookEvent,
+                _payload: &moltis_common::hooks::HookPayload,
+            ) -> moltis_common::error::Result<moltis_common::hooks::HookAction> {
+                Ok(moltis_common::hooks::HookAction::ModifyPayload(
+                    serde_json::json!({ "content": "sanitized prompt" }),
+                ))
+            }
+        }
+
+        struct RecordingReplyProvider {
+            seen_messages: Arc<std::sync::Mutex<Vec<Vec<ChatMessage>>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for RecordingReplyProvider {
+            fn name(&self) -> &str {
+                "recording"
+            }
+
+            fn id(&self) -> &str {
+                "recording::rewrite:multimodal"
+            }
+
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[Value],
+            ) -> Result<moltis_agents::model::CompletionResponse> {
+                anyhow::bail!("not implemented for test")
+            }
+
+            fn stream(
+                &self,
+                messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                self.seen_messages
+                    .lock()
+                    .expect("recording provider seen_messages mutex poisoned")
+                    .push(messages);
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta("hook reply".to_string()),
+                    StreamEvent::Done(moltis_agents::model::Usage::default()),
+                ]))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let state: Arc<dyn ChatRuntime> = Arc::new(MockChatRuntime::new());
+        let seen_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "recording::rewrite:multimodal".to_string(),
+                provider: "recording".to_string(),
+                display_name: "Recording Rewrite Test Multimodal".to_string(),
+                created_at: None,
+                recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
+            },
+            Arc::new(RecordingReplyProvider {
+                seen_messages: Arc::clone(&seen_messages),
+            }),
+        );
+
+        let mut hooks = moltis_common::hooks::HookRegistry::new();
+        hooks.register(Arc::new(RewriteMessageReceivedHook));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_hooks(hooks);
+
+        let send_result = chat
+            .send(serde_json::json!({
+                "content": [
+                    { "type": "text", "text": "original prompt" },
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+                ]
+            }))
+            .await
+            .expect("chat.send should succeed");
+        assert!(
+            send_result
+                .get("runId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        );
+
+        let history = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let messages = store.read("main").await.unwrap_or_default();
+                let user_msg = messages
+                    .iter()
+                    .find(|msg| msg.get("role").and_then(Value::as_str) == Some("user"));
+                let has_assistant = messages.iter().any(|msg| {
+                    msg.get("role").and_then(Value::as_str) == Some("assistant")
+                        && msg.get("content").and_then(Value::as_str) == Some("hook reply")
+                });
+                if let Some(user_msg) = user_msg
+                    && user_msg
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|content| content.len() == 2)
+                    && has_assistant
+                {
+                    return messages;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rewritten multimodal user and assistant messages should be persisted");
+
+        let user_msg = history
+            .iter()
+            .find(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
+            .expect("expected persisted user message");
+        let content = user_msg["content"]
+            .as_array()
+            .expect("expected multimodal user content");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "sanitized prompt");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+
+        let provider_messages = seen_messages
+            .lock()
+            .expect("recording provider seen_messages mutex poisoned")
+            .clone();
+        assert_eq!(
+            provider_messages.len(),
+            1,
+            "provider should receive one multimodal turn"
+        );
+        assert!(
+            provider_messages[0].iter().any(|msg| matches!(
+                msg,
+                ChatMessage::User {
+                    content: UserContent::Multimodal(parts),
+                } if parts.len() == 2
+                    && matches!(&parts[0], ContentPart::Text(text) if text == "sanitized prompt")
+                    && matches!(&parts[1], ContentPart::Image { media_type, data } if media_type == "image/png" && data == "AAAA")
+            )),
+            "provider input must preserve the image while rewriting the text block"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_received_hook_block_delivers_reason_to_channel_sender() {
+        struct BlockMessageReceivedHook;
+
+        #[async_trait]
+        impl moltis_common::hooks::HookHandler for BlockMessageReceivedHook {
+            fn name(&self) -> &str {
+                "block-message-received"
+            }
+
+            fn events(&self) -> &[moltis_common::hooks::HookEvent] {
+                &[moltis_common::hooks::HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: moltis_common::hooks::HookEvent,
+                _payload: &moltis_common::hooks::HookPayload,
+            ) -> moltis_common::error::Result<moltis_common::hooks::HookAction> {
+                Ok(moltis_common::hooks::HookAction::Block(
+                    "rejected by hook".to_string(),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let text_calls = Arc::new(AtomicUsize::new(0));
+        let suffix_calls = Arc::new(AtomicUsize::new(0));
+        let text_payloads = Arc::new(Mutex::new(Vec::new()));
+        let text_with_suffix_payloads = Arc::new(Mutex::new(Vec::new()));
+        let html_payloads = Arc::new(Mutex::new(Vec::new()));
+        let outbound_impl = Arc::new(RecordingChannelOutbound {
+            text_calls: Arc::clone(&text_calls),
+            suffix_calls: Arc::clone(&suffix_calls),
+            text_payloads: Arc::clone(&text_payloads),
+            text_with_suffix_payloads: Arc::clone(&text_with_suffix_payloads),
+            html_payloads: Arc::clone(&html_payloads),
+        });
+        let runtime = Arc::new(MockChatRuntime::new().with_channel_outbound(outbound_impl));
+        let state: Arc<dyn ChatRuntime> = runtime.clone();
+
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "block-test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Block Test Model".to_string(),
+                created_at: None,
+                recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
+            },
+            Arc::new(StaticProvider {
+                name: "test".to_string(),
+                id: "block-test-model".to_string(),
+            }),
+        );
+
+        let mut hooks = moltis_common::hooks::HookRegistry::new();
+        hooks.register(Arc::new(BlockMessageReceivedHook));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_hooks(hooks);
+
+        let target = moltis_channels::ChannelReplyTarget {
+            channel_type: moltis_channels::ChannelType::Telegram,
+            account_id: "acct".to_string(),
+            chat_id: "123".to_string(),
+            message_id: Some("42".to_string()),
+            thread_id: None,
+        };
+
+        let result = chat
+            .send(serde_json::json!({
+                "text": "please reject this",
+                "_channel_reply_target": serde_json::to_value(&target).expect("serialize reply target"),
+            }))
+            .await
+            .expect("chat.send should return a rejection payload");
+
+        assert_eq!(result["ok"], false);
+        assert_eq!(text_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(suffix_calls.load(Ordering::SeqCst), 0);
+        assert!(html_payloads.lock().await.is_empty());
+        assert!(text_with_suffix_payloads.lock().await.is_empty());
+        assert_eq!(text_payloads.lock().await.clone(), vec![
+            "⚠️ Message rejected: rejected by hook".to_string()
+        ]);
+        assert!(
+            runtime.peek_channel_replies("main").await.is_empty(),
+            "channel targets should be drained after delivering the rejection"
+        );
     }
 
     #[tokio::test]
@@ -10351,6 +11054,16 @@ mod tests {
         });
         let msg = format_channel_error_message(&error_obj);
         assert_eq!(msg, "⚠️ Rate limited: Please wait and try again.");
+    }
+
+    #[test]
+    fn format_channel_error_message_falls_back_to_message_rejected_shape() {
+        let error_obj = serde_json::json!({
+            "type": "message_rejected",
+            "message": "rejected by hook",
+        });
+        let msg = format_channel_error_message(&error_obj);
+        assert_eq!(msg, "⚠️ Message rejected: rejected by hook");
     }
 
     #[test]
@@ -12103,6 +12816,107 @@ mod tests {
             },
             _ => panic!("expected Multimodal variant"),
         }
+    }
+
+    #[test]
+    fn rewrite_multimodal_text_blocks_inserts_text_when_missing() {
+        use moltis_sessions::message::{ContentBlock, ImageUrl as SessionImageUrl};
+
+        let blocks = vec![ContentBlock::ImageUrl {
+            image_url: SessionImageUrl {
+                url: "data:image/png;base64,AAAA".to_string(),
+            },
+        }];
+
+        let rewritten = rewrite_multimodal_text_blocks(&blocks, "sanitized");
+        assert_eq!(rewritten.len(), 2);
+        assert!(matches!(
+            &rewritten[0],
+            ContentBlock::Text { text } if text == "sanitized"
+        ));
+        assert!(matches!(&rewritten[1], ContentBlock::ImageUrl { .. }));
+    }
+
+    #[test]
+    fn rewrite_multimodal_text_blocks_replaces_first_and_drops_extra_text_blocks() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "original".to_string(),
+            },
+            ContentBlock::Text {
+                text: "extra".to_string(),
+            },
+        ];
+
+        let rewritten = rewrite_multimodal_text_blocks(&blocks, "sanitized");
+        assert_eq!(rewritten.len(), 1);
+        assert!(matches!(
+            &rewritten[0],
+            ContentBlock::Text { text } if text == "sanitized"
+        ));
+    }
+
+    #[test]
+    fn apply_message_received_rewrite_updates_text_params() {
+        let mut content = MessageContent::Text("original".to_string());
+        let mut params = serde_json::json!({
+            "text": "original",
+            "content": [{ "type": "text", "text": "stale" }]
+        });
+
+        apply_message_received_rewrite(&mut content, &mut params, "sanitized");
+
+        assert!(matches!(content, MessageContent::Text(ref text) if text == "sanitized"));
+        assert_eq!(params["text"], "sanitized");
+        assert!(params.get("content").is_none());
+    }
+
+    #[test]
+    fn apply_message_received_rewrite_updates_multimodal_params() {
+        use moltis_sessions::message::{ContentBlock, ImageUrl as SessionImageUrl};
+
+        let mut content = MessageContent::Multimodal(vec![
+            ContentBlock::Text {
+                text: "original".to_string(),
+            },
+            ContentBlock::ImageUrl {
+                image_url: SessionImageUrl {
+                    url: "data:image/png;base64,AAAA".to_string(),
+                },
+            },
+        ]);
+        let mut params = serde_json::json!({
+            "text": "original",
+            "message": "legacy",
+            "content": [
+                { "type": "text", "text": "original" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+            ]
+        });
+
+        apply_message_received_rewrite(&mut content, &mut params, "sanitized");
+
+        match content {
+            MessageContent::Multimodal(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                assert!(matches!(
+                    &blocks[0],
+                    ContentBlock::Text { text } if text == "sanitized"
+                ));
+                assert!(matches!(&blocks[1], ContentBlock::ImageUrl { .. }));
+            },
+            _ => panic!("expected multimodal content"),
+        }
+        assert!(params.get("text").is_none());
+        assert!(params.get("message").is_none());
+        let content_blocks = params["content"]
+            .as_array()
+            .expect("expected serialized multimodal content");
+        assert_eq!(content_blocks[0]["text"], "sanitized");
+        assert_eq!(
+            content_blocks[1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
     }
 
     // ── Logbook formatting tests ─────────────────────────────────────────

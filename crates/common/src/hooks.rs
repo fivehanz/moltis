@@ -75,12 +75,17 @@ impl HookEvent {
     ];
 
     /// Returns true if this event is read-only and handlers can run in parallel.
+    ///
+    /// Note: `MessageReceived` is intentionally NOT read-only. Handlers must
+    /// be able to `Block` an inbound channel message (access control, content
+    /// filtering, rate limiting) or `ModifyPayload` it to rewrite the text
+    /// before the turn begins. See GH #639 and
+    /// `LiveChatService::send` for the dispatch site that honors the action.
     pub fn is_read_only(&self) -> bool {
         matches!(
             self,
             Self::AgentEnd
                 | Self::AfterToolCall
-                | Self::MessageReceived
                 | Self::MessageSent
                 | Self::AfterCompaction
                 | Self::SessionStart
@@ -804,6 +809,74 @@ mod tests {
         assert!(!stats.disabled.load(Ordering::Relaxed));
     }
 
+    /// GH #639: blocking a MessageReceived event must actually return Block,
+    /// not be silently swallowed by `dispatch_parallel` as it used to be when
+    /// MessageReceived was classified as read-only.
+    #[tokio::test]
+    async fn message_received_block_is_honored() {
+        let mut registry = HookRegistry::new();
+        registry.register(Arc::new(BlockingPriorityHandler {
+            handler_name: "rate-limiter".into(),
+            handler_priority: 0,
+            subscribed: vec![HookEvent::MessageReceived],
+        }));
+
+        let payload = HookPayload::MessageReceived {
+            session_key: "test".into(),
+            content: "hello".into(),
+            channel: Some("telegram".into()),
+        };
+        let result = registry.dispatch(&payload).await.unwrap();
+        match result {
+            HookAction::Block(reason) => assert_eq!(reason, "rate-limiter"),
+            other => panic!("expected Block, got {other:?}"),
+        }
+    }
+
+    /// GH #639: ModifyPayload on MessageReceived must be returned so the
+    /// chat engine can rewrite the inbound text before the turn begins.
+    #[tokio::test]
+    async fn message_received_modify_is_returned() {
+        struct Rewriter;
+
+        #[async_trait]
+        impl HookHandler for Rewriter {
+            fn name(&self) -> &str {
+                "rewriter"
+            }
+
+            fn events(&self) -> &[HookEvent] {
+                &[HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: HookEvent,
+                _payload: &HookPayload,
+            ) -> Result<HookAction> {
+                Ok(HookAction::ModifyPayload(
+                    serde_json::json!({ "content": "sanitized" }),
+                ))
+            }
+        }
+
+        let mut registry = HookRegistry::new();
+        registry.register(Arc::new(Rewriter));
+
+        let payload = HookPayload::MessageReceived {
+            session_key: "test".into(),
+            content: "original".into(),
+            channel: None,
+        };
+        let result = registry.dispatch(&payload).await.unwrap();
+        match result {
+            HookAction::ModifyPayload(v) => {
+                assert_eq!(v.get("content").and_then(|v| v.as_str()), Some("sanitized"));
+            },
+            other => panic!("expected ModifyPayload, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn dry_run_does_not_block() {
         let mut registry = HookRegistry::new().with_dry_run(true);
@@ -851,6 +924,9 @@ mod tests {
         assert!(!HookEvent::BeforeToolCall.is_read_only());
         assert!(!HookEvent::MessageSending.is_read_only());
         assert!(!HookEvent::ToolResultPersist.is_read_only());
+        // GH #639: MessageReceived must dispatch sequentially so Block /
+        // ModifyPayload are honored (access control, content filtering).
+        assert!(!HookEvent::MessageReceived.is_read_only());
     }
 
     #[test]
