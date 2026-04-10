@@ -2918,7 +2918,11 @@ impl ChatService for LiveChatService {
         // Support both text-only and multimodal content.
         // - "text": string → plain text message
         // - "content": array → multimodal content (text + images)
-        let (text, message_content) = if let Some(content) = params.get("content") {
+        //
+        // Note: `text` and `message_content` are `mut` because a
+        // `MessageReceived` hook may return `ModifyPayload` to rewrite the
+        // inbound message before the turn begins (see GH #639).
+        let (mut text, mut message_content) = if let Some(content) = params.get("content") {
             // Multimodal content - extract text for logging/hooks, parse into typed blocks
             let text_part = content
                 .as_array()
@@ -3435,42 +3439,8 @@ impl ChatService for LiveChatService {
             .resolve_project_context(&session_key, conn_id.as_deref())
             .await;
 
-        // Dispatch MessageReceived hook (read-only).
-        if let Some(ref hooks) = self.hook_registry {
-            let channel = params
-                .get("channel")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let payload = moltis_common::hooks::HookPayload::MessageReceived {
-                session_key: session_key.clone(),
-                content: text.clone(),
-                channel,
-            };
-            if let Err(e) = hooks.dispatch(&payload).await {
-                warn!(session = %session_key, error = %e, "MessageReceived hook failed");
-            }
-        }
-
         // Generate run_id early so we can link the user message to its agent run.
         let run_id = uuid::Uuid::new_v4().to_string();
-
-        // Convert session-crate content to agents-crate content for the LLM.
-        // Must happen before `message_content` is moved into `user_msg`.
-        let user_content = to_user_content(&message_content);
-
-        // Build the user message for later persistence (deferred until we
-        // know the message won't be queued — avoids double-persist when a
-        // queued message is replayed via send()).
-        let channel_meta = params.get("channel").cloned();
-        let user_audio = user_audio_path_from_params(&params, &session_key);
-        let user_msg = PersistedMessage::User {
-            content: message_content,
-            created_at: Some(now_ms()),
-            audio: user_audio,
-            channel: channel_meta,
-            seq: client_seq,
-            run_id: Some(run_id.clone()),
-        };
 
         // Load conversation history (the current user message is NOT yet
         // persisted — run_streaming / run_agent_loop add it themselves).
@@ -3545,6 +3515,122 @@ impl ChatService for LiveChatService {
                         },
                     }
                 });
+
+        // Dispatch the `MessageReceived` hook before the turn starts. The
+        // hook can:
+        //   - return `Continue` → proceed normally;
+        //   - return `ModifyPayload({"content": "..."})` → rewrite the
+        //     inbound text before it is persisted or sent to the model;
+        //   - return `Block(reason)` → abort this turn entirely. The user
+        //     message is NOT persisted, no run is started, and the reason
+        //     is surfaced to the channel/web sender.
+        //
+        // Hook errors are treated as fail-open: a broken hook must not be
+        // able to wedge every inbound message. See GH #639.
+        if let Some(ref hooks) = self.hook_registry {
+            let channel = params
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let payload = moltis_common::hooks::HookPayload::MessageReceived {
+                session_key: session_key.clone(),
+                content: text.clone(),
+                channel,
+            };
+            match hooks.dispatch(&payload).await {
+                Ok(moltis_common::hooks::HookAction::Continue) => {},
+                Ok(moltis_common::hooks::HookAction::ModifyPayload(new_payload)) => {
+                    match new_payload.get("content").and_then(|v| v.as_str()) {
+                        Some(new_text) => {
+                            info!(
+                                session = %session_key,
+                                "MessageReceived hook rewrote inbound content"
+                            );
+                            text = new_text.to_string();
+                            message_content = MessageContent::Text(new_text.to_string());
+                            // Keep params["text"] consistent so downstream
+                            // consumers (queue replays, tracing) observe the
+                            // rewritten message.
+                            params["text"] = serde_json::json!(new_text);
+                        },
+                        None => {
+                            warn!(
+                                session = %session_key,
+                                "MessageReceived hook ModifyPayload ignored: expected object with `content` string"
+                            );
+                        },
+                    }
+                },
+                Ok(moltis_common::hooks::HookAction::Block(reason)) => {
+                    info!(
+                        session = %session_key,
+                        reason = %reason,
+                        "MessageReceived hook blocked inbound message"
+                    );
+
+                    // Surface the rejection to channel senders via the
+                    // existing channel-error delivery path. If the caller
+                    // attached a reply target (web-UI-on-bound-session or an
+                    // inbound channel message), re-register it so
+                    // `deliver_channel_error` has a destination to drain.
+                    if let Some(target) = deferred_channel_target.clone() {
+                        self.state.push_channel_reply(&session_key, target).await;
+                        let error_obj = serde_json::json!({
+                            "type": "message_rejected",
+                            "message": reason,
+                        });
+                        deliver_channel_error(&self.state, &session_key, &error_obj).await;
+                    }
+
+                    // Broadcast a rejection event so web UI clients see it.
+                    broadcast(
+                        &self.state,
+                        "chat",
+                        serde_json::json!({
+                            "state": "rejected",
+                            "sessionKey": session_key,
+                            "reason": reason,
+                        }),
+                        BroadcastOpts::default(),
+                    )
+                    .await;
+
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "rejected": true,
+                        "reason": reason,
+                    }));
+                },
+                Err(e) => {
+                    warn!(
+                        session = %session_key,
+                        error = %e,
+                        "MessageReceived hook failed; proceeding fail-open"
+                    );
+                },
+            }
+        }
+
+        // Convert session-crate content to agents-crate content for the LLM.
+        // Must happen before `message_content` is moved into `user_msg`, and
+        // must happen AFTER the MessageReceived hook dispatch so a
+        // `ModifyPayload` rewrite is reflected in both `user_content` (what
+        // the LLM sees) and `user_msg` (what gets persisted).
+        let user_content = to_user_content(&message_content);
+
+        // Build the user message for later persistence (deferred until we
+        // know the message won't be queued — avoids double-persist when a
+        // queued message is replayed via send()).
+        let channel_meta = params.get("channel").cloned();
+        let user_audio = user_audio_path_from_params(&params, &session_key);
+        let user_msg = PersistedMessage::User {
+            content: message_content,
+            created_at: Some(now_ms()),
+            audio: user_audio,
+            channel: channel_meta,
+            seq: client_seq,
+            run_id: Some(run_id.clone()),
+        };
 
         // Discover enabled skills/plugins for prompt injection.
         let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
@@ -10099,6 +10185,249 @@ mod tests {
             "completed targets must be reported regardless of reply medium"
         );
         assert_eq!(completions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn send_message_received_hook_block_rejects_without_persisting_or_running() {
+        struct BlockMessageReceivedHook;
+
+        #[async_trait]
+        impl moltis_common::hooks::HookHandler for BlockMessageReceivedHook {
+            fn name(&self) -> &str {
+                "block-message-received"
+            }
+
+            fn events(&self) -> &[moltis_common::hooks::HookEvent] {
+                &[moltis_common::hooks::HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: moltis_common::hooks::HookEvent,
+                _payload: &moltis_common::hooks::HookPayload,
+            ) -> moltis_common::error::Result<moltis_common::hooks::HookAction> {
+                Ok(moltis_common::hooks::HookAction::Block(
+                    "rejected by hook".to_string(),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let state: Arc<dyn ChatRuntime> = Arc::new(MockChatRuntime::new());
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "block-test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Block Test Model".to_string(),
+                created_at: None,
+                recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
+            },
+            Arc::new(StaticProvider {
+                name: "test".to_string(),
+                id: "block-test-model".to_string(),
+            }),
+        );
+
+        let mut hooks = moltis_common::hooks::HookRegistry::new();
+        hooks.register(Arc::new(BlockMessageReceivedHook));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_hooks(hooks);
+
+        let result = chat
+            .send(serde_json::json!({ "text": "please reject this" }))
+            .await
+            .expect("chat.send should return a rejection payload");
+
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["rejected"], true);
+        assert_eq!(result["reason"], "rejected by hook");
+        assert!(
+            chat.active_runs.read().await.is_empty(),
+            "blocked messages must not spawn runs"
+        );
+        assert!(
+            chat.active_runs_by_session.read().await.is_empty(),
+            "blocked messages must not reserve a session run slot"
+        );
+        assert!(
+            store.read("main").await.unwrap_or_default().is_empty(),
+            "blocked messages must not be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_received_hook_modify_rewrites_persisted_and_provider_input() {
+        struct RewriteMessageReceivedHook;
+
+        #[async_trait]
+        impl moltis_common::hooks::HookHandler for RewriteMessageReceivedHook {
+            fn name(&self) -> &str {
+                "rewrite-message-received"
+            }
+
+            fn events(&self) -> &[moltis_common::hooks::HookEvent] {
+                &[moltis_common::hooks::HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: moltis_common::hooks::HookEvent,
+                _payload: &moltis_common::hooks::HookPayload,
+            ) -> moltis_common::error::Result<moltis_common::hooks::HookAction> {
+                Ok(moltis_common::hooks::HookAction::ModifyPayload(
+                    serde_json::json!({ "content": "sanitized prompt" }),
+                ))
+            }
+        }
+
+        struct RecordingReplyProvider {
+            seen_messages: Arc<std::sync::Mutex<Vec<Vec<ChatMessage>>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for RecordingReplyProvider {
+            fn name(&self) -> &str {
+                "recording"
+            }
+
+            fn id(&self) -> &str {
+                "recording::rewrite"
+            }
+
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[Value],
+            ) -> Result<moltis_agents::model::CompletionResponse> {
+                anyhow::bail!("not implemented for test")
+            }
+
+            fn stream(
+                &self,
+                messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                self.seen_messages
+                    .lock()
+                    .expect("recording provider seen_messages mutex poisoned")
+                    .push(messages);
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta("hook reply".to_string()),
+                    StreamEvent::Done(moltis_agents::model::Usage::default()),
+                ]))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let state: Arc<dyn ChatRuntime> = Arc::new(MockChatRuntime::new());
+        let seen_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "recording::rewrite".to_string(),
+                provider: "recording".to_string(),
+                display_name: "Recording Rewrite Test".to_string(),
+                created_at: None,
+                recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
+            },
+            Arc::new(RecordingReplyProvider {
+                seen_messages: Arc::clone(&seen_messages),
+            }),
+        );
+
+        let mut hooks = moltis_common::hooks::HookRegistry::new();
+        hooks.register(Arc::new(RewriteMessageReceivedHook));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_hooks(hooks);
+
+        let send_result = chat
+            .send(serde_json::json!({ "text": "original prompt" }))
+            .await
+            .expect("chat.send should succeed");
+        assert!(
+            send_result
+                .get("runId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        );
+
+        let history = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let messages = store.read("main").await.unwrap_or_default();
+                let has_user = messages.iter().any(|msg| {
+                    msg.get("role").and_then(Value::as_str) == Some("user")
+                        && msg.get("content").and_then(Value::as_str) == Some("sanitized prompt")
+                });
+                let has_assistant = messages.iter().any(|msg| {
+                    msg.get("role").and_then(Value::as_str) == Some("assistant")
+                        && msg.get("content").and_then(Value::as_str) == Some("hook reply")
+                });
+                if has_user && has_assistant {
+                    return messages;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rewritten user and assistant messages should be persisted");
+
+        assert!(
+            history.iter().any(|msg| {
+                msg.get("role").and_then(Value::as_str) == Some("user")
+                    && msg.get("content").and_then(Value::as_str) == Some("sanitized prompt")
+            }),
+            "session history must persist the rewritten user text"
+        );
+        assert!(
+            !history.iter().any(|msg| {
+                msg.get("role").and_then(Value::as_str) == Some("user")
+                    && msg.get("content").and_then(Value::as_str) == Some("original prompt")
+            }),
+            "original user text must not survive after hook rewrite"
+        );
+
+        let provider_messages = seen_messages
+            .lock()
+            .expect("recording provider seen_messages mutex poisoned")
+            .clone();
+        assert_eq!(
+            provider_messages.len(),
+            1,
+            "provider should receive one turn"
+        );
+        assert!(
+            provider_messages[0].iter().any(|msg| matches!(
+                msg,
+                ChatMessage::User {
+                    content: UserContent::Text(text),
+                } if text == "sanitized prompt"
+            )),
+            "provider input must use the rewritten user text"
+        );
     }
 
     #[tokio::test]
