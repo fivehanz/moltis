@@ -287,7 +287,23 @@ impl ApprovalManager {
         }
 
         match self.mode {
-            ApprovalMode::Off => Ok(ApprovalAction::Proceed),
+            ApprovalMode::Off => {
+                // With an empty allowlist, Off mode is unrestricted (preserves
+                // historical behavior for deployments that never configured a list).
+                // With a non-empty allowlist, the list is authoritative: the user
+                // explicitly asked for enforcement, and there is no human to prompt
+                // in headless deployments — non-matches must be denied, not silently
+                // proceeded (moltis-org/moltis#654).
+                if self.allowlist.is_empty() {
+                    return Ok(ApprovalAction::Proceed);
+                }
+                if is_safe_command(command) || matches_allowlist(command, &self.allowlist) {
+                    return Ok(ApprovalAction::Proceed);
+                }
+                Err(Error::message(format!(
+                    "exec denied: command not in allowlist (approval_mode=off): {command}"
+                )))
+            },
             ApprovalMode::Always => Ok(ApprovalAction::NeedsApproval),
             ApprovalMode::OnMiss => {
                 // Check safe bins.
@@ -430,7 +446,82 @@ mod tests {
             mode: ApprovalMode::Off,
             ..Default::default()
         };
-        // Non-dangerous commands proceed when mode is off.
+        // Non-dangerous commands proceed when mode is off and allowlist is empty.
+        let action = mgr.check_command("curl https://example.com").await.unwrap();
+        assert_eq!(action, ApprovalAction::Proceed);
+    }
+
+    #[tokio::test]
+    async fn test_approval_off_with_allowlist_match() {
+        // Regression test for moltis-org/moltis#654: non-empty allowlist must be
+        // enforced even when approval_mode is off (headless deployments).
+        let mgr = ApprovalManager {
+            mode: ApprovalMode::Off,
+            allowlist: vec!["git *".into()],
+            ..Default::default()
+        };
+        let action = mgr.check_command("git status").await.unwrap();
+        assert_eq!(action, ApprovalAction::Proceed);
+    }
+
+    #[tokio::test]
+    async fn test_approval_off_with_allowlist_miss_denies() {
+        // Regression test for moltis-org/moltis#654: commands outside the
+        // configured allowlist must be denied in Off mode, not silently proceeded.
+        let mgr = ApprovalManager {
+            mode: ApprovalMode::Off,
+            allowlist: vec!["git *".into()],
+            ..Default::default()
+        };
+        let err = mgr
+            .check_command("curl https://evil.example.com")
+            .await
+            .expect_err("expected denial for non-allowlisted command in off mode");
+        assert!(
+            err.to_string().contains("not in allowlist"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_approval_off_with_allowlist_safe_bin() {
+        // Safe bins are still allowed in Off mode so operators don't have to
+        // enumerate them in every allowlist.
+        let mgr = ApprovalManager {
+            mode: ApprovalMode::Off,
+            allowlist: vec!["git *".into()],
+            ..Default::default()
+        };
+        let action = mgr.check_command("echo hi").await.unwrap();
+        assert_eq!(action, ApprovalAction::Proceed);
+    }
+
+    #[tokio::test]
+    async fn test_approval_off_empty_allowlist_unrestricted() {
+        // Explicit contract lock: Off mode with an empty allowlist preserves
+        // historical unrestricted semantics.
+        let mgr = ApprovalManager {
+            mode: ApprovalMode::Off,
+            allowlist: Vec::new(),
+            ..Default::default()
+        };
+        let action = mgr
+            .check_command(r#"python3 -c "print('hi')""#)
+            .await
+            .unwrap();
+        assert_eq!(action, ApprovalAction::Proceed);
+    }
+
+    #[tokio::test]
+    async fn test_approval_off_full_security_bypasses_allowlist() {
+        // SecurityLevel::Full short-circuits before the mode match, so even an
+        // explicit allowlist has no effect.
+        let mgr = ApprovalManager {
+            mode: ApprovalMode::Off,
+            security_level: SecurityLevel::Full,
+            allowlist: vec!["git *".into()],
+            ..Default::default()
+        };
         let action = mgr.check_command("curl https://example.com").await.unwrap();
         assert_eq!(action, ApprovalAction::Proceed);
     }

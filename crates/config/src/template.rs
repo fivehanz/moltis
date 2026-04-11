@@ -248,12 +248,15 @@ max_output_bytes = 204800         # Max command output bytes (200KB)
 approval_mode = "on-miss"         # When to require approval:
                                   #   "always"  - Always ask before running
                                   #   "on-miss" - Ask if not in allowlist
-                                  #   "never"   - Never ask (dangerous)
+                                  #   "never"   - Never ask (for headless deployments)
 security_level = "allowlist"      # Security mode:
                                   #   "permissive" - Allow most commands
                                   #   "allowlist"  - Only allow listed commands
                                   #   "strict"     - Very restrictive
-allowlist = []                    # Command patterns to allow (when security_level = "allowlist")
+allowlist = []                    # Command patterns to allow (when security_level = "allowlist").
+                                  # With approval_mode = "never", a non-empty allowlist is enforced:
+                                  # commands that don't match are denied (safe bins still allowed).
+                                  # An empty allowlist in "never" mode is unrestricted.
                                   # Example: ["git *", "npm *", "cargo *"]
 host = "local"                    # Where to run commands:
                                   #   "local" - Run on this machine (default)
