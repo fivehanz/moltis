@@ -102,6 +102,15 @@ pub const DEFAULT_READ_LINE_LIMIT: usize = 2000;
 /// shape of response.
 pub const MAX_LINE_CHARS: usize = 2000;
 
+/// Maximum total bytes of rendered output returned by a single `Read`.
+///
+/// Caps payload size independently of line count: 2000 lines × 2000 chars
+/// would otherwise permit ~4 MB per call, which can blow tool-response
+/// limits on smaller-context models. When the rendered output exceeds
+/// this cap, `format_numbered_lines` truncates at the last full line that
+/// fits and sets `truncated=true`.
+pub const MAX_READ_OUTPUT_BYTES: usize = 256 * 1024;
+
 /// Number of bytes to inspect when heuristically detecting binary content.
 const BINARY_SNIFF_BYTES: usize = 8192;
 
@@ -121,6 +130,20 @@ pub fn require_absolute(path: &str, field: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Extract the optional `_session_key` parameter threaded into every tool
+/// call by the chat loop.
+///
+/// Phase 1 callers don't actually use the value — it's just plumbed so
+/// phase 3's per-session read tracker can light it up without touching
+/// every tool. Returns `"default"` when absent.
+#[must_use]
+pub fn session_key_from(params: &Value) -> &str {
+    params
+        .get("_session_key")
+        .and_then(Value::as_str)
+        .unwrap_or("default")
 }
 
 /// Canonicalize a user-supplied path. Requires the path to exist and be absolute.
@@ -228,26 +251,35 @@ pub fn format_numbered_lines(content: &str, start_line: usize, max_lines: usize)
     let width = decimal_width(last_line_number);
 
     let mut out = String::new();
+    let mut rendered_lines: usize = 0;
+    let mut byte_capped = false;
     for (offset, raw) in visible.iter().enumerate() {
         let line_number = start.saturating_add(offset);
         // Strip a trailing '\r' so CRLF-authored files render cleanly.
         let raw = raw.strip_suffix('\r').unwrap_or(raw);
-        let (body, truncated) = truncate_line(raw);
+        let (body, line_trunc) = truncate_line(raw);
         // 6-space padding minimum to match Claude Code's visual style.
         let pad_width = width.max(6);
-        out.push_str(&format!("{line_number:>pad_width$}→{body}"));
-        if truncated {
-            out.push('…');
+        let mut next = format!("{line_number:>pad_width$}→{body}");
+        if line_trunc {
+            next.push('…');
         }
-        out.push('\n');
+        next.push('\n');
+        if out.len().saturating_add(next.len()) > MAX_READ_OUTPUT_BYTES {
+            byte_capped = true;
+            break;
+        }
+        out.push_str(&next);
+        rendered_lines = rendered_lines.saturating_add(1);
     }
 
+    let line_capped = rendered_lines < visible.len() || end_exclusive < total_lines;
     NumberedLines {
         text: out,
         total_lines,
         start_line: start,
-        rendered_lines: visible.len(),
-        truncated: end_exclusive < total_lines,
+        rendered_lines,
+        truncated: line_capped || byte_capped,
     }
 }
 
@@ -286,6 +318,17 @@ fn decimal_width(n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use {super::*, std::io::Write};
+
+    #[test]
+    fn session_key_default_when_absent() {
+        assert_eq!(session_key_from(&json!({})), "default");
+    }
+
+    #[test]
+    fn session_key_reads_underscore_prefixed_param() {
+        let params = json!({ "_session_key": "session:abc", "file_path": "/tmp/x" });
+        assert_eq!(session_key_from(&params), "session:abc");
+    }
 
     #[test]
     fn decimal_width_examples() {
@@ -338,6 +381,27 @@ mod tests {
         assert_eq!(rendered.total_lines, 2);
         assert_eq!(rendered.rendered_lines, 2);
         assert_eq!(rendered.text, "     1→alpha\n     2→beta\n");
+    }
+
+    #[test]
+    fn format_numbered_lines_byte_caps_large_payloads() {
+        // Build a file that would exceed MAX_READ_OUTPUT_BYTES if fully rendered.
+        // Each line is ~100 chars; 3000 lines × 100 = 300 KB > 256 KB cap.
+        let line = "x".repeat(100);
+        let content: String = std::iter::repeat_n(line.as_str(), 3000)
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let rendered = format_numbered_lines(&content, 1, 10_000);
+
+        assert!(rendered.truncated, "should be byte-capped");
+        assert!(
+            rendered.text.len() <= MAX_READ_OUTPUT_BYTES,
+            "output {} > cap {}",
+            rendered.text.len(),
+            MAX_READ_OUTPUT_BYTES
+        );
+        assert!(rendered.rendered_lines < 3000);
+        assert!(rendered.rendered_lines > 0);
     }
 
     #[test]

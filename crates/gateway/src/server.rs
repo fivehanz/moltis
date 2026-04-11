@@ -3574,6 +3574,7 @@ pub async fn prepare_gateway_core(
         // routing ships in phase 2. workspace_root is None for now —
         // [tools.fs].workspace_root lands with phase 4 config. Until then
         // Glob/Grep callers must supply an absolute `path` argument.
+        #[cfg(feature = "fs-tools")]
         moltis_tools::fs::register_fs_tools(&mut tool_registry, None);
         #[cfg(feature = "wasm")]
         {

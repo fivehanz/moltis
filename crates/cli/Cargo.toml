@@ -111,6 +111,7 @@ default = [
   "code-splitter",
   "file-watcher",
   "firecrawl",
+  "fs-tools",
   "graphql",
   "jemalloc",
   "local-llm",
@@ -139,6 +140,7 @@ embedded-assets = ["moltis-web?/embedded-assets"]
 embedded-wasm   = ["moltis-tools/embedded-wasm"]
 file-watcher    = ["moltis-gateway/file-watcher"]
 firecrawl       = ["moltis-gateway/firecrawl"]
+fs-tools        = ["moltis-gateway/fs-tools"]
 graphql         = ["moltis-httpd/graphql", "moltis-web?/graphql"]
 jemalloc        = ["dep:tikv-jemallocator"]
 lang-bash       = ["moltis-memory/lang-bash"]

@@ -52,6 +52,7 @@ pub mod exec;
 pub mod file_io;
 #[cfg(feature = "firecrawl")]
 pub mod firecrawl;
+#[cfg(feature = "fs-tools")]
 pub mod fs;
 pub mod image_cache;
 pub mod location;

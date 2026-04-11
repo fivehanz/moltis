@@ -94,6 +94,7 @@ default = [
   "caldav",
   "file-watcher",
   "firecrawl",
+  "fs-tools",
   "graphql",
   "local-llm",
   "local-llm-metal",
@@ -120,6 +121,7 @@ file-watcher = [
   "moltis-skills/file-watcher",
 ]
 firecrawl = ["moltis-tools/firecrawl"]
+fs-tools = ["moltis-tools/fs-tools"]
 graphql = []
 local-embeddings = ["moltis-memory/local-embeddings"]
 local-llm = [
