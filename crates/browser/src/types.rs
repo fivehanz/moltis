@@ -450,7 +450,24 @@ pub struct BrowserConfig {
     /// Moltis runs inside Docker alongside a sibling browser container.
     pub container_host: String,
     /// Browserless API compatibility mode (`v1` or `v2`).
-    pub browserless_api_version: String,
+    pub browserless_api_version: BrowserlessApiVersion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserlessApiVersion {
+    #[default]
+    V1,
+    V2,
+}
+
+impl fmt::Display for BrowserlessApiVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::V1 => f.write_str("v1"),
+            Self::V2 => f.write_str("v2"),
+        }
+    }
 }
 
 fn default_sandbox_image() -> String {
@@ -483,7 +500,7 @@ impl Default for BrowserConfig {
             persist_profile: true,
             profile_dir: None,
             container_host: "127.0.0.1".to_string(),
-            browserless_api_version: "v1".to_string(),
+            browserless_api_version: BrowserlessApiVersion::V1,
         }
     }
 }
@@ -527,7 +544,10 @@ impl From<&moltis_config::schema::BrowserConfig> for BrowserConfig {
             persist_profile: cfg.persist_profile,
             profile_dir: cfg.profile_dir.clone(),
             container_host: cfg.container_host.clone(),
-            browserless_api_version: cfg.browserless_api_version.clone(),
+            browserless_api_version: match cfg.browserless_api_version {
+                moltis_config::schema::BrowserlessApiVersion::V1 => BrowserlessApiVersion::V1,
+                moltis_config::schema::BrowserlessApiVersion::V2 => BrowserlessApiVersion::V2,
+            },
         }
     }
 }

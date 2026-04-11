@@ -22,7 +22,7 @@ use {
 use crate::{
     container::{BrowserContainer, browserless_session_timeout_ms},
     error::Error,
-    types::{BrowserConfig, BrowserPreference},
+    types::{BrowserConfig, BrowserPreference, BrowserlessApiVersion},
 };
 
 pub(crate) const MAX_BROWSER_INSTANCE_LIFETIME: Duration = Duration::from_secs(30 * 60);
@@ -62,9 +62,12 @@ pub(crate) fn low_memory_chrome_args(total_mb: u64, threshold_mb: u64) -> &'stat
 ///
 /// - v1 (default): connect only to the base URL.
 /// - v2: when URL path is root (`/`), also try `/chrome` and `/chromium`.
-fn websocket_connect_candidates(base_ws_url: &str, browserless_api_version: &str) -> Vec<String> {
+fn websocket_connect_candidates(
+    base_ws_url: &str,
+    browserless_api_version: BrowserlessApiVersion,
+) -> Vec<String> {
     let mut candidates = vec![base_ws_url.to_string()];
-    if !browserless_api_version.eq_ignore_ascii_case("v2") {
+    if browserless_api_version != BrowserlessApiVersion::V2 {
         return candidates;
     }
 
@@ -451,7 +454,7 @@ impl BrowserPool {
         );
 
         let ws_candidates =
-            websocket_connect_candidates(&ws_url, &self.config.browserless_api_version);
+            websocket_connect_candidates(&ws_url, self.config.browserless_api_version);
         let mut last_error = String::new();
         let mut connected = None;
         for candidate in &ws_candidates {
@@ -884,7 +887,10 @@ mod tests {
 
     #[test]
     fn websocket_candidates_v1_uses_base_url_only() {
-        let candidates = websocket_connect_candidates("ws://browser-host.local:45029/", "v1");
+        let candidates = websocket_connect_candidates(
+            "ws://browser-host.local:45029/",
+            BrowserlessApiVersion::V1,
+        );
         assert_eq!(candidates, vec![
             "ws://browser-host.local:45029/".to_string()
         ]);
@@ -892,7 +898,10 @@ mod tests {
 
     #[test]
     fn websocket_candidates_v2_adds_browser_paths_for_root() {
-        let candidates = websocket_connect_candidates("ws://browser-host.local:45029/", "v2");
+        let candidates = websocket_connect_candidates(
+            "ws://browser-host.local:45029/",
+            BrowserlessApiVersion::V2,
+        );
         assert_eq!(candidates, vec![
             "ws://browser-host.local:45029/".to_string(),
             "ws://browser-host.local:45029/chrome".to_string(),
@@ -902,7 +911,10 @@ mod tests {
 
     #[test]
     fn websocket_candidates_v2_keeps_explicit_path() {
-        let candidates = websocket_connect_candidates("ws://browser-host.local:45029/chrome", "v2");
+        let candidates = websocket_connect_candidates(
+            "ws://browser-host.local:45029/chrome",
+            BrowserlessApiVersion::V2,
+        );
         assert_eq!(candidates, vec![
             "ws://browser-host.local:45029/chrome".to_string()
         ]);

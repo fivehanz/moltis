@@ -1858,7 +1858,15 @@ pub struct BrowserConfig {
     /// - "v1" (default): connect to the base websocket URL.
     /// - "v2": try Browserless v2 paths (`/chrome`, `/chromium`) when needed.
     #[serde(default = "default_browserless_api_version")]
-    pub browserless_api_version: String,
+    pub browserless_api_version: BrowserlessApiVersion,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserlessApiVersion {
+    #[default]
+    V1,
+    V2,
 }
 
 fn default_sandbox_image() -> String {
@@ -1877,8 +1885,8 @@ fn default_container_host() -> String {
     "127.0.0.1".to_string()
 }
 
-fn default_browserless_api_version() -> String {
-    "v1".to_string()
+const fn default_browserless_api_version() -> BrowserlessApiVersion {
+    BrowserlessApiVersion::V1
 }
 
 impl Default for BrowserConfig {
@@ -2941,6 +2949,30 @@ memory = 300
                 .get("calc")
                 .and_then(|override_cfg| override_cfg.fuel),
             Some(100)
+        );
+    }
+
+    #[test]
+    fn browserless_api_version_deserialize_v2() {
+        let config: BrowserConfig = toml::from_str(
+            r#"
+browserless_api_version = "v2"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.browserless_api_version, BrowserlessApiVersion::V2);
+    }
+
+    #[test]
+    fn browserless_api_version_rejects_non_lowercase_variants() {
+        let parsed: Result<BrowserConfig, _> = toml::from_str(
+            r#"
+browserless_api_version = "V2"
+"#,
+        );
+        assert!(
+            parsed.is_err(),
+            "uppercase value should fail serde enum deserialization"
         );
     }
 
