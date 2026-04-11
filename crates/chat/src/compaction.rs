@@ -189,13 +189,21 @@ pub fn format_compact_summary(summary: &str) -> String {
 pub fn extract_existing_compacted_summary(history: &[Value]) -> Option<String> {
     let first = history.first()?;
     let content = first.get("content").and_then(Value::as_str)?;
+    // Strip outer wrapper and continuation boilerplate so that only the
+    // actual summary text is returned for re-compaction. Without this,
+    // `parse_summary_sections` would capture the preamble and resume
+    // instruction as highlights, corrupting the merged summary.
     let summary_text = content
         .strip_prefix("[Conversation Summary]\n\n")
+        .map(|s| s.strip_prefix(COMPACT_CONTINUATION_PREAMBLE).unwrap_or(s))
         .or_else(|| {
             content
                 .starts_with(COMPACT_CONTINUATION_PREAMBLE)
-                .then_some(content)
+                .then(|| &content[COMPACT_CONTINUATION_PREAMBLE.len()..])
         })?;
+    let summary_text = summary_text
+        .trim_end_matches(COMPACT_DIRECT_RESUME_INSTRUCTION)
+        .trim_end_matches(COMPACT_RECENT_MESSAGES_NOTE);
     let summary = summary_text.trim();
     if summary.is_empty() {
         return None;
@@ -1036,14 +1044,32 @@ mod tests {
 
     #[test]
     fn extract_existing_compacted_summary_preamble_format() {
-        let preamble = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSome summary content";
+        let preamble = format!(
+            "This session is being continued from a previous conversation that ran out of context. \
+             The summary below covers the earlier portion of the conversation.\n\nSome summary content"
+        );
         let history = vec![json!({
             "role": "user",
             "content": preamble
         })];
-        let result = extract_existing_compacted_summary(&history);
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("Some summary content"));
+        let result = extract_existing_compacted_summary(&history).unwrap();
+        assert_eq!(result, "Some summary content");
+        assert!(!result.contains("continued from a previous"));
+    }
+
+    #[test]
+    fn extract_existing_compacted_summary_strips_full_wrapping() {
+        // Simulates the actual persisted format: prefix + preamble + summary + directive.
+        let content = format!(
+            "[Conversation Summary]\n\n{}\n\n<summary>Actual summary here</summary>\n\n{}",
+            COMPACT_CONTINUATION_PREAMBLE.trim(),
+            COMPACT_DIRECT_RESUME_INSTRUCTION.trim(),
+        );
+        let history = vec![json!({ "role": "user", "content": &content })];
+        let result = extract_existing_compacted_summary(&history).unwrap();
+        assert!(result.contains("Actual summary here"));
+        assert!(!result.contains("continued from a previous"));
+        assert!(!result.contains("Continue the conversation from where it left off"));
     }
 
     // ── collect_key_files expanded extensions ───────────────────────
