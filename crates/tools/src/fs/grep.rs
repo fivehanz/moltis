@@ -26,7 +26,7 @@ use {
 #[cfg(feature = "metrics")]
 use moltis_metrics::{counter, labels, tools as tools_metrics};
 
-use crate::{Result, error::Error};
+use crate::{Result, error::Error, fs::shared::require_absolute};
 
 /// Maximum bytes of a single file we will load for content searching.
 const DEFAULT_GREP_FILE_CAP: u64 = 5 * 1024 * 1024;
@@ -72,12 +72,25 @@ struct GrepOptions {
 
 /// Native `Grep` tool implementation.
 #[derive(Default)]
-pub struct GrepTool;
+pub struct GrepTool {
+    /// Optional default root used when the LLM call omits `path`.
+    ///
+    /// Set via [`with_workspace_root`](Self::with_workspace_root) at
+    /// registration time. When `None`, callers must supply an absolute `path`.
+    workspace_root: Option<PathBuf>,
+}
 
 impl GrepTool {
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Set the default search root for calls that omit `path`.
+    #[must_use]
+    pub fn with_workspace_root(mut self, root: PathBuf) -> Self {
+        self.workspace_root = Some(root);
+        self
     }
 
     #[instrument(skip(self, opts), fields(pattern = %opts.pattern, mode = ?opts.output_mode))]
@@ -391,11 +404,17 @@ impl AgentTool for GrepTool {
             .ok_or_else(|| Error::message("missing 'pattern' parameter"))?
             .to_string();
 
-        let path = params
-            .get("path")
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
+        let path = match params.get("path").and_then(Value::as_str) {
+            Some(raw) => {
+                require_absolute(raw, "path")?;
+                PathBuf::from(raw)
+            },
+            None => self.workspace_root.clone().ok_or_else(|| {
+                Error::message(
+                    "Grep requires an absolute 'path' argument (no workspace root is configured)",
+                )
+            })?,
+        };
 
         let glob = params
             .get("glob")
@@ -460,10 +479,13 @@ impl AgentTool for GrepTool {
             offset,
         };
 
-        let self_owned = Self;
-        let result = tokio::task::spawn_blocking(move || self_owned.grep_impl(opts))
-            .await
-            .map_err(|e| Error::message(format!("grep task failed: {e}")))?;
+        let workspace_root = self.workspace_root.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let tool = Self { workspace_root };
+            tool.grep_impl(opts)
+        })
+        .await
+        .map_err(|e| Error::message(format!("grep task failed: {e}")))?;
 
         match result {
             Ok(value) => {
@@ -663,6 +685,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid regex"));
+    }
+
+    #[tokio::test]
+    async fn grep_missing_path_without_workspace_root_errors() {
+        let tool = GrepTool::new();
+        let err = tool.execute(json!({ "pattern": "foo" })).await.unwrap_err();
+        assert!(err.to_string().contains("no workspace root"));
+    }
+
+    #[tokio::test]
+    async fn grep_rejects_relative_path() {
+        let tool = GrepTool::new();
+        let err = tool
+            .execute(json!({
+                "pattern": "foo",
+                "path": "rel/dir",
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("must be an absolute path"));
+    }
+
+    #[tokio::test]
+    async fn grep_falls_back_to_workspace_root() {
+        let dir = setup_tree().await;
+        let tool = GrepTool::new().with_workspace_root(dir.path().to_path_buf());
+        let value = tool.execute(json!({ "pattern": "alpha" })).await.unwrap();
+        let files = value["files"].as_array().unwrap();
+        assert!(!files.is_empty());
     }
 
     #[tokio::test]

@@ -29,14 +29,30 @@ pub const MAX_LINE_CHARS: usize = 2000;
 /// Number of bytes to inspect when heuristically detecting binary content.
 const BINARY_SNIFF_BYTES: usize = 8192;
 
-/// Canonicalize a user-supplied path. Requires the path to exist.
+/// Reject relative paths at the tool boundary.
+///
+/// Claude Code's fs tools require absolute paths. We enforce the same to
+/// avoid silent resolution against the gateway's process cwd, which is
+/// almost never what the LLM means. See `moltis-ung` for context.
+pub fn require_absolute(path: &str, field: &str) -> Result<()> {
+    if path.is_empty() {
+        return Err(Error::message(format!("{field} must not be empty")));
+    }
+    if !Path::new(path).is_absolute() {
+        return Err(Error::message(format!(
+            "{field} must be an absolute path (got '{path}'); relative paths are not supported \
+             to avoid silent resolution against the gateway process working directory"
+        )));
+    }
+    Ok(())
+}
+
+/// Canonicalize a user-supplied path. Requires the path to exist and be absolute.
 ///
 /// Returns an absolute, symlink-resolved `PathBuf`. All fs tools canonicalize
 /// at the boundary so symlink escapes can't bypass future path allowlists.
 pub async fn canonicalize_existing(path: &str) -> Result<PathBuf> {
-    if path.is_empty() {
-        return Err(Error::message("file_path must not be empty"));
-    }
+    require_absolute(path, "file_path")?;
     fs::canonicalize(path)
         .await
         .map_err(|e| Error::message(format!("cannot resolve path '{path}': {e}")))
@@ -44,12 +60,11 @@ pub async fn canonicalize_existing(path: &str) -> Result<PathBuf> {
 
 /// Canonicalize a path that may not exist yet (e.g. for `Write` to a new file).
 ///
-/// Canonicalizes the parent directory and appends the final component. Returns
-/// an error if the parent does not exist or is not a directory.
+/// Requires the path to be absolute. Canonicalizes the parent directory and
+/// appends the final component. Returns an error if the parent does not
+/// exist or is not a directory.
 pub async fn canonicalize_for_create(path: &str) -> Result<PathBuf> {
-    if path.is_empty() {
-        return Err(Error::message("file_path must not be empty"));
-    }
+    require_absolute(path, "file_path")?;
     let pb = PathBuf::from(path);
     let parent = pb
         .parent()
@@ -58,16 +73,9 @@ pub async fn canonicalize_for_create(path: &str) -> Result<PathBuf> {
         .file_name()
         .ok_or_else(|| Error::message(format!("path '{path}' has no file name")))?;
 
-    // If parent is empty, caller passed a bare filename — treat as current dir.
-    let parent_canonical = if parent.as_os_str().is_empty() {
-        fs::canonicalize(".")
-            .await
-            .map_err(|e| Error::message(format!("cannot resolve current directory: {e}")))?
-    } else {
-        fs::canonicalize(parent)
-            .await
-            .map_err(|e| Error::message(format!("cannot resolve parent of '{path}': {e}")))?
-    };
+    let parent_canonical = fs::canonicalize(parent)
+        .await
+        .map_err(|e| Error::message(format!("cannot resolve parent of '{path}': {e}")))?;
 
     Ok(parent_canonical.join(file_name))
 }
@@ -295,6 +303,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonicalize_existing_rejects_relative() {
+        let err = canonicalize_existing("relative/path.txt")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("must be an absolute path"));
+    }
+
+    #[tokio::test]
+    async fn canonicalize_existing_rejects_empty() {
+        let err = canonicalize_existing("").await.unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[tokio::test]
     async fn canonicalize_for_create_resolves_parent() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("new-file.txt");
@@ -311,6 +333,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("cannot resolve parent"));
+    }
+
+    #[tokio::test]
+    async fn canonicalize_for_create_rejects_relative() {
+        let err = canonicalize_for_create("out.txt").await.unwrap_err();
+        assert!(err.to_string().contains("must be an absolute path"));
     }
 
     #[tokio::test]

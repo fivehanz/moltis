@@ -22,19 +22,36 @@ use {
 #[cfg(feature = "metrics")]
 use moltis_metrics::{counter, labels, tools as tools_metrics};
 
-use crate::{Result, error::Error};
+use crate::{Result, error::Error, fs::shared::require_absolute};
 
 /// Maximum number of entries returned by a single `Glob` call.
 const DEFAULT_GLOB_LIMIT: usize = 1000;
 
 /// Native `Glob` tool implementation.
 #[derive(Default)]
-pub struct GlobTool;
+pub struct GlobTool {
+    /// Optional default root used when the LLM call omits `path`.
+    ///
+    /// Set via [`with_workspace_root`](Self::with_workspace_root) at
+    /// registration time (typically from `[tools.fs].workspace_root` once
+    /// phase 4 lands). When `None`, callers must supply an absolute `path`.
+    workspace_root: Option<PathBuf>,
+}
 
 impl GlobTool {
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Set the default search root for calls that omit `path`.
+    ///
+    /// Must be an absolute path. Relative roots are rejected so the tool
+    /// can't silently walk the gateway process cwd.
+    #[must_use]
+    pub fn with_workspace_root(mut self, root: PathBuf) -> Self {
+        self.workspace_root = Some(root);
+        self
     }
 
     #[instrument(skip(self), fields(pattern = %pattern, path = ?path))]
@@ -43,9 +60,21 @@ impl GlobTool {
             .map_err(|e| Error::message(format!("invalid glob pattern '{pattern}': {e}")))?
             .compile_matcher();
 
-        let root = path
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let root = match path {
+            Some(p) => p.to_path_buf(),
+            None => self.workspace_root.clone().ok_or_else(|| {
+                Error::message(
+                    "Glob requires an absolute 'path' argument (no workspace root is configured)",
+                )
+            })?,
+        };
+
+        if !root.is_absolute() {
+            return Err(Error::message(format!(
+                "Glob 'path' must be absolute (got '{}')",
+                root.display()
+            )));
+        }
 
         let root_canonical = std::fs::canonicalize(&root).map_err(|e| {
             Error::message(format!(
@@ -138,7 +167,7 @@ impl AgentTool for GlobTool {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory to search in. Defaults to the current working directory."
+                    "description": "Absolute path of the directory to search in. Required unless a workspace root is configured for this tool instance."
                 }
             }
         })
@@ -148,18 +177,23 @@ impl AgentTool for GlobTool {
         let pattern = params
             .get("pattern")
             .and_then(Value::as_str)
-            .ok_or_else(|| Error::message("missing 'pattern' parameter"))?
-            .to_string();
+            .ok_or_else(|| Error::message("missing 'pattern' parameter"))?;
+        if let Some(raw) = params.get("path").and_then(Value::as_str) {
+            require_absolute(raw, "path")?;
+        }
+        let pattern = pattern.to_string();
         let path = params
             .get("path")
             .and_then(Value::as_str)
             .map(PathBuf::from);
 
-        let self_owned = Self;
-        let result =
-            tokio::task::spawn_blocking(move || self_owned.glob_impl(&pattern, path.as_deref()))
-                .await
-                .map_err(|e| Error::message(format!("glob task failed: {e}")))?;
+        let workspace_root = self.workspace_root.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let tool = Self { workspace_root };
+            tool.glob_impl(&pattern, path.as_deref())
+        })
+        .await
+        .map_err(|e| Error::message(format!("glob task failed: {e}")))?;
 
         match result {
             Ok(value) => Ok(value),
@@ -316,5 +350,43 @@ mod tests {
         let tool = GlobTool::new();
         let err = tool.execute(json!({})).await.unwrap_err();
         assert!(err.to_string().contains("missing 'pattern'"));
+    }
+
+    #[tokio::test]
+    async fn glob_missing_path_without_workspace_root_errors() {
+        let tool = GlobTool::new();
+        let err = tool
+            .execute(json!({ "pattern": "*.rs" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no workspace root"));
+    }
+
+    #[tokio::test]
+    async fn glob_rejects_relative_path() {
+        let tool = GlobTool::new();
+        let err = tool
+            .execute(json!({
+                "pattern": "*.rs",
+                "path": "relative/dir",
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("must be an absolute path"));
+    }
+
+    #[tokio::test]
+    async fn glob_falls_back_to_workspace_root() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("a.rs"), "x")
+            .await
+            .unwrap();
+
+        let tool = GlobTool::new().with_workspace_root(dir.path().to_path_buf());
+        let value = tool.execute(json!({ "pattern": "*.rs" })).await.unwrap();
+
+        let paths = value["paths"].as_array().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].as_str().unwrap().ends_with("a.rs"));
     }
 }

@@ -3571,8 +3571,10 @@ pub async fn prepare_gateway_core(
         tool_registry.register(Box::new(moltis_tools::calc::CalcTool::new()));
         // Native filesystem tools (Read/Write/Edit/MultiEdit/Glob/Grep).
         // See moltis-org/moltis#657. Phase 1: host path only; sandbox
-        // routing ships in phase 2.
-        moltis_tools::fs::register_fs_tools(&mut tool_registry);
+        // routing ships in phase 2. workspace_root is None for now —
+        // [tools.fs].workspace_root lands with phase 4 config. Until then
+        // Glob/Grep callers must supply an absolute `path` argument.
+        moltis_tools::fs::register_fs_tools(&mut tool_registry, None);
         #[cfg(feature = "wasm")]
         {
             let wasm_limits = sandbox_router
