@@ -398,14 +398,8 @@ fn test_workspace_mount_points_sandbox_at_moltis_data_dir_memory_files() {
         args[1].contains(&format!(":{}:ro", workspace_dir.display())),
         "workspace mount should expose the Moltis data dir inside the sandbox"
     );
-    assert!(
-        guest_memory_file.starts_with(&workspace_dir),
-        "long-term MEMORY.md should live under the mounted workspace"
-    );
-    assert!(
-        guest_memory_dir.starts_with(&workspace_dir),
-        "topic memory files should live under the mounted workspace"
-    );
+    assert_eq!(guest_memory_file, workspace_dir.join("MEMORY.md"));
+    assert_eq!(guest_memory_dir, workspace_dir.join("memory"));
 }
 
 #[test]
@@ -484,8 +478,7 @@ fn test_sandbox_home_persistence_is_separate_from_memory_workspace() {
         data_dir.join("sandbox").join("home").join("shared")
     );
     assert_ne!(home_dir, data_dir);
-    assert!(!home_dir.starts_with(data_dir.join("memory")));
-    assert_ne!(home_dir, data_dir.join("MEMORY.md"));
+    assert_eq!(home_dir.parent(), Some(data_dir.join("sandbox").join("home").as_path()));
 }
 
 #[test]

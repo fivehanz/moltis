@@ -989,7 +989,15 @@ pub struct SecurityScanResult {
 #[serde(rename_all = "camelCase")]
 pub struct MemoryConfig {
     #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub agent_write_mode: Option<String>,
+    #[serde(default)]
+    pub user_profile_write_mode: Option<String>,
+    #[serde(default)]
     pub backend: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
     #[serde(default)]
     pub citations: Option<String>,
     #[serde(default)]
@@ -997,7 +1005,11 @@ pub struct MemoryConfig {
     #[serde(default)]
     pub llm_reranking: Option<bool>,
     #[serde(default)]
-    pub session_export: Option<bool>,
+    pub search_merge_strategy: Option<String>,
+    #[serde(default)]
+    pub session_export: Option<String>,
+    #[serde(default)]
+    pub prompt_memory_mode: Option<String>,
     #[serde(default)]
     pub qmd_feature_enabled: Option<bool>,
 }

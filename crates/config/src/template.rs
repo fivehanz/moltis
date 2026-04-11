@@ -650,13 +650,32 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
                                   #   "prompt-only" - Prompt MEMORY.md only, no memory tools
                                   #   "search-only" - Memory tools only, no prompt MEMORY.md injection
                                   #   "off"         - Disable prompt memory injection and memory tools
-# provider = "local"              # Embedding provider:
+# agent_write_mode = "hybrid"    # Where agent-authored memory writes can land:
+                                  #   "hybrid"      - Allow MEMORY.md and memory/<name>.md
+                                  #   "prompt-only" - Allow MEMORY.md only
+                                  #   "search-only" - Allow memory/<name>.md only
+                                  #   "off"         - Disable agent-authored memory writes
+# user_profile_write_mode = "explicit-and-auto"  # How Moltis writes USER.md:
+                                  #   "explicit-and-auto" - Settings saves plus silent timezone/location capture
+                                  #   "explicit-only"     - Settings saves only, no silent timezone/location capture
+                                  #   "off"               - Do not write USER.md, keep profile in moltis.toml only
+# backend = "builtin"            # Memory backend:
+                                  #   "builtin" - Built-in SQLite indexer and retriever
+                                  #   "qmd"     - External QMD CLI backend
+# provider = "local"              # Embedding provider for the built-in backend:
                                   #   "local"   - Built-in local embeddings
                                   #   "ollama"  - Ollama server
                                   #   "openai"  - OpenAI API
                                   #   "custom"  - Custom endpoint
                                   #   (none)    - Auto-detect from available providers
+                                  # Ignored while backend = "qmd"
 # disable_rag = false             # true => keyword-only search (no embeddings)
+# citations = "auto"              # Citation mode: "on", "off", or "auto"
+# llm_reranking = false           # Use the LLM to rerank search results
+# search_merge_strategy = "rrf"   # Merge strategy: "rrf" or "linear"
+# session_export = "on-new-or-reset"  # Session transcript export policy:
+                                  #   "on-new-or-reset" - Export transcripts on /new and /reset
+                                  #   "off"             - Disable session transcript export
 # base_url = "http://localhost:11434/v1"  # Embedding API base (host, /v1, or /embeddings)
 # model = "nomic-embed-text"      # Embedding model name
 # api_key = "..."                 # API key (optional for local endpoints like Ollama)

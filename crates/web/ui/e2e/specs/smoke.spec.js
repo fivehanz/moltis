@@ -60,6 +60,13 @@ test("mobile menu drives settings and sessions", async ({ page }) => {
 	await page.locator(".settings-nav-item", { hasText: "Memory" }).click();
 	await expect(page).toHaveURL(/\/settings\/memory$/);
 	await expect(page.locator(".settings-sidebar")).toHaveCount(0);
+	await expect(page.getByText("Memory Style", { exact: true })).toBeVisible();
+	await expect(page.getByText("Prompt Memory Mode", { exact: true })).toBeVisible();
+	await expect(page.getByText("Agent Memory Writes", { exact: true })).toBeVisible();
+	await expect(page.getByText("USER.md Writes", { exact: true })).toBeVisible();
+	await expect(page.getByText("Embedding Provider", { exact: true })).toBeVisible();
+	await expect(page.getByText("Search Merge Strategy", { exact: true })).toBeVisible();
+	await expect(page.getByText("Session Export", { exact: true })).toBeVisible();
 	await page.locator(".settings-mobile-menu-btn").click();
 	var voiceNav = page.locator(".settings-nav-item", { hasText: "Voice" });
 	await voiceNav.scrollIntoViewIfNeeded();

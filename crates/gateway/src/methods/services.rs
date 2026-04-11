@@ -122,15 +122,7 @@ fn read_identity_payload_for_agent(agent_id: &str) -> serde_json::Value {
             identity.theme = file_identity.theme;
         }
     }
-    let mut user = config.user;
-    if let Some(file_user) = moltis_config::load_user() {
-        if file_user.name.is_some() {
-            user.name = file_user.name;
-        }
-        if file_user.timezone.is_some() {
-            user.timezone = file_user.timezone;
-        }
-    }
+    let user = moltis_config::resolve_user_profile_from_config(&config);
     let resolved_name = identity
         .name
         .clone()
@@ -4488,6 +4480,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     match mm.status().await {
                         Ok(status) => Ok(serde_json::json!({
                             "available": true,
+                            "backend": mm.backend_name(),
                             "total_files": status.total_files,
                             "total_chunks": status.total_chunks,
                             "db_size": status.db_size_bytes,
@@ -4517,12 +4510,55 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                 // Read memory config from the config file
                 let config = moltis_config::discover_and_load();
                 let memory = &config.memory;
+                let chat = &config.chat;
                 Ok(serde_json::json!({
-                    "backend": memory.backend.as_deref().unwrap_or("builtin"),
-                    "citations": memory.citations.as_deref().unwrap_or("auto"),
+                    "style": match memory.style {
+                        moltis_config::MemoryStyle::Hybrid => "hybrid",
+                        moltis_config::MemoryStyle::PromptOnly => "prompt-only",
+                        moltis_config::MemoryStyle::SearchOnly => "search-only",
+                        moltis_config::MemoryStyle::Off => "off",
+                    },
+                    "agent_write_mode": match memory.agent_write_mode {
+                        moltis_config::AgentMemoryWriteMode::Hybrid => "hybrid",
+                        moltis_config::AgentMemoryWriteMode::PromptOnly => "prompt-only",
+                        moltis_config::AgentMemoryWriteMode::SearchOnly => "search-only",
+                        moltis_config::AgentMemoryWriteMode::Off => "off",
+                    },
+                    "user_profile_write_mode": match memory.user_profile_write_mode {
+                        moltis_config::UserProfileWriteMode::ExplicitAndAuto => "explicit-and-auto",
+                        moltis_config::UserProfileWriteMode::ExplicitOnly => "explicit-only",
+                        moltis_config::UserProfileWriteMode::Off => "off",
+                    },
+                    "backend": match memory.backend {
+                        moltis_config::MemoryBackend::Builtin => "builtin",
+                        moltis_config::MemoryBackend::Qmd => "qmd",
+                    },
+                    "provider": match memory.provider {
+                        Some(moltis_config::MemoryProvider::Local) => "local",
+                        Some(moltis_config::MemoryProvider::Ollama) => "ollama",
+                        Some(moltis_config::MemoryProvider::OpenAi) => "openai",
+                        Some(moltis_config::MemoryProvider::Custom) => "custom",
+                        None => "auto",
+                    },
+                    "citations": match memory.citations {
+                        moltis_config::MemoryCitationsMode::On => "on",
+                        moltis_config::MemoryCitationsMode::Off => "off",
+                        moltis_config::MemoryCitationsMode::Auto => "auto",
+                    },
                     "disable_rag": memory.disable_rag,
                     "llm_reranking": memory.llm_reranking,
-                    "session_export": memory.session_export,
+                    "search_merge_strategy": match memory.search_merge_strategy {
+                        moltis_config::MemorySearchMergeStrategy::Rrf => "rrf",
+                        moltis_config::MemorySearchMergeStrategy::Linear => "linear",
+                    },
+                    "session_export": match memory.session_export {
+                        moltis_config::SessionExportMode::Off => "off",
+                        moltis_config::SessionExportMode::OnNewOrReset => "on-new-or-reset",
+                    },
+                    "prompt_memory_mode": match chat.prompt_memory_mode {
+                        moltis_config::PromptMemoryMode::LiveReload => "live-reload",
+                        moltis_config::PromptMemoryMode::FrozenAtSessionStart => "frozen-at-session-start",
+                    },
                     "qmd_feature_enabled": cfg!(feature = "qmd"),
                 }))
             })
@@ -4533,52 +4569,183 @@ pub(super) fn register(reg: &mut MethodRegistry) {
         "memory.config.update",
         Box::new(|ctx| {
             Box::pin(async move {
+                let current_config = moltis_config::discover_and_load();
+                let current_memory = current_config.memory;
+                let current_chat = current_config.chat;
+                let style = ctx
+                    .params
+                    .get("style")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(match current_memory.style {
+                        moltis_config::MemoryStyle::Hybrid => "hybrid",
+                        moltis_config::MemoryStyle::PromptOnly => "prompt-only",
+                        moltis_config::MemoryStyle::SearchOnly => "search-only",
+                        moltis_config::MemoryStyle::Off => "off",
+                    });
                 let backend = ctx
                     .params
                     .get("backend")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("builtin");
+                    .unwrap_or(match current_memory.backend {
+                        moltis_config::MemoryBackend::Builtin => "builtin",
+                        moltis_config::MemoryBackend::Qmd => "qmd",
+                    });
+                let agent_write_mode = ctx
+                    .params
+                    .get("agent_write_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(match current_memory.agent_write_mode {
+                        moltis_config::AgentMemoryWriteMode::Hybrid => "hybrid",
+                        moltis_config::AgentMemoryWriteMode::PromptOnly => "prompt-only",
+                        moltis_config::AgentMemoryWriteMode::SearchOnly => "search-only",
+                        moltis_config::AgentMemoryWriteMode::Off => "off",
+                    });
+                let user_profile_write_mode = ctx
+                    .params
+                    .get("user_profile_write_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(match current_memory.user_profile_write_mode {
+                        moltis_config::UserProfileWriteMode::ExplicitAndAuto => "explicit-and-auto",
+                        moltis_config::UserProfileWriteMode::ExplicitOnly => "explicit-only",
+                        moltis_config::UserProfileWriteMode::Off => "off",
+                    });
                 let citations = ctx
                     .params
                     .get("citations")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("auto");
+                    .unwrap_or(match current_memory.citations {
+                        moltis_config::MemoryCitationsMode::On => "on",
+                        moltis_config::MemoryCitationsMode::Off => "off",
+                        moltis_config::MemoryCitationsMode::Auto => "auto",
+                    });
+                let provider = ctx
+                    .params
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(match current_memory.provider {
+                        Some(moltis_config::MemoryProvider::Local) => "local",
+                        Some(moltis_config::MemoryProvider::Ollama) => "ollama",
+                        Some(moltis_config::MemoryProvider::OpenAi) => "openai",
+                        Some(moltis_config::MemoryProvider::Custom) => "custom",
+                        None => "auto",
+                    });
                 let llm_reranking = ctx
                     .params
                     .get("llm_reranking")
                     .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let disable_rag = ctx.params.get("disable_rag").and_then(|v| v.as_bool());
-                let session_export = ctx
+                    .unwrap_or(current_memory.llm_reranking);
+                let search_merge_strategy = ctx
                     .params
-                    .get("session_export")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                    .get("search_merge_strategy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(match current_memory.search_merge_strategy {
+                        moltis_config::MemorySearchMergeStrategy::Rrf => "rrf",
+                        moltis_config::MemorySearchMergeStrategy::Linear => "linear",
+                    });
+                let disable_rag = ctx.params.get("disable_rag").and_then(|v| v.as_bool());
+                let session_export = match ctx.params.get("session_export") {
+                    Some(serde_json::Value::Bool(false)) => moltis_config::SessionExportMode::Off,
+                    Some(serde_json::Value::Bool(true)) => {
+                        moltis_config::SessionExportMode::OnNewOrReset
+                    },
+                    Some(serde_json::Value::String(value)) if value == "off" => {
+                        moltis_config::SessionExportMode::Off
+                    },
+                    Some(serde_json::Value::String(_)) => {
+                        moltis_config::SessionExportMode::OnNewOrReset
+                    },
+                    _ => current_memory.session_export,
+                };
+                let prompt_memory_mode = ctx
+                    .params
+                    .get("prompt_memory_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(match current_chat.prompt_memory_mode {
+                        moltis_config::PromptMemoryMode::LiveReload => "live-reload",
+                        moltis_config::PromptMemoryMode::FrozenAtSessionStart => {
+                            "frozen-at-session-start"
+                        },
+                    });
 
                 // Persist to moltis.toml so the config survives restarts.
-                let backend_str = backend.to_string();
-                let citations_str = citations.to_string();
-                let mut effective_disable_rag =
-                    moltis_config::discover_and_load().memory.disable_rag;
+                let style_value = match style {
+                    "prompt-only" => moltis_config::MemoryStyle::PromptOnly,
+                    "search-only" => moltis_config::MemoryStyle::SearchOnly,
+                    "off" => moltis_config::MemoryStyle::Off,
+                    _ => moltis_config::MemoryStyle::Hybrid,
+                };
+                let citations_value = match citations {
+                    "on" => moltis_config::MemoryCitationsMode::On,
+                    "off" => moltis_config::MemoryCitationsMode::Off,
+                    _ => moltis_config::MemoryCitationsMode::Auto,
+                };
+                let provider_value = match provider {
+                    "local" => Some(moltis_config::MemoryProvider::Local),
+                    "ollama" => Some(moltis_config::MemoryProvider::Ollama),
+                    "openai" => Some(moltis_config::MemoryProvider::OpenAi),
+                    "custom" => Some(moltis_config::MemoryProvider::Custom),
+                    _ => None,
+                };
+                let search_merge_strategy_value = match search_merge_strategy {
+                    "linear" => moltis_config::MemorySearchMergeStrategy::Linear,
+                    _ => moltis_config::MemorySearchMergeStrategy::Rrf,
+                };
+                let backend_value = match backend {
+                    "qmd" => moltis_config::MemoryBackend::Qmd,
+                    _ => moltis_config::MemoryBackend::Builtin,
+                };
+                let agent_write_mode_value = match agent_write_mode {
+                    "prompt-only" => moltis_config::AgentMemoryWriteMode::PromptOnly,
+                    "search-only" => moltis_config::AgentMemoryWriteMode::SearchOnly,
+                    "off" => moltis_config::AgentMemoryWriteMode::Off,
+                    _ => moltis_config::AgentMemoryWriteMode::Hybrid,
+                };
+                let user_profile_write_mode_value = match user_profile_write_mode {
+                    "explicit-only" => moltis_config::UserProfileWriteMode::ExplicitOnly,
+                    "off" => moltis_config::UserProfileWriteMode::Off,
+                    _ => moltis_config::UserProfileWriteMode::ExplicitAndAuto,
+                };
+                let prompt_memory_mode_value = match prompt_memory_mode {
+                    "frozen-at-session-start" => {
+                        moltis_config::PromptMemoryMode::FrozenAtSessionStart
+                    },
+                    _ => moltis_config::PromptMemoryMode::LiveReload,
+                };
+                let mut effective_disable_rag = current_memory.disable_rag;
                 if let Err(e) = moltis_config::update_config(|cfg| {
-                    cfg.memory.backend = Some(backend_str.clone());
-                    cfg.memory.citations = Some(citations_str.clone());
+                    cfg.memory.style = style_value;
+                    cfg.memory.agent_write_mode = agent_write_mode_value;
+                    cfg.memory.user_profile_write_mode = user_profile_write_mode_value;
+                    cfg.memory.backend = backend_value;
+                    cfg.memory.provider = provider_value;
+                    cfg.memory.citations = citations_value;
                     cfg.memory.llm_reranking = llm_reranking;
+                    cfg.memory.search_merge_strategy = search_merge_strategy_value;
                     if let Some(value) = disable_rag {
                         cfg.memory.disable_rag = value;
                     }
                     cfg.memory.session_export = session_export;
+                    cfg.chat.prompt_memory_mode = prompt_memory_mode_value;
                     effective_disable_rag = cfg.memory.disable_rag;
                 }) {
                     tracing::warn!(error = %e, "failed to persist memory config");
                 }
 
                 Ok(serde_json::json!({
+                    "style": style,
+                    "agent_write_mode": agent_write_mode,
+                    "user_profile_write_mode": user_profile_write_mode,
                     "backend": backend,
+                    "provider": provider,
                     "citations": citations,
                     "disable_rag": effective_disable_rag,
                     "llm_reranking": llm_reranking,
-                    "session_export": session_export,
+                    "search_merge_strategy": search_merge_strategy,
+                    "session_export": match session_export {
+                        moltis_config::SessionExportMode::Off => "off",
+                        moltis_config::SessionExportMode::OnNewOrReset => "on-new-or-reset",
+                    },
+                    "prompt_memory_mode": prompt_memory_mode,
                 }))
             })
         }),
@@ -4605,6 +4772,8 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         max_results: config.memory.qmd.max_results.unwrap_or(10),
                         timeout_ms: config.memory.qmd.timeout_ms.unwrap_or(30_000),
                         work_dir: moltis_config::data_dir(),
+                        index_name: "moltis-status".into(),
+                        env_overrides: std::collections::HashMap::new(),
                     };
 
                     let manager = QmdManager::new(qmd_config);

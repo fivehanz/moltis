@@ -7505,9 +7505,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "moltis-agents",
  "moltis-memory",
  "serde",
  "serde_json",
+ "sha2",
+ "sqlx",
  "tempfile",
  "tokio",
  "tracing",

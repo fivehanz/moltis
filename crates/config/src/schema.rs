@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use {
     secrecy::{ExposeSecret, Secret},
-    serde::{Deserialize, Serialize},
+    serde::{Deserialize, Deserializer, Serialize},
 };
 
 // ── Reasoning effort ──────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ impl Serialize for Timezone {
 }
 
 impl<'de> Deserialize<'de> for Timezone {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         s.parse::<Self>().map_err(serde::de::Error::custom)
     }
@@ -1115,11 +1115,15 @@ impl Default for TailscaleConfig {
 pub struct MemoryEmbeddingConfig {
     /// High-level memory orchestration style.
     pub style: MemoryStyle,
-    /// Memory backend: "builtin" (default) or "qmd" for QMD sidecar.
-    pub backend: Option<String>,
+    /// Where agent-authored memory writes are allowed to land.
+    pub agent_write_mode: AgentMemoryWriteMode,
+    /// How Moltis writes the managed `USER.md` profile surface.
+    pub user_profile_write_mode: UserProfileWriteMode,
+    /// Memory backend used for search, retrieval, and indexing.
+    pub backend: MemoryBackend,
     /// Embedding provider: "local", "ollama", "openai", "custom", or None for auto-detect.
     #[serde(alias = "embedding_provider")]
-    pub provider: Option<String>,
+    pub provider: Option<MemoryProvider>,
     /// Disable RAG embeddings and force keyword-only memory search.
     #[serde(default)]
     pub disable_rag: bool,
@@ -1137,17 +1141,19 @@ pub struct MemoryEmbeddingConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub api_key: Option<Secret<String>>,
-    /// Citation mode: "on", "off", or "auto" (default).
-    /// When "auto", citations are included when results come from multiple files.
-    pub citations: Option<String>,
+    /// Citation mode for memory search results.
+    pub citations: MemoryCitationsMode,
     /// Enable LLM reranking for hybrid search results.
     #[serde(default)]
     pub llm_reranking: bool,
-    /// Merge strategy for hybrid search: "rrf" (default) or "linear".
-    pub search_merge_strategy: Option<String>,
-    /// Enable session export to memory for cross-run recall.
-    #[serde(default)]
-    pub session_export: bool,
+    /// Merge strategy for hybrid search results.
+    pub search_merge_strategy: MemorySearchMergeStrategy,
+    /// How session transcripts are exported into searchable memory.
+    #[serde(
+        default = "default_session_export_mode",
+        deserialize_with = "deserialize_session_export_mode"
+    )]
+    pub session_export: SessionExportMode,
     /// QMD-specific configuration (only used when backend = "qmd").
     #[serde(default)]
     pub qmd: QmdConfig,
@@ -1166,6 +1172,134 @@ pub enum MemoryStyle {
     SearchOnly,
     /// Disable both prompt memory injection and memory tools.
     Off,
+}
+
+/// Where agent-authored long-term memory writes can be stored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentMemoryWriteMode {
+    /// Allow both prompt-visible `MEMORY.md` writes and searchable `memory/*.md` notes.
+    #[default]
+    Hybrid,
+    /// Restrict writes to prompt-visible `MEMORY.md`.
+    PromptOnly,
+    /// Restrict writes to searchable `memory/*.md` notes.
+    SearchOnly,
+    /// Disable agent-authored memory writes entirely.
+    Off,
+}
+
+/// How Moltis writes the managed `USER.md` profile surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UserProfileWriteMode {
+    /// Allow both explicit settings saves and silent browser/channel enrichment.
+    #[default]
+    ExplicitAndAuto,
+    /// Allow explicit settings saves, but disable silent browser/channel enrichment.
+    ExplicitOnly,
+    /// Do not write `USER.md`; keep user profile only in `moltis.toml`.
+    Off,
+}
+
+impl UserProfileWriteMode {
+    #[must_use]
+    pub fn allows_explicit_write(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    #[must_use]
+    pub fn allows_auto_write(self) -> bool {
+        matches!(self, Self::ExplicitAndAuto)
+    }
+}
+
+/// Citation mode for memory search results.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemoryCitationsMode {
+    /// Always include citations in memory search results.
+    On,
+    /// Never include citations in memory search results.
+    Off,
+    /// Include citations when results come from multiple files.
+    #[default]
+    Auto,
+}
+
+/// Embedding provider for memory/RAG features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemoryProvider {
+    /// Built-in local GGUF embeddings.
+    Local,
+    /// Ollama embedding API.
+    Ollama,
+    /// OpenAI embedding API.
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// Generic OpenAI-compatible endpoint.
+    Custom,
+}
+
+/// Strategy for merging keyword and vector search results.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemorySearchMergeStrategy {
+    /// Reciprocal rank fusion.
+    #[default]
+    Rrf,
+    /// Linear blend of raw keyword and vector scores.
+    Linear,
+}
+
+/// Backend implementation for long-term memory search and retrieval.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MemoryBackend {
+    /// Built-in SQLite-backed indexer and retriever.
+    #[default]
+    Builtin,
+    /// External QMD CLI-backed index and search runtime.
+    Qmd,
+}
+
+/// How chat sessions are exported into searchable memory.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionExportMode {
+    /// Do not export session transcripts.
+    Off,
+    /// Export transcripts when the session is rolled with `/new` or `/reset`.
+    #[default]
+    OnNewOrReset,
+}
+
+fn default_session_export_mode() -> SessionExportMode {
+    SessionExportMode::OnNewOrReset
+}
+
+fn deserialize_session_export_mode<'de, D>(deserializer: D) -> Result<SessionExportMode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SessionExportModeRepr {
+        Mode(SessionExportMode),
+        LegacyBool(bool),
+    }
+
+    Ok(match SessionExportModeRepr::deserialize(deserializer)? {
+        SessionExportModeRepr::Mode(mode) => mode,
+        SessionExportModeRepr::LegacyBool(enabled) => {
+            if enabled {
+                SessionExportMode::OnNewOrReset
+            } else {
+                SessionExportMode::Off
+            }
+        },
+    })
 }
 
 /// QMD backend configuration.
@@ -2524,7 +2658,7 @@ fn serialize_option_secret<S: serde::Serializer>(
 
 fn deserialize_option_secret<'de, D>(deserializer: D) -> Result<Option<Secret<String>>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let opt: Option<String> = Option::deserialize(deserializer)?;
     Ok(opt.map(Secret::new))
@@ -2786,9 +2920,105 @@ deny = ["exec"]
     }
 
     #[test]
+    fn memory_config_default_agent_write_mode_is_hybrid() {
+        let cfg = MemoryEmbeddingConfig::default();
+        assert_eq!(cfg.agent_write_mode, AgentMemoryWriteMode::Hybrid);
+    }
+
+    #[test]
+    fn memory_config_default_user_profile_write_mode_is_explicit_and_auto() {
+        let cfg = MemoryEmbeddingConfig::default();
+        assert_eq!(
+            cfg.user_profile_write_mode,
+            UserProfileWriteMode::ExplicitAndAuto
+        );
+    }
+
+    #[test]
+    fn memory_config_default_backend_is_builtin() {
+        let cfg = MemoryEmbeddingConfig::default();
+        assert_eq!(cfg.backend, MemoryBackend::Builtin);
+    }
+
+    #[test]
+    fn memory_config_default_citations_is_auto() {
+        let cfg = MemoryEmbeddingConfig::default();
+        assert_eq!(cfg.citations, MemoryCitationsMode::Auto);
+    }
+
+    #[test]
+    fn memory_config_default_search_merge_strategy_is_rrf() {
+        let cfg = MemoryEmbeddingConfig::default();
+        assert_eq!(cfg.search_merge_strategy, MemorySearchMergeStrategy::Rrf);
+    }
+
+    #[test]
+    fn memory_config_default_session_export_mode_is_on_new_or_reset() {
+        let cfg = MemoryEmbeddingConfig::default();
+        assert_eq!(cfg.session_export, SessionExportMode::OnNewOrReset);
+    }
+
+    #[test]
     fn memory_config_toml_parses_style() {
         let cfg: MemoryEmbeddingConfig = toml::from_str("style = \"search-only\"").unwrap();
         assert_eq!(cfg.style, MemoryStyle::SearchOnly);
+    }
+
+    #[test]
+    fn memory_config_toml_parses_agent_write_mode() {
+        let cfg: MemoryEmbeddingConfig =
+            toml::from_str("agent_write_mode = \"prompt-only\"").unwrap();
+        assert_eq!(cfg.agent_write_mode, AgentMemoryWriteMode::PromptOnly);
+    }
+
+    #[test]
+    fn memory_config_toml_parses_user_profile_write_mode() {
+        let cfg: MemoryEmbeddingConfig =
+            toml::from_str("user_profile_write_mode = \"explicit-only\"").unwrap();
+        assert_eq!(
+            cfg.user_profile_write_mode,
+            UserProfileWriteMode::ExplicitOnly
+        );
+    }
+
+    #[test]
+    fn memory_config_toml_parses_backend() {
+        let cfg: MemoryEmbeddingConfig = toml::from_str("backend = \"qmd\"").unwrap();
+        assert_eq!(cfg.backend, MemoryBackend::Qmd);
+    }
+
+    #[test]
+    fn memory_config_toml_parses_provider() {
+        let cfg: MemoryEmbeddingConfig = toml::from_str("provider = \"openai\"").unwrap();
+        assert_eq!(cfg.provider, Some(MemoryProvider::OpenAi));
+    }
+
+    #[test]
+    fn memory_config_toml_parses_citations() {
+        let cfg: MemoryEmbeddingConfig = toml::from_str("citations = \"on\"").unwrap();
+        assert_eq!(cfg.citations, MemoryCitationsMode::On);
+    }
+
+    #[test]
+    fn memory_config_toml_parses_search_merge_strategy() {
+        let cfg: MemoryEmbeddingConfig =
+            toml::from_str("search_merge_strategy = \"linear\"").unwrap();
+        assert_eq!(cfg.search_merge_strategy, MemorySearchMergeStrategy::Linear);
+    }
+
+    #[test]
+    fn memory_config_toml_parses_session_export_mode() {
+        let cfg: MemoryEmbeddingConfig = toml::from_str("session_export = \"off\"").unwrap();
+        assert_eq!(cfg.session_export, SessionExportMode::Off);
+    }
+
+    #[test]
+    fn memory_config_toml_accepts_legacy_bool_session_export() {
+        let cfg: MemoryEmbeddingConfig = toml::from_str("session_export = false").unwrap();
+        assert_eq!(cfg.session_export, SessionExportMode::Off);
+
+        let cfg: MemoryEmbeddingConfig = toml::from_str("session_export = true").unwrap();
+        assert_eq!(cfg.session_export, SessionExportMode::OnNewOrReset);
     }
 
     #[test]
@@ -3095,7 +3325,7 @@ embedding_api_key = "secret-key"
         )
         .unwrap();
 
-        assert_eq!(config.memory.provider.as_deref(), Some("custom"));
+        assert_eq!(config.memory.provider, Some(MemoryProvider::Custom));
         assert_eq!(
             config.memory.base_url.as_deref(),
             Some("http://moltis-embeddings:7997/v1")

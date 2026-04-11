@@ -418,6 +418,29 @@ pub fn resolve_identity() -> ResolvedIdentity {
     resolve_identity_from_config(&config)
 }
 
+/// Build a fully-resolved user profile by merging `moltis.toml` `[user]` with `USER.md`.
+pub fn resolve_user_profile() -> UserProfile {
+    let config = discover_and_load();
+    resolve_user_profile_from_config(&config)
+}
+
+/// Like [`resolve_user_profile`] but accepts a pre-loaded config.
+pub fn resolve_user_profile_from_config(config: &MoltisConfig) -> UserProfile {
+    let mut user = config.user.clone();
+    if let Some(file_user) = load_user() {
+        if file_user.name.is_some() {
+            user.name = file_user.name;
+        }
+        if file_user.timezone.is_some() {
+            user.timezone = file_user.timezone;
+        }
+        if file_user.location.is_some() {
+            user.location = file_user.location;
+        }
+    }
+    user
+}
+
 /// Like [`resolve_identity`] but accepts a pre-loaded config.
 pub fn resolve_identity_from_config(config: &MoltisConfig) -> ResolvedIdentity {
     let mut id = ResolvedIdentity::from_config(config);
@@ -437,9 +460,7 @@ pub fn resolve_identity_from_config(config: &MoltisConfig) -> ResolvedIdentity {
         }
     }
 
-    if let Some(file_user) = load_user()
-        && let Some(name) = file_user.name
-    {
+    if let Some(name) = resolve_user_profile_from_config(config).name {
         id.user_name = Some(name);
     }
 
@@ -791,6 +812,25 @@ pub fn save_user(user: &UserProfile) -> crate::Result<PathBuf> {
     );
     std::fs::write(&path, content)?;
     Ok(path)
+}
+
+/// Persist `USER.md` according to the configured write mode.
+///
+/// When writes are disabled, any existing `USER.md` file is removed and no new
+/// file is created.
+pub fn save_user_with_mode(
+    user: &UserProfile,
+    mode: crate::schema::UserProfileWriteMode,
+) -> crate::Result<Option<PathBuf>> {
+    if mode.allows_explicit_write() {
+        return save_user(user).map(Some);
+    }
+
+    let path = user_path();
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(None)
 }
 
 pub fn extract_yaml_frontmatter(content: &str) -> Option<&str> {
@@ -1720,6 +1760,71 @@ name = "Rex"
         assert!(path.exists());
 
         save_user(&UserProfile::default()).expect("save empty user");
+        assert!(!path.exists());
+
+        clear_data_dir();
+    }
+
+    #[test]
+    fn resolve_user_profile_prefers_user_md_over_config() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        let config = MoltisConfig {
+            user: UserProfile {
+                name: Some("Config User".to_string()),
+                timezone: Some(crate::schema::Timezone::from(chrono_tz::Europe::Paris)),
+                location: Some(crate::schema::GeoLocation {
+                    latitude: 1.0,
+                    longitude: 2.0,
+                    place: Some("Config Place".to_string()),
+                    updated_at: Some(100),
+                }),
+            },
+            ..Default::default()
+        };
+        save_user(&UserProfile {
+            name: Some("File User".to_string()),
+            timezone: Some(crate::schema::Timezone::from(chrono_tz::US::Eastern)),
+            location: Some(crate::schema::GeoLocation {
+                latitude: 3.0,
+                longitude: 4.0,
+                place: Some("File Place".to_string()),
+                updated_at: Some(200),
+            }),
+        })
+        .expect("save user");
+
+        let resolved = resolve_user_profile_from_config(&config);
+        assert_eq!(resolved.name.as_deref(), Some("File User"));
+        assert_eq!(
+            resolved.timezone.as_ref().map(|tz| tz.name()),
+            Some("US/Eastern")
+        );
+        let location = resolved.location.expect("resolved location");
+        assert_eq!(location.place.as_deref(), Some("File Place"));
+        assert_eq!(location.updated_at, Some(200));
+
+        clear_data_dir();
+    }
+
+    #[test]
+    fn save_user_with_mode_off_removes_existing_file() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        let user = UserProfile {
+            name: Some("Alice".to_string()),
+            ..Default::default()
+        };
+        let path = save_user(&user).expect("seed user");
+        assert!(path.exists());
+
+        let saved_path = save_user_with_mode(&user, crate::schema::UserProfileWriteMode::Off)
+            .expect("disable user profile writes");
+        assert!(saved_path.is_none());
         assert!(!path.exists());
 
         clear_data_dir();

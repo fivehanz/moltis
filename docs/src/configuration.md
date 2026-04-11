@@ -201,18 +201,26 @@ Long-term memory uses embeddings for semantic search:
 ```toml
 [memory]
 style = "hybrid"              # Or "prompt-only", "search-only", "off"
+agent_write_mode = "hybrid"   # Or "prompt-only", "search-only", "off"
+user_profile_write_mode = "explicit-and-auto" # Or "explicit-only", "off"
 backend = "builtin"             # Or "qmd"
 provider = "openai"             # Or "local", "ollama", "custom"
 model = "text-embedding-3-small"
 citations = "auto"              # "on", "off", or "auto"
 llm_reranking = false
-session_export = false
+search_merge_strategy = "rrf"   # Or "linear"
+session_export = "on-new-or-reset" # Or "off"
 ```
 
 See [Memory Surfaces](memory-surfaces.md) for the boundary between
 `session_state`, prompt memory, searchable memory, and sandbox persistence.
 `memory.style` chooses the high-level behavior, while
 `chat.prompt_memory_mode` only affects prompt-visible `MEMORY.md`.
+`memory.agent_write_mode` controls where agent-authored writes are allowed to
+land. `memory.user_profile_write_mode` controls whether Moltis writes the
+managed `USER.md` surface, and whether browser/channel timezone or location
+signals may update it silently. `memory.session_export` controls whether
+session rollover exports are written at all.
 
 ## Authentication
 

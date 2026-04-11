@@ -41,7 +41,7 @@ QMD is an optional external sidecar that provides enhanced search capabilities:
 - **Hybrid search with LLM reranking**: Combines both methods with an LLM pass for optimal relevance
 
 To use QMD:
-1. Install the QMD CLI from [github.com/tobi/qmd](https://github.com/tobi/qmd): `npm install -g --ignore-scripts @tobilu/qmd` or `bun add -g @tobilu/qmd`
+1. Install the QMD CLI from [github.com/tobi/qmd](https://github.com/tobi/qmd): `npm install -g @tobilu/qmd` or `bun install -g @tobilu/qmd`
 2. Verify the binary is on your `PATH`: `qmd --version`
 3. Enable it in Settings > Memory > Backend
 
@@ -67,7 +67,9 @@ Source: memory/notes.md#42
 
 ### Session Export
 
-When enabled, session transcripts are automatically exported to the memory system for cross-run recall. This allows the agent to remember past conversations even after restarts.
+Session transcripts can be exported into searchable memory on `/new` and
+`/reset`. This allows the agent to remember past conversations even after
+restarts.
 
 Exported sessions are:
 - Stored in `memory/sessions/` as markdown files
@@ -92,10 +94,17 @@ Memory settings can be configured in `moltis.toml`:
 # Orchestration style: "hybrid", "prompt-only", "search-only", or "off"
 style = "hybrid"
 
+# Agent-authored write target policy: "hybrid", "prompt-only", "search-only", or "off"
+agent_write_mode = "hybrid"
+
+# Managed USER.md write policy: "explicit-and-auto", "explicit-only", or "off"
+user_profile_write_mode = "explicit-and-auto"
+
 # Backend: "builtin" (default) or "qmd"
 backend = "builtin"
 
-# Embedding provider: "local", "ollama", "openai", "custom", or auto-detect
+# Embedding provider for the built-in backend: "local", "ollama", "openai", "custom", or auto-detect
+# Ignored while backend = "qmd", but preserved for switching back later
 provider = "local"
 
 # Disable RAG embeddings and force keyword-only search
@@ -110,8 +119,11 @@ citations = "auto"
 # Enable LLM reranking for hybrid search
 llm_reranking = false
 
-# Export sessions to memory for cross-run recall
-session_export = true
+# Merge vector and keyword results with "rrf" or "linear"
+search_merge_strategy = "rrf"
+
+# Export sessions to memory for cross-run recall: "on-new-or-reset" or "off"
+session_export = "on-new-or-reset"
 
 # QMD-specific settings (only used when backend = "qmd")
 [memory.qmd]
@@ -124,6 +136,33 @@ timeout_ms = 30000
 `MEMORY.md` is injected and whether memory tools are exposed. Prompt memory
 mode controls whether prompt-visible `MEMORY.md` is live-reloaded or frozen
 per session.
+
+The web settings page exposes both knobs in the Memory section so you can
+experiment without hand-editing `moltis.toml`.
+
+`agent_write_mode` is a separate axis again. It controls where agent-authored
+memory writes may land:
+
+- `hybrid` allows both `MEMORY.md` and `memory/*.md`
+- `prompt-only` allows only `MEMORY.md`
+- `search-only` allows only `memory/*.md`
+- `off` disables agent-authored memory writes, including `memory_save` and the
+  silent pre-compaction memory flush
+
+`user_profile_write_mode` is about the managed `USER.md` surface, not agent
+memory files:
+
+- `explicit-and-auto` mirrors explicit settings saves to `USER.md` and also
+  allows silent browser/channel timezone or location capture
+- `explicit-only` mirrors explicit settings saves to `USER.md`, but disables
+  silent browser/channel capture
+- `off` stops Moltis from writing `USER.md`; the canonical user profile remains
+  in `moltis.toml [user]`
+
+`citations` and `search_merge_strategy` are typed config enums too:
+
+- `citations = "auto" | "on" | "off"`
+- `search_merge_strategy = "rrf" | "linear"`
 
 Or via the web UI: **Settings > Memory**
 
@@ -208,6 +247,10 @@ back with `checkpoint_restore`.
 | `file` | string | `MEMORY.md` | Target file: `MEMORY.md`, `memory.md`, or `memory/<name>.md` |
 | `append` | boolean | `true` | Append to existing file (`true`) or overwrite (`false`) |
 
+If `memory.agent_write_mode = "search-only"` and `file` is omitted,
+`memory_save` defaults to `memory/notes.md`. The write mode can also reject
+targets that are otherwise valid paths.
+
 **Path validation:** The tool enforces a strict allowlist of write targets
 to prevent path traversal attacks. Only these patterns are accepted:
 
@@ -239,6 +282,9 @@ survive compaction.
    internal `write_file` tool backed by the same `MemoryWriter` as
    `memory_save`
 4. The LLM's response text is discarded (the user sees nothing)
+
+This pre-compaction flush obeys `memory.agent_write_mode`. In `off` mode, the
+flush is skipped entirely.
 5. Written files are automatically re-indexed for future search
 
 **What gets saved:**
@@ -306,7 +352,7 @@ systems.
 
 ### QMD not available
 
-1. Install QMD if needed: `npm install -g --ignore-scripts @tobilu/qmd` or `bun add -g @tobilu/qmd`
+1. Install QMD if needed: `npm install -g @tobilu/qmd` or `bun install -g @tobilu/qmd`
 2. Verify QMD is installed: `qmd --version`
 3. Check that the path is correct in settings
-4. Ensure QMD has indexed your collections: `qmd stats`
+4. Ensure QMD can see its index and collections: `qmd status`

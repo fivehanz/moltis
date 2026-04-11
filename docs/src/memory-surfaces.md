@@ -8,6 +8,7 @@ different problems, and confusing them leads to very weird debugging sessions.
 | Surface | Purpose | Lifetime | Scope | Backing store |
 |---------|---------|----------|-------|---------------|
 | `session_state` | Short-term structured state for a session | Until the session is deleted | One session key | SQLite `session_state` table |
+| Managed user profile (`USER.md`) | User name, timezone, and optional location hints | Persistent | Whole workspace | `USER.md` in `data_dir()` plus `[user]` in `moltis.toml` |
 | Prompt memory (`MEMORY.md`) | High-signal facts injected into the system prompt | Persistent | Agent workspace | `MEMORY.md` in `data_dir()` or `agents/<id>/MEMORY.md` |
 | Searchable memory (`memory_search`) | Long-term recall without spending prompt tokens | Persistent | Agent workspace | `MEMORY.md`, `memory/*.md`, optional exported session files |
 | Sandbox workspace mount | Lets sandboxed commands see Moltis files | Only while mounted | Depends on sandbox session/container | Mounted `data_dir()` path |
@@ -38,6 +39,11 @@ Long-term memory lives in Markdown files inside the Moltis data directory.
 - Non-main agent searchable memory:
   `~/.moltis/agents/<agent_id>/memory/*.md`
 
+`USER.md` is not part of agent long-term memory. It is a managed user profile
+surface used for things like name, timezone, and cached location. Moltis also
+stores the canonical user profile in `moltis.toml [user]`, then overlays
+`USER.md` when that file exists.
+
 For `main`, Moltis currently prefers `agents/main/MEMORY.md` if it exists and
 falls back to the root `MEMORY.md`. Non-main agents do not fall back to the
 root file.
@@ -67,6 +73,33 @@ The style and the mode control different things. Style decides whether prompt
 memory exists at all, and whether memory tools are exposed. Mode only matters
 when prompt memory is enabled. Frozen snapshots are stored in `session_state`,
 so they are session-scoped rather than a process-global cache.
+
+`memory.agent_write_mode` is a third axis:
+
+- `hybrid` allows agent-authored writes to both `MEMORY.md` and `memory/*.md`
+- `prompt-only` restricts agent-authored writes to `MEMORY.md`
+- `search-only` restricts agent-authored writes to `memory/*.md`
+- `off` disables agent-authored writes, including `memory_save` and the silent
+  pre-compaction memory flush
+
+`memory.session_export` is separate again:
+
+- `on-new-or-reset` exports session transcripts into `memory/sessions/*.md`
+- `off` disables that export hook entirely
+
+`memory.user_profile_write_mode` is a fourth axis for the managed `USER.md`
+surface:
+
+- `explicit-and-auto` allows settings saves and silent timezone/location capture
+- `explicit-only` allows settings saves, but disables silent timezone/location capture
+- `off` stops Moltis from writing `USER.md`; user profile data stays in
+  `moltis.toml [user]`
+
+`memory.citations` and `memory.search_merge_strategy` are typed retrieval
+knobs:
+
+- `citations`: `auto`, `on`, or `off`
+- `search_merge_strategy`: `rrf` or `linear`
 
 The chat UI exposes the active prompt-memory mode in the toolbar and full
 context view. Frozen sessions can also refresh their snapshot manually without

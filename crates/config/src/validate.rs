@@ -480,6 +480,8 @@ fn build_schema_map() -> KnownKeys {
             "memory",
             Struct(HashMap::from([
                 ("style", Leaf),
+                ("agent_write_mode", Leaf),
+                ("user_profile_write_mode", Leaf),
                 ("backend", Leaf),
                 ("provider", Leaf),
                 ("embedding_provider", Leaf),
@@ -1327,54 +1329,6 @@ fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut Vec<Diagnost
         }
     }
 
-    // Unknown memory backend
-    if let Some(ref backend) = config.memory.backend {
-        let valid_backends = ["builtin", "qmd"];
-        if !valid_backends.contains(&backend.as_str()) {
-            diagnostics.push(Diagnostic {
-                severity: Severity::Warning,
-                category: "unknown-field",
-                path: "memory.backend".into(),
-                message: format!(
-                    "unknown memory backend \"{backend}\"; expected one of: {}",
-                    valid_backends.join(", ")
-                ),
-            });
-        }
-    }
-
-    // Unknown memory provider
-    if let Some(ref provider) = config.memory.provider {
-        let valid_providers = ["local", "ollama", "openai", "custom"];
-        if !valid_providers.contains(&provider.as_str()) {
-            diagnostics.push(Diagnostic {
-                severity: Severity::Warning,
-                category: "unknown-field",
-                path: "memory.provider".into(),
-                message: format!(
-                    "unknown memory provider \"{provider}\"; expected one of: {}",
-                    valid_providers.join(", ")
-                ),
-            });
-        }
-    }
-
-    // Unknown search merge strategy
-    if let Some(ref strategy) = config.memory.search_merge_strategy {
-        let valid_strategies = ["rrf", "linear"];
-        if !valid_strategies.contains(&strategy.to_lowercase().as_str()) {
-            diagnostics.push(Diagnostic {
-                severity: Severity::Warning,
-                category: "unknown-field",
-                path: "memory.search_merge_strategy".into(),
-                message: format!(
-                    "unknown search merge strategy \"{strategy}\"; expected one of: {}",
-                    valid_strategies.join(", ")
-                ),
-            });
-        }
-    }
-
     // Unknown CalDAV provider
     let valid_caldav_providers = ["fastmail", "icloud", "generic"];
     for (name, account) in &config.caldav.accounts {
@@ -1977,36 +1931,54 @@ port = 0
     }
 
     #[test]
-    fn unknown_memory_backend_warned() {
+    fn unknown_memory_backend_is_parse_error() {
         let toml = r#"
 [memory]
 backend = "postgres"
 "#;
         let result = validate_toml_str(toml);
-        let warning = result
-            .diagnostics
-            .iter()
-            .find(|d| d.path == "memory.backend");
         assert!(
-            warning.is_some(),
-            "expected warning for unknown memory backend"
+            result.has_errors(),
+            "expected parse error for unknown memory backend"
         );
     }
 
     #[test]
-    fn unknown_memory_provider_warned() {
+    fn unknown_memory_citations_mode_is_parse_error() {
+        let toml = r#"
+[memory]
+citations = "sometimes"
+"#;
+        let result = validate_toml_str(toml);
+        assert!(
+            result.has_errors(),
+            "expected parse error for unknown memory citations mode"
+        );
+    }
+
+    #[test]
+    fn unknown_memory_search_merge_strategy_is_parse_error() {
+        let toml = r#"
+[memory]
+search_merge_strategy = "blend"
+"#;
+        let result = validate_toml_str(toml);
+        assert!(
+            result.has_errors(),
+            "expected parse error for unknown memory search merge strategy"
+        );
+    }
+
+    #[test]
+    fn unknown_memory_provider_is_parse_error() {
         let toml = r#"
 [memory]
 provider = "pinecone"
 "#;
         let result = validate_toml_str(toml);
-        let warning = result
-            .diagnostics
-            .iter()
-            .find(|d| d.path == "memory.provider");
         assert!(
-            warning.is_some(),
-            "expected warning for unknown memory provider"
+            result.has_errors(),
+            "expected parse error for unknown memory provider"
         );
     }
 
@@ -2041,6 +2013,40 @@ style = "search-only"
         assert!(
             unknown.is_none(),
             "memory.style should be accepted as a known field"
+        );
+    }
+
+    #[test]
+    fn memory_agent_write_mode_is_valid_field() {
+        let toml = r#"
+[memory]
+agent_write_mode = "prompt-only"
+"#;
+        let result = validate_toml_str(toml);
+        let unknown = result
+            .diagnostics
+            .iter()
+            .find(|d| d.category == "unknown-field" && d.path == "memory.agent_write_mode");
+        assert!(
+            unknown.is_none(),
+            "memory.agent_write_mode should be accepted as a known field"
+        );
+    }
+
+    #[test]
+    fn memory_user_profile_write_mode_is_valid_field() {
+        let toml = r#"
+[memory]
+user_profile_write_mode = "explicit-only"
+"#;
+        let result = validate_toml_str(toml);
+        let unknown = result
+            .diagnostics
+            .iter()
+            .find(|d| d.category == "unknown-field" && d.path == "memory.user_profile_write_mode");
+        assert!(
+            unknown.is_none(),
+            "memory.user_profile_write_mode should be accepted as a known field"
         );
     }
 

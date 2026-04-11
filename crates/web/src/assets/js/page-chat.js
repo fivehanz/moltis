@@ -890,9 +890,9 @@ function refreshFullContextMemory(refreshBtn) {
 	refreshBtn.disabled = true;
 	refreshBtn.textContent = "Refreshing…";
 	refreshPromptMemoryToolbarSnapshot().then((promptMemory) => {
-		if (promptMemory) return;
 		refreshBtn.disabled = false;
 		refreshBtn.textContent = "Refresh memory";
+		if (promptMemory) return;
 	});
 }
 
