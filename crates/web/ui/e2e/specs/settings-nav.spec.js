@@ -1137,6 +1137,7 @@ test.describe("Settings navigation", () => {
 			"Identity",
 			"Agents",
 			"Nodes",
+			"Projects",
 			"Environment",
 			"Memory",
 			"Notifications",
