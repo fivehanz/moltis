@@ -165,11 +165,20 @@ impl ToolLoopDetector {
         }
     }
 
-    /// Called by the runner once the post-strip iteration has run. Clears
-    /// the strip-tools stage so subsequent iterations use normal schemas.
+    /// Called by the runner once the post-strip iteration has run. Fully
+    /// resets the detector so the next window starts fresh.
+    ///
+    /// Clearing only the stage but not the ring buffer would leave the deque
+    /// still full of `window` matching failures. A single new identical
+    /// failure after tools are restored would immediately re-fire stage 2
+    /// (`stage: Nudged` + `strip_on_second_fire: true`), oscillating between
+    /// strip-tools and normal turns until `max_iterations` — giving the model
+    /// almost no runway after the first escalation cycle. Treat the forced
+    /// text turn as a hard reset of the detector state.
     pub fn clear_strip_tools(&mut self) {
         if self.stage == InterventionStage::StripTools {
-            self.stage = InterventionStage::Nudged;
+            self.stage = InterventionStage::None;
+            self.recent.clear();
         }
     }
 
@@ -239,11 +248,15 @@ pub fn format_intervention_message(window: &[ToolCallFingerprint]) -> String {
 /// Stage-2 reinforcement message used when the runner strips tool schemas for
 /// the next iteration. Kept short because the model is forced into text mode
 /// regardless.
+///
+/// Returns `String` (not `&'static str`) so callers can treat it uniformly
+/// with [`format_intervention_message`].
 #[must_use]
-pub fn format_strip_tools_message() -> &'static str {
+pub fn format_strip_tools_message() -> String {
     "SYSTEM INTERVENTION — TOOLS DISABLED FOR THIS TURN\n\nYou have been caught in a reflex \
      retry loop. Tools are disabled for this single turn. Respond to the user in plain text: \
      explain what you were trying to do, and ask for clarification if needed."
+        .to_string()
 }
 
 fn hash_value(v: &Value) -> u64 {
@@ -415,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_strip_tools_returns_to_nudged() {
+    fn clear_strip_tools_resets_state_fully() {
         let mut d = ToolLoopDetector::new(3, true);
         for _ in 0..3 {
             let _ = d.record(fp("exec", json!({}), Some("missing")));
@@ -423,6 +436,46 @@ mod tests {
         let _ = d.record(fp("exec", json!({}), Some("missing")));
         assert_eq!(d.stage(), InterventionStage::StripTools);
         d.clear_strip_tools();
+        // A hard reset — not just a stage transition — so the next reflex
+        // failure after tools are restored cannot immediately re-fire
+        // stage 2 with a still-full deque (the oscillation Greptile flagged).
+        assert_eq!(d.stage(), InterventionStage::None);
+        assert!(d.window_snapshot().is_empty());
+    }
+
+    #[test]
+    fn post_strip_single_failure_does_not_immediately_refire() {
+        // Regression: after stage 2 has fired and the runner calls
+        // clear_strip_tools(), a single identical failure must NOT jump
+        // straight back to StripTools. It should take another `window` fresh
+        // failures to fire stage 1 again.
+        let mut d = ToolLoopDetector::new(3, true);
+        // Build up and fire both stages.
+        for _ in 0..3 {
+            let _ = d.record(fp("exec", json!({}), Some("missing")));
+        }
+        assert_eq!(d.stage(), InterventionStage::Nudged);
+        let _ = d.record(fp("exec", json!({}), Some("missing")));
+        assert_eq!(d.stage(), InterventionStage::StripTools);
+
+        // Runner processes the forced-text turn and resets state.
+        d.clear_strip_tools();
+
+        // One fresh failure must not re-escalate.
+        assert_eq!(
+            d.record(fp("exec", json!({}), Some("missing"))),
+            LoopDetectorAction::None
+        );
+        assert_eq!(d.stage(), InterventionStage::None);
+        assert_eq!(
+            d.record(fp("exec", json!({}), Some("missing"))),
+            LoopDetectorAction::None
+        );
+        // Third identical failure since reset → fresh nudge, not StripTools.
+        assert_eq!(
+            d.record(fp("exec", json!({}), Some("missing"))),
+            LoopDetectorAction::InjectNudge
+        );
         assert_eq!(d.stage(), InterventionStage::Nudged);
     }
 

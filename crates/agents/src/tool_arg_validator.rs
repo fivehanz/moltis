@@ -187,7 +187,15 @@ fn type_matches(expected: &str, value: &Value) -> bool {
     match expected {
         "string" => value.is_string(),
         "number" => value.is_number(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        // Some LLMs serialize integers with a trailing decimal (e.g.
+        // `"timeout": 30.0`). Accept integer-valued floats to avoid spurious
+        // rejections that would contribute to loop-detector churn rather than
+        // catching real reflex loops.
+        "integer" => {
+            value.as_i64().is_some()
+                || value.as_u64().is_some()
+                || value.as_f64().is_some_and(|f| f.fract() == 0.0)
+        },
         "boolean" => value.is_boolean(),
         "object" => value.is_object(),
         "array" => value.is_array(),
@@ -361,6 +369,23 @@ mod tests {
         assert!(msg.contains("command"));
         assert!(msg.contains("Do not retry"));
         assert!(msg.contains("respond in plain text"));
+    }
+
+    #[test]
+    fn integer_accepts_integer_valued_floats() {
+        // Some LLMs (e.g. via OpenAI JSON-mode) emit integers with a trailing
+        // decimal point. Schema says "integer" — we must not reject 30.0.
+        let schema = json!({
+            "type": "object",
+            "properties": { "timeout": { "type": "integer" } },
+            "required": ["timeout"]
+        });
+        assert!(validate_tool_args(&schema, &json!({"timeout": 30})).is_ok());
+        assert!(validate_tool_args(&schema, &json!({"timeout": 30.0})).is_ok());
+        // A non-integer float must still be rejected.
+        let err = validate_tool_args(&schema, &json!({"timeout": 30.5})).unwrap_err();
+        assert_eq!(err.type_mismatches.len(), 1);
+        assert_eq!(err.type_mismatches[0].field, "timeout");
     }
 
     #[test]
