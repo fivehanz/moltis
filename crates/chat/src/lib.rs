@@ -13941,14 +13941,20 @@ mod tests {
 
     /// Serializes tests that mutate the global `moltis_config` data_dir
     /// override so they don't race within the chat crate's test binary.
-    /// Uses a Tokio mutex because the guard is held across `.await` points.
-    static SKILLS_TEST_DATA_DIR_LOCK: Mutex<()> = Mutex::const_new(());
+    /// A `Semaphore` with a single permit is used here instead of
+    /// `Mutex<()>` because CLAUDE.md forbids bare `Mutex<()>` — a mutex must
+    /// guard real state. This semaphore is a pure serialization primitive
+    /// for a separately-owned global (`moltis_config`'s data_dir override).
+    static SKILLS_TEST_DATA_DIR_LOCK: Semaphore = Semaphore::const_new(1);
 
     /// Regression test for #655: `[skills] enabled = false` must short-circuit
     /// skill discovery so nothing from the filesystem ends up in the LLM prompt.
     #[tokio::test]
     async fn discover_skills_if_enabled_short_circuits_when_disabled() {
-        let _guard = SKILLS_TEST_DATA_DIR_LOCK.lock().await;
+        let _permit = SKILLS_TEST_DATA_DIR_LOCK
+            .acquire()
+            .await
+            .expect("semaphore closed");
 
         // Point data_dir at a temp dir containing a real SKILL.md so that if
         // the helper *did* fall through to the discoverer, it would return a
@@ -13980,7 +13986,10 @@ mod tests {
     /// `enabled` branch so we don't accidentally hard-code `Vec::new()`.
     #[tokio::test]
     async fn discover_skills_if_enabled_runs_discoverer_when_enabled() {
-        let _guard = SKILLS_TEST_DATA_DIR_LOCK.lock().await;
+        let _permit = SKILLS_TEST_DATA_DIR_LOCK
+            .acquire()
+            .await
+            .expect("semaphore closed");
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let skills_dir = tmp.path().join("skills").join("live-skill");
