@@ -259,6 +259,10 @@ mode = "deterministic"              # "deterministic" | "recency_preserving" | "
                                                          # structured and llm_replace modes. When unset, the
                                                          # session's primary model is used.
 # max_summary_tokens = 4096         # Max output tokens for the summary LLM call (0 = provider default).
+# show_settings_hint = true         # Append "Change chat.compaction.mode in moltis.toml…" to every
+                                    # compaction notice (web UI card + channel messages). Default: true.
+                                    # Set to false once you know the setting exists to hide the repetitive
+                                    # footer without losing the mode + token metadata.
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SPAWN PRESETS (OPTIONAL)

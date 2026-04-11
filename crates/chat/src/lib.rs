@@ -4538,7 +4538,9 @@ impl ChatService for LiveChatService {
         // Broadcast a chat.compact-scoped "done" event so UI consumers see
         // the effective mode and token usage even when compaction is
         // triggered manually via the RPC (the auto-compact path broadcasts
-        // separately around `send()`).
+        // separately around `send()`). The settings hint is included only
+        // when the user hasn't opted out via chat.compaction.show_settings_hint.
+        let show_hint = compaction_config.show_settings_hint;
         let mut compact_payload = serde_json::json!({
             "sessionKey": session_key,
             "state": "compact",
@@ -4547,7 +4549,7 @@ impl ChatService for LiveChatService {
         });
         if let (Some(obj), Some(meta)) = (
             compact_payload.as_object_mut(),
-            outcome.broadcast_metadata().as_object().cloned(),
+            outcome.broadcast_metadata(show_hint).as_object().cloned(),
         ) {
             obj.extend(meta);
         }
@@ -4563,7 +4565,7 @@ impl ChatService for LiveChatService {
         // that has pending reply targets on this session, so channel
         // users see "Conversation compacted (mode, tokens, hint)"
         // alongside the web UI's compact card.
-        notify_channels_of_compaction(&self.state, &session_key, &outcome).await;
+        notify_channels_of_compaction(&self.state, &session_key, &outcome, show_hint).await;
 
         self.session_store
             .replace_history(&session_key, compacted.clone())
@@ -6805,6 +6807,9 @@ async fn run_with_tools(
                     // Merge the compaction metadata (mode, tokens, settings
                     // hint) into the broadcast so the UI can show a toast
                     // like "Compacted via Structured mode (1,234 tokens)".
+                    // Respect chat.compaction.show_settings_hint so the
+                    // hint is omitted when the user has opted out.
+                    let show_hint = persona.config.chat.compaction.show_settings_hint;
                     let mut payload = serde_json::json!({
                         "runId": run_id,
                         "sessionKey": session_key,
@@ -6814,7 +6819,7 @@ async fn run_with_tools(
                     });
                     if let (Some(obj), Some(meta)) = (
                         payload.as_object_mut(),
-                        outcome.broadcast_metadata().as_object().cloned(),
+                        outcome.broadcast_metadata(show_hint).as_object().cloned(),
                     ) {
                         obj.extend(meta);
                     }
@@ -6824,7 +6829,7 @@ async fn run_with_tools(
                     // WhatsApp, etc.) that has pending reply targets on
                     // this session so channel users see the same mode +
                     // token info as the web UI.
-                    notify_channels_of_compaction(state, session_key, &outcome).await;
+                    notify_channels_of_compaction(state, session_key, &outcome, show_hint).await;
 
                     // Reload compacted history and retry.
                     let compacted_history_raw = store.read(session_key).await.unwrap_or_default();
@@ -7780,10 +7785,17 @@ fn format_channel_error_message(error_obj: &Value) -> String {
 /// Format a user-facing notice announcing that a session was compacted.
 ///
 /// Shown verbatim to channel users (Telegram, Discord, WhatsApp, etc.) and
-/// kept short so small mobile clients don't wrap the whole thing. The
-/// settings hint is included so users know where to change the mode;
-/// the LLM retry path never sees this text.
-fn format_channel_compaction_notice(outcome: &compaction_run::CompactionOutcome) -> String {
+/// kept short so small mobile clients don't wrap the whole thing.
+///
+/// When `include_settings_hint` is false, the "Change chat.compaction.mode…"
+/// footer is omitted so users who have set
+/// `chat.compaction.show_settings_hint = false` don't see the repetitive
+/// hint on every compaction. Mode + token lines are always included.
+/// The LLM retry path never sees this text regardless.
+fn format_channel_compaction_notice(
+    outcome: &compaction_run::CompactionOutcome,
+    include_settings_hint: bool,
+) -> String {
     let mode_label = match outcome.effective_mode {
         moltis_config::CompactionMode::Deterministic => "Deterministic",
         moltis_config::CompactionMode::RecencyPreserving => "Recency preserving",
@@ -7801,15 +7813,16 @@ fn format_channel_compaction_notice(outcome: &compaction_run::CompactionOutcome)
             output = outcome.output_tokens,
         )
     };
-    format!(
+    let body = format!(
         "🧹 Conversation compacted\n\
          Mode: {mode_label}\n\
-         {token_line}\n\
-         {hint}",
-        mode_label = mode_label,
-        token_line = token_line,
-        hint = compaction_run::SETTINGS_HINT,
-    )
+         {token_line}",
+    );
+    if include_settings_hint {
+        format!("{body}\n{hint}", hint = compaction_run::SETTINGS_HINT)
+    } else {
+        body
+    }
 }
 
 /// Send a silent "session compacted" notice to pending channel targets
@@ -7824,6 +7837,7 @@ async fn notify_channels_of_compaction(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     outcome: &compaction_run::CompactionOutcome,
+    include_settings_hint: bool,
 ) {
     let targets = state.peek_channel_replies(session_key).await;
     if targets.is_empty() {
@@ -7834,7 +7848,7 @@ async fn notify_channels_of_compaction(
         return;
     };
 
-    let message = format_channel_compaction_notice(outcome);
+    let message = format_channel_compaction_notice(outcome, include_settings_hint);
     let mut tasks = Vec::with_capacity(targets.len());
     for target in targets {
         let outbound = Arc::clone(&outbound);
@@ -10433,7 +10447,7 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
         };
-        let msg = format_channel_compaction_notice(&outcome);
+        let msg = format_channel_compaction_notice(&outcome, true);
         assert!(msg.contains("🧹 Conversation compacted"));
         assert!(msg.contains("Mode: Deterministic"));
         assert!(msg.contains("No LLM tokens used"));
@@ -10448,7 +10462,7 @@ mod tests {
             input_tokens: 1_234,
             output_tokens: 567,
         };
-        let msg = format_channel_compaction_notice(&outcome);
+        let msg = format_channel_compaction_notice(&outcome, true);
         assert!(msg.contains("Mode: Structured"));
         assert!(
             msg.contains("Used 1801 tokens (1234 in + 567 out)"),
@@ -10467,9 +10481,39 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
         };
-        let msg = format_channel_compaction_notice(&outcome);
+        let msg = format_channel_compaction_notice(&outcome, true);
         assert!(msg.contains("Mode: Recency preserving"));
         assert!(msg.contains("No LLM tokens used"));
+    }
+
+    #[test]
+    fn format_channel_compaction_notice_omits_settings_hint_when_disabled() {
+        // Users who have set `chat.compaction.show_settings_hint = false`
+        // should still see the mode and token info but not the repetitive
+        // "Change chat.compaction.mode in moltis.toml…" footer.
+        let outcome = compaction_run::CompactionOutcome {
+            history: vec![],
+            effective_mode: moltis_config::CompactionMode::Structured,
+            input_tokens: 1_000,
+            output_tokens: 500,
+        };
+        let msg = format_channel_compaction_notice(&outcome, false);
+        assert!(
+            msg.contains("Mode: Structured"),
+            "mode still present: {msg}"
+        );
+        assert!(
+            msg.contains("Used 1500 tokens"),
+            "token line still present: {msg}"
+        );
+        assert!(
+            !msg.contains("chat.compaction.mode"),
+            "settings hint must be stripped, got: {msg}"
+        );
+        assert!(
+            !msg.contains("docs.moltis.org"),
+            "docs URL must be stripped too, got: {msg}"
+        );
     }
 
     #[test]

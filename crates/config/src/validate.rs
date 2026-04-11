@@ -407,6 +407,7 @@ fn build_schema_map() -> KnownKeys {
                         ("tool_prune_char_threshold", Leaf),
                         ("summary_model", Leaf),
                         ("max_summary_tokens", Leaf),
+                        ("show_settings_hint", Leaf),
                     ])),
                 ),
             ])),

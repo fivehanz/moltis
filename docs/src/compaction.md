@@ -169,7 +169,26 @@ tail_budget_ratio = 0.20            # Tail size as fraction of threshold_percent
 tool_prune_char_threshold = 200     # Middle tool results longer than this get placeholder-replaced.
 summary_model = "openrouter/google/gemini-2.5-flash"   # Optional cheap summary model for LLM modes.
 max_summary_tokens = 4096           # Max output tokens for LLM summary.
+show_settings_hint = true           # Show "Change chat.compaction.mode in moltis.toml…" footer.
 ```
+
+### Hiding the settings hint
+
+By default, every compaction notice (web UI compact card and channel
+messages) includes a short footer pointing at the config key:
+
+> *Change `chat.compaction.mode` in `moltis.toml` (or the web UI settings
+> panel) to pick a different compaction strategy.*
+
+Once you know the setting exists, this becomes noise. Set:
+
+```toml
+[chat.compaction]
+show_settings_hint = false
+```
+
+The mode and token counts still ship with every compaction notice — only
+the footer is stripped.
 
 All fields are optional. When a field is omitted the default shown above is
 used. `deterministic` mode ignores every field except `mode` and

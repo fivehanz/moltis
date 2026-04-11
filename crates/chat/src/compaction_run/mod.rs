@@ -111,17 +111,26 @@ impl CompactionOutcome {
     /// Build a JSON metadata fragment suitable for splicing into a
     /// broadcast event payload alongside `state` / `phase`.
     ///
-    /// Includes the settings hint so UI consumers don't have to know
-    /// the wording themselves.
+    /// When `include_settings_hint` is true, the [`SETTINGS_HINT`]
+    /// text is added under `settingsHint` so UI consumers don't have to
+    /// know the wording themselves. Callers pass
+    /// `config.show_settings_hint` here to honour the user's preference
+    /// for hiding the repetitive footer.
     #[must_use]
-    pub(crate) fn broadcast_metadata(&self) -> Value {
-        serde_json::json!({
+    pub(crate) fn broadcast_metadata(&self, include_settings_hint: bool) -> Value {
+        let mut fragment = serde_json::json!({
             "mode": compaction_mode_key(self.effective_mode),
             "compactionInputTokens": self.input_tokens,
             "compactionOutputTokens": self.output_tokens,
             "compactionTotalTokens": self.total_tokens(),
-            "settingsHint": SETTINGS_HINT,
-        })
+        });
+        if include_settings_hint && let Some(obj) = fragment.as_object_mut() {
+            obj.insert(
+                "settingsHint".to_string(),
+                Value::String(SETTINGS_HINT.to_string()),
+            );
+        }
+        fragment
     }
 }
 
@@ -302,7 +311,7 @@ mod tests {
             input_tokens: 1_234,
             output_tokens: 567,
         };
-        let meta = outcome.broadcast_metadata();
+        let meta = outcome.broadcast_metadata(true);
         assert_eq!(meta["mode"], "structured");
         assert_eq!(meta["compactionInputTokens"], 1_234);
         assert_eq!(meta["compactionOutputTokens"], 567);
@@ -312,6 +321,23 @@ mod tests {
                 .as_str()
                 .expect("settingsHint is string")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn broadcast_metadata_omits_settings_hint_when_disabled() {
+        let outcome = CompactionOutcome {
+            history: vec![json!({"role": "user", "content": "ok"})],
+            effective_mode: CompactionMode::Deterministic,
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        let meta = outcome.broadcast_metadata(false);
+        assert_eq!(meta["mode"], "deterministic");
+        assert_eq!(meta["compactionTotalTokens"], 0);
+        assert!(
+            meta.get("settingsHint").is_none(),
+            "settingsHint must be absent when include_settings_hint=false, got: {meta}"
         );
     }
 

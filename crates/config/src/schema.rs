@@ -1664,6 +1664,15 @@ pub struct CompactionConfig {
     /// to accept the provider default. Default: `4096`.
     #[serde(default = "default_compaction_max_summary_tokens")]
     pub max_summary_tokens: u32,
+
+    /// Whether the "Change `chat.compaction.mode` in moltis.toml…" hint
+    /// is included in compaction broadcasts and channel notices. After
+    /// you've seen it a few times it tends to become noise; set this to
+    /// `false` to strip the hint from future compaction notifications
+    /// without disabling the rest of the metadata (mode + token counts
+    /// still ship). Default: `true`.
+    #[serde(default = "default_compaction_show_settings_hint")]
+    pub show_settings_hint: bool,
 }
 
 fn default_compaction_threshold() -> f32 {
@@ -1690,6 +1699,10 @@ fn default_compaction_max_summary_tokens() -> u32 {
     4_096
 }
 
+fn default_compaction_show_settings_hint() -> bool {
+    true
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
@@ -1701,6 +1714,7 @@ impl Default for CompactionConfig {
             tool_prune_char_threshold: default_compaction_tool_prune_chars(),
             summary_model: None,
             max_summary_tokens: default_compaction_max_summary_tokens(),
+            show_settings_hint: default_compaction_show_settings_hint(),
         }
     }
 }
