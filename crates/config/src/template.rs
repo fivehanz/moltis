@@ -284,6 +284,12 @@ checkpoint_before_mutation = false  # When true, Write/Edit/MultiEdit call the
                                   # restore it later via `checkpoint_restore`. Default
                                   # off because checkpoints grow with activity and
                                   # size scales with file size.
+# context_window_tokens = 200000    # Model context window in tokens. When set, Read's
+                                  # per-call byte cap scales adaptively so a single
+                                  # Read uses at most ~20% of the model's working set
+                                  # (clamped to [50 KB, 512 KB]). Unset → fixed 256 KB.
+                                  # Typical values: 200000 for Claude Sonnet, 1000000
+                                  # for Claude Opus 4.6 1M, 128000 for GPT-4 Turbo.
 
 # ── Command Execution ─────────────────────────────────────────────────────────
 

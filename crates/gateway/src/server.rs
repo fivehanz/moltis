@@ -3617,6 +3617,7 @@ pub async fn prepare_gateway_core(
                 respect_gitignore: fs_cfg.respect_gitignore,
                 checkpoint_manager,
                 sandbox_router: Some(Arc::clone(&sandbox_router)),
+                context_window_tokens: fs_cfg.context_window_tokens,
             };
             moltis_tools::fs::register_fs_tools(&mut tool_registry, ctx);
         }

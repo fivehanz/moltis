@@ -129,14 +129,58 @@ pub const DEFAULT_READ_LINE_LIMIT: usize = 2000;
 /// shape of response.
 pub const MAX_LINE_CHARS: usize = 2000;
 
-/// Maximum total bytes of rendered output returned by a single `Read`.
+/// Maximum total bytes of rendered output returned by a single `Read`
+/// when no adaptive context window is configured.
 ///
-/// Caps payload size independently of line count: 2000 lines × 2000 chars
-/// would otherwise permit ~4 MB per call, which can blow tool-response
-/// limits on smaller-context models. When the rendered output exceeds
-/// this cap, `format_numbered_lines` truncates at the last full line that
-/// fits and sets `truncated=true`.
+/// Caps payload size independently of line count: 2000 lines × 2000
+/// chars would otherwise permit ~4 MB per call, which can blow tool-
+/// response limits on smaller-context models. When the rendered output
+/// exceeds this cap, [`format_numbered_lines`] truncates at the last
+/// full line that fits and sets `truncated=true`.
 pub const MAX_READ_OUTPUT_BYTES: usize = 256 * 1024;
+
+/// Minimum floor for the adaptive read cap. Even a tiny context window
+/// gets at least this many bytes per Read so small reads remain useful.
+/// Ported from openclaw's `DEFAULT_READ_PAGE_MAX_BYTES`.
+pub const MIN_ADAPTIVE_READ_BYTES: usize = 50 * 1024;
+
+/// Hard ceiling on the adaptive read cap. A huge context window (1M+
+/// tokens) would otherwise request hundreds of KB per call and blow
+/// tool-response payload limits. Ported from openclaw's
+/// `MAX_ADAPTIVE_READ_MAX_BYTES`.
+pub const MAX_ADAPTIVE_READ_BYTES: usize = 512 * 1024;
+
+/// Rough tokens-to-characters conversion for adaptive cap computation.
+/// English text averages ~4 characters per token for Claude/GPT
+/// tokenizers; code is closer to 3 so we err slightly under.
+pub const CHARS_PER_TOKEN_ESTIMATE: u64 = 4;
+
+/// Share of the model's context window a single `Read` call is
+/// allowed to consume. 20% leaves the LLM plenty of room to think.
+pub const ADAPTIVE_READ_CONTEXT_SHARE_PERCENT: u64 = 20;
+
+/// Compute the adaptive per-call read cap in bytes, given the model's
+/// context window in tokens. Clamped to
+/// `[MIN_ADAPTIVE_READ_BYTES, MAX_ADAPTIVE_READ_BYTES]`.
+///
+/// ```text
+/// cap = clamp(
+///     ctx_tokens * CHARS_PER_TOKEN_ESTIMATE * SHARE_PERCENT / 100,
+///     MIN_ADAPTIVE_READ_BYTES,
+///     MAX_ADAPTIVE_READ_BYTES,
+/// )
+/// ```
+#[must_use]
+pub fn compute_adaptive_read_cap(context_window_tokens: u64) -> usize {
+    let raw = context_window_tokens
+        .saturating_mul(CHARS_PER_TOKEN_ESTIMATE)
+        .saturating_mul(ADAPTIVE_READ_CONTEXT_SHARE_PERCENT)
+        / 100;
+    let clamped = raw
+        .max(MIN_ADAPTIVE_READ_BYTES as u64)
+        .min(MAX_ADAPTIVE_READ_BYTES as u64);
+    clamped as usize
+}
 
 /// Number of bytes to inspect when heuristically detecting binary content.
 const BINARY_SNIFF_BYTES: usize = 8192;
@@ -491,13 +535,28 @@ pub fn looks_binary(bytes: &[u8]) -> bool {
     bytes[..limit].contains(&0)
 }
 
-/// Render file contents with `cat -n` style 1-indexed line numbers.
-///
-/// The line-number column is right-padded to the width of the last visible
-/// line number so columns align. Lines longer than [`MAX_LINE_CHARS`] are
-/// truncated with a `…` marker appended.
+/// Render file contents with `cat -n` style 1-indexed line numbers,
+/// using the default byte cap.
 #[must_use]
 pub fn format_numbered_lines(content: &str, start_line: usize, max_lines: usize) -> NumberedLines {
+    format_numbered_lines_with_cap(content, start_line, max_lines, MAX_READ_OUTPUT_BYTES)
+}
+
+/// Render file contents with `cat -n` style 1-indexed line numbers
+/// and a configurable byte cap.
+///
+/// The line-number column is right-padded to the width of the last
+/// visible line number so columns align. Lines longer than
+/// [`MAX_LINE_CHARS`] are truncated with a `…` marker appended.
+/// When `max_output_bytes` is hit, truncation happens at the last
+/// full line that fits and `truncated=true` is set.
+#[must_use]
+pub fn format_numbered_lines_with_cap(
+    content: &str,
+    start_line: usize,
+    max_lines: usize,
+    max_output_bytes: usize,
+) -> NumberedLines {
     // Split on '\n' so that a trailing newline does not create an extra empty
     // line in the output (common cat -n behavior).
     let mut lines: Vec<&str> = content.split('\n').collect();
@@ -538,7 +597,7 @@ pub fn format_numbered_lines(content: &str, start_line: usize, max_lines: usize)
             next.push('…');
         }
         next.push('\n');
-        if out.len().saturating_add(next.len()) > MAX_READ_OUTPUT_BYTES {
+        if out.len().saturating_add(next.len()) > max_output_bytes {
             byte_capped = true;
             break;
         }
@@ -591,6 +650,51 @@ fn decimal_width(n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use {super::*, std::io::Write};
+
+    #[test]
+    fn adaptive_read_cap_small_context_clamps_to_min() {
+        // 8K tokens × 4 chars × 0.2 = 6400 bytes; below the 50 KB min.
+        let cap = compute_adaptive_read_cap(8_000);
+        assert_eq!(cap, MIN_ADAPTIVE_READ_BYTES);
+    }
+
+    #[test]
+    fn adaptive_read_cap_medium_context_scales_linearly() {
+        // 200K tokens × 4 chars × 0.2 = 160_000 bytes. Between min (50 KB)
+        // and max (512 KB), so unclamped.
+        let cap = compute_adaptive_read_cap(200_000);
+        assert_eq!(cap, 160_000);
+    }
+
+    #[test]
+    fn adaptive_read_cap_huge_context_clamps_to_max() {
+        // 1M tokens × 4 chars × 0.2 = 800_000 bytes; above the 512 KB max.
+        let cap = compute_adaptive_read_cap(1_000_000);
+        assert_eq!(cap, MAX_ADAPTIVE_READ_BYTES);
+    }
+
+    #[test]
+    fn adaptive_read_cap_zero_context_returns_min() {
+        let cap = compute_adaptive_read_cap(0);
+        assert_eq!(cap, MIN_ADAPTIVE_READ_BYTES);
+    }
+
+    #[test]
+    fn format_numbered_lines_with_cap_respects_custom_ceiling() {
+        // Render enough lines to blow a 5 KB cap but fit the default.
+        let line = "x".repeat(100);
+        let content: String = std::iter::repeat_n(line.as_str(), 200)
+            .collect::<Vec<&str>>()
+            .join("\n");
+
+        let tight = format_numbered_lines_with_cap(&content, 1, 10_000, 5 * 1024);
+        assert!(tight.truncated);
+        assert!(tight.text.len() <= 5 * 1024);
+
+        let loose = format_numbered_lines_with_cap(&content, 1, 10_000, 10 * 1024 * 1024);
+        assert!(!loose.truncated);
+        assert_eq!(loose.rendered_lines, 200);
+    }
 
     #[test]
     fn fs_state_records_read_and_tracks_consecutive_reads() {

@@ -283,6 +283,7 @@ fn build_schema_map() -> KnownKeys {
                     ("binary_policy", Leaf),
                     ("respect_gitignore", Leaf),
                     ("checkpoint_before_mutation", Leaf),
+                    ("context_window_tokens", Leaf),
                 ])),
             ),
             ("agent_timeout_secs", Leaf),

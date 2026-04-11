@@ -62,6 +62,10 @@ pub struct FsToolsContext {
     /// the [`sandbox_bridge`] for sessions the router marks as
     /// sandboxed; unsandboxed sessions still run on the host.
     pub sandbox_router: Option<Arc<SandboxRouter>>,
+    /// Model context window in tokens. When set, enables `Read`'s
+    /// adaptive byte cap so per-call output scales with the working
+    /// set instead of using a fixed 256 KB ceiling.
+    pub context_window_tokens: Option<u64>,
 }
 
 impl Default for FsToolsContext {
@@ -76,6 +80,7 @@ impl Default for FsToolsContext {
             respect_gitignore: true,
             checkpoint_manager: None,
             sandbox_router: None,
+            context_window_tokens: None,
         }
     }
 }
@@ -101,9 +106,13 @@ pub fn register_fs_tools(registry: &mut ToolRegistry, context: FsToolsContext) {
         respect_gitignore,
         checkpoint_manager,
         sandbox_router,
+        context_window_tokens,
     } = context;
 
     let mut read = ReadTool::new().with_binary_policy(binary_policy);
+    if let Some(tokens) = context_window_tokens {
+        read = read.with_context_window_tokens(tokens);
+    }
     if let Some(ref s) = fs_state {
         read = read.with_fs_state(s.clone());
     }
@@ -700,6 +709,42 @@ mod contract_tests {
             mock.last_command().is_none(),
             "mock sandbox should not be called for non-sandboxed sessions"
         );
+    }
+
+    #[tokio::test]
+    async fn adaptive_read_cap_shrinks_output_for_small_context_window() {
+        // Build a file with enough lines to blow any small adaptive cap.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("big.txt");
+        let line = "x".repeat(100);
+        let content: String = std::iter::repeat_n(line.as_str(), 2000)
+            .collect::<Vec<&str>>()
+            .join("\n");
+        tokio::fs::write(&target, &content).await.unwrap();
+
+        // Tight context window: 8K tokens → clamps to MIN_ADAPTIVE_READ_BYTES (50 KB).
+        let mut registry = ToolRegistry::new();
+        register_fs_tools(&mut registry, FsToolsContext {
+            context_window_tokens: Some(8_000),
+            ..FsToolsContext::default()
+        });
+
+        let read = registry.get("Read").unwrap();
+        let value = read
+            .execute(json!({ "file_path": target.to_str().unwrap() }))
+            .await
+            .unwrap();
+
+        assert_eq!(value["kind"], "text");
+        assert_eq!(value["truncated"], true);
+        let content_str = value["content"].as_str().unwrap();
+        assert!(
+            content_str.len() <= 50 * 1024,
+            "output {} exceeded 50 KB floor",
+            content_str.len()
+        );
+        // Must render *some* lines — small cap should still be usable.
+        assert!(value["rendered_lines"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]

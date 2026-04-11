@@ -1657,6 +1657,16 @@ pub struct FsToolsConfig {
     /// growth on repos with large files.
     #[serde(default)]
     pub checkpoint_before_mutation: bool,
+
+    /// Model context window in tokens. When set, `Read`'s per-call
+    /// byte cap scales adaptively so a single Read call can't consume
+    /// more than ~20% of the model's working set. Clamped to
+    /// `[50 KB, 512 KB]`. When unset, Read uses a fixed 256 KB cap.
+    ///
+    /// Typical values: 200000 for Claude 3.5/4 Sonnet, 1000000 for
+    /// Claude Opus 4.6 1M context, 128000 for GPT-4 Turbo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
 }
 
 impl Default for FsToolsConfig {
@@ -1671,6 +1681,7 @@ impl Default for FsToolsConfig {
             binary_policy: FsBinaryPolicy::default(),
             respect_gitignore: default_fs_respect_gitignore(),
             checkpoint_before_mutation: false,
+            context_window_tokens: None,
         }
     }
 }

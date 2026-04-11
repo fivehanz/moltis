@@ -24,7 +24,8 @@ use crate::{
         sandbox_bridge::{SandboxReadResult, ensure_sandbox, sandbox_read},
         shared::{
             BinaryPolicy, DEFAULT_MAX_READ_BYTES, DEFAULT_READ_LINE_LIMIT, FsErrorKind,
-            FsPathPolicy, FsState, READ_LOOP_THRESHOLD, enforce_path_policy, format_numbered_lines,
+            FsPathPolicy, FsState, MAX_READ_OUTPUT_BYTES, READ_LOOP_THRESHOLD,
+            compute_adaptive_read_cap, enforce_path_policy, format_numbered_lines_with_cap,
             fs_error_payload, io_error_to_typed_payload, looks_binary, require_absolute,
             session_key_from,
         },
@@ -39,6 +40,10 @@ pub struct ReadTool {
     path_policy: Option<FsPathPolicy>,
     binary_policy: BinaryPolicy,
     sandbox_router: Option<Arc<SandboxRouter>>,
+    /// Optional context window in tokens. When set, Read's byte cap
+    /// scales adaptively with the model's working set
+    /// (`ctx * 4 chars * 0.2`, clamped to `[50 KB, 512 KB]`).
+    context_window_tokens: Option<u64>,
 }
 
 impl ReadTool {
@@ -77,6 +82,15 @@ impl ReadTool {
     #[must_use]
     pub fn with_sandbox_router(mut self, router: Arc<SandboxRouter>) -> Self {
         self.sandbox_router = Some(router);
+        self
+    }
+
+    /// Configure the model context window in tokens. Enables the
+    /// adaptive byte cap so per-Read payloads scale with the model's
+    /// working set instead of using a fixed ceiling.
+    #[must_use]
+    pub fn with_context_window_tokens(mut self, tokens: u64) -> Self {
+        self.context_window_tokens = Some(tokens);
         self
     }
 
@@ -228,7 +242,15 @@ impl ReadTool {
             String::from_utf8_lossy(&bytes).into_owned()
         });
 
-        let rendered = format_numbered_lines(&text, offset, limit);
+        // Adaptive byte cap: when the operator has told us the model's
+        // context window, scale per-call output so Read can't consume
+        // more than ~20% of the model's working set. Otherwise fall
+        // back to the fixed default.
+        let byte_cap = self
+            .context_window_tokens
+            .map(compute_adaptive_read_cap)
+            .unwrap_or(MAX_READ_OUTPUT_BYTES);
+        let rendered = format_numbered_lines_with_cap(&text, offset, limit, byte_cap);
 
         #[cfg(feature = "metrics")]
         counter!(
