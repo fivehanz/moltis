@@ -269,10 +269,11 @@ impl ApprovalManager {
     /// Decide whether a command needs approval.
     /// Returns Ok(()) if the command can proceed, Err if denied.
     pub async fn check_command(&self, command: &str) -> Result<ApprovalAction> {
-        // Safety floor: dangerous patterns force approval regardless of mode.
-        // In Off mode there is no human approver to gate on, so denying is the
-        // only safe outcome — otherwise the agent would hang on `NeedsApproval`
-        // forever in headless deployments (moltis-org/moltis#654 follow-up).
+        // Safety floor: dangerous patterns are blocked unless explicitly
+        // allowlisted. In OnMiss/Always mode we escalate to NeedsApproval so a
+        // human can gate. In Off mode there is no human approver to wait on,
+        // so the only safe outcome is to deny — otherwise the agent would hang
+        // on `NeedsApproval` forever in headless deployments (moltis-org/moltis#654).
         if let Some(desc) = check_dangerous(command) {
             if !matches_allowlist(command, &self.allowlist) {
                 if self.mode == ApprovalMode::Off {
@@ -311,7 +312,19 @@ impl ApprovalManager {
                 if self.allowlist.is_empty() {
                     return Ok(ApprovalAction::Proceed);
                 }
-                if is_safe_command(command) || matches_allowlist(command, &self.allowlist) {
+                if matches_allowlist(command, &self.allowlist) {
+                    return Ok(ApprovalAction::Proceed);
+                }
+                if is_safe_command(command) {
+                    // Safe bins bypass the explicit allowlist so operators don't
+                    // have to enumerate common read-only utilities. Emit a warn
+                    // so strict-posture operators can detect the gap at runtime
+                    // (they can `grep safe-bin` their logs to audit, or file a
+                    // follow-up for an opt-in strict mode that gates safe bins).
+                    warn!(
+                        command,
+                        "exec safe-bin bypassed non-empty allowlist in approval_mode=off",
+                    );
                     return Ok(ApprovalAction::Proceed);
                 }
                 Err(Error::message(format!(
