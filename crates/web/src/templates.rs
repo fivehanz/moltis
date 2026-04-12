@@ -844,12 +844,16 @@ mod tests {
             "should produce a full HTML document"
         );
         assert!(
-            html.contains("Authentication Not Configured"),
-            "should contain the setup-required heading"
+            html.contains("First-time setup"),
+            "should contain the new setup heading"
         );
         assert!(
-            html.contains("moltis auth reset-password"),
-            "should contain the CLI reset command"
+            html.contains("setup code"),
+            "should mention the one-time setup code"
+        );
+        assert!(
+            html.contains("href=\"/onboarding\""),
+            "should link to the onboarding wizard"
         );
         assert!(
             html.contains("/assets/v/test123/"),

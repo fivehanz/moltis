@@ -122,6 +122,7 @@ file-watcher = [
 firecrawl = ["moltis-tools/firecrawl"]
 graphql = []
 local-embeddings = ["moltis-memory/local-embeddings"]
+llm-compaction = ["moltis-chat/llm-compaction"]
 local-llm = [
   "moltis-chat/local-llm",
   "moltis-provider-setup/local-llm",

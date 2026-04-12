@@ -560,6 +560,7 @@ pub(crate) async fn handle_inbound(
             channel_type: ChannelType::Slack,
             sender_name: None,
             username,
+            sender_id: Some(user_id.to_string()),
             message_kind: Some(ChannelMessageKind::Text),
             model: config.resolve_model(channel_id, user_id).map(String::from),
             audio_filename: None,

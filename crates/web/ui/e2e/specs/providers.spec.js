@@ -26,7 +26,7 @@ async function openApiKeyProviderForm(page) {
 	const items = apiKeyProviderItems(page);
 	if ((await items.count()) === 0) return false;
 	await items.first().click();
-	await expect(page.getByRole("button", { name: "Save & Validate", exact: true })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Save", exact: true })).toBeVisible();
 	return true;
 }
 
@@ -35,7 +35,7 @@ async function openRequiredApiKeyProviderForm(page) {
 	const count = await items.count();
 	for (let index = 0; index < count; index++) {
 		await items.nth(index).click();
-		const saveButton = page.getByRole("button", { name: "Save & Validate", exact: true });
+		const saveButton = page.getByRole("button", { name: "Save", exact: true });
 		if (!(await saveButton.isVisible().catch(() => false))) {
 			await page.getByRole("button", { name: "Back", exact: true }).click();
 			continue;
@@ -117,7 +117,7 @@ test.describe("Provider setup page", () => {
 		await openProviderPicker(page);
 
 		if (await openRequiredApiKeyProviderForm(page)) {
-			await page.getByRole("button", { name: "Save & Validate", exact: true }).click();
+			await page.getByRole("button", { name: "Save", exact: true }).click();
 
 			const errorPanel = page.locator("#providerModal .alert-error-text");
 			await expect(errorPanel).toBeVisible();

@@ -351,6 +351,20 @@ body {
     justify-content: space-between;
   }
 
+  .chat-toolbar #promptMemoryToolbar {
+    min-width: 0;
+  }
+
+  .chat-toolbar #promptMemoryStatusBtn,
+  .chat-toolbar #promptMemoryRefreshBtn {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .chat-toolbar #promptMemoryStatusLabel {
+    display: none;
+  }
+
   .chat-input-row {
     padding-left: calc(6px + var(--safe-left)) !important;
     padding-right: calc(6px + var(--safe-right)) !important;

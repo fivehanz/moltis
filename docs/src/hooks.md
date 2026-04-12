@@ -42,8 +42,16 @@ These events run hooks sequentially. Hooks can modify the payload or block the a
 | `AfterLLMCall` | After LLM response, before tool execution | yes | yes |
 | `BeforeToolCall` | Before a tool executes | yes | yes |
 | `BeforeCompaction` | Before context compaction | yes | yes |
+| `MessageReceived` | When an inbound channel/UI message arrives | yes | yes |
 | `MessageSending` | Before sending a response | yes | yes |
 | `ToolResultPersist` | When a tool result is persisted | yes | yes |
+
+For `MessageReceived`, `Block(reason)` aborts the turn — the user message is
+not persisted, no run starts, and the reason is delivered back to the sender
+via the originating channel (or broadcast as a `chat` rejection event for web
+clients). `ModifyPayload` must return an object of shape `{"content": "..."}`;
+the `content` string replaces the inbound text before it reaches the model or
+the session store.
 
 ### Read-Only Events (Parallel)
 
@@ -54,7 +62,6 @@ These events run hooks in parallel for performance. They cannot modify or block.
 | `AfterToolCall` | After a tool completes |
 | `AfterCompaction` | After context is compacted |
 | `AgentEnd` | When agent loop completes |
-| `MessageReceived` | When a user message arrives |
 | `MessageSent` | After response is delivered |
 | `SessionStart` | When a new session begins |
 | `SessionEnd` | When a session ends |
@@ -102,6 +109,43 @@ Fires after the LLM response is received but before tool calls execute. For stre
 | `input_tokens` | number | Tokens consumed by the prompt |
 | `output_tokens` | number | Tokens in the response |
 | `iteration` | number | 1-based loop iteration |
+
+## Channel Provenance
+
+`BeforeToolCall`, `AfterToolCall`, `SessionStart`, and `MessageReceived` currently include channel provenance. The fields are optional so hooks keep working for sessions that do not originate from a channel integration.
+
+`MessageReceived` keeps its legacy `channel` string field and adds the richer object as `channel_binding`. `BeforeToolCall`, `AfterToolCall`, and `SessionStart` expose the same richer object as `channel`. `ToolResultPersist` has a schema field reserved for the same shape, but that event is not currently dispatched.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `surface` | string/null | Runtime surface, for example `telegram`, `discord`, `web`, `cron`, `heartbeat` |
+| `session_kind` | string/null | High-level source kind, usually `channel`, `web`, or `cron` |
+| `channel_type` | string/null | Channel plugin type when channel-bound |
+| `account_id` | string/null | Channel account identifier |
+| `chat_id` | string/null | Channel chat, room, or peer identifier |
+| `chat_type` | string/null | Best-effort chat classification, currently most useful for Telegram |
+| `sender_id` | string/null | Reserved for future sender provenance, currently omitted |
+
+Example `BeforeToolCall` payload excerpt:
+
+```json
+{
+  "event": "BeforeToolCall",
+  "session_key": "telegram:bot-main:-100123",
+  "tool_name": "exec",
+  "arguments": {
+    "command": "pwd"
+  },
+  "channel": {
+    "surface": "telegram",
+    "session_kind": "channel",
+    "channel_type": "telegram",
+    "account_id": "bot-main",
+    "chat_id": "-100123",
+    "chat_type": "channel_or_supergroup"
+  }
+}
+```
 
 ### Example: Block Suspicious Tool Calls
 
@@ -220,16 +264,26 @@ The event payload is passed as JSON on stdin:
 ```json
 {
   "event": "BeforeToolCall",
-  "data": {
-    "tool": "bash",
-    "arguments": {
-      "command": "ls -la"
-    }
+  "session_key": "abc123",
+  "tool_name": "exec",
+  "arguments": {
+    "command": "ls -la"
   },
-  "session_id": "abc123",
-  "timestamp": "2024-01-15T10:30:00Z"
+  "channel": {
+    "surface": "telegram",
+    "session_kind": "channel",
+    "channel_type": "telegram",
+    "account_id": "bot-main",
+    "chat_id": "-100123",
+    "chat_type": "channel_or_supergroup"
+  }
 }
 ```
+
+For modifying events, stdin is the full tagged `HookPayload`. If your hook returns
+`{"action":"modify","data":...}`, the `data` value replaces the event-specific
+mutable portion of the payload. For `BeforeToolCall`, that means the replacement
+value becomes the new `arguments` object.
 
 ### Output
 
@@ -244,12 +298,12 @@ The event payload is passed as JSON on stdin:
 ```bash
 #!/bin/bash
 payload=$(cat)
-tool=$(echo "$payload" | jq -r '.data.tool')
+tool=$(echo "$payload" | jq -r '.tool_name')
 
-if [ "$tool" = "bash" ]; then
-    # Add safety flag to all bash commands
-    modified=$(echo "$payload" | jq '.data.arguments.command = "set -e; " + .data.arguments.command')
-    echo "{\"action\":\"modify\",\"data\":$(echo "$modified" | jq '.data')}"
+if [ "$tool" = "exec" ]; then
+    # Add safety flag to shell commands executed by the exec tool
+    modified_args=$(echo "$payload" | jq '.arguments.command = "set -e; " + .arguments.command | .arguments')
+    echo "{\"action\":\"modify\",\"data\":$modified_args}"
 fi
 
 exit 0
@@ -260,7 +314,7 @@ exit 0
 ```bash
 #!/bin/bash
 payload=$(cat)
-command=$(echo "$payload" | jq -r '.data.arguments.command // ""')
+command=$(echo "$payload" | jq -r '.arguments.command // ""')
 
 # Block rm -rf /
 if echo "$command" | grep -qE 'rm\s+-rf\s+/'; then
@@ -322,7 +376,7 @@ If requirements aren't met, the hook is skipped (not an error).
 
 Hooks that fail repeatedly are automatically disabled:
 
-- **Threshold**: 5 consecutive failures
+- **Threshold**: 3 consecutive failures
 - **Cooldown**: 60 seconds
 - **Recovery**: Auto-re-enabled after cooldown
 
@@ -442,31 +496,32 @@ through dcg, and blocks any command that dcg flags as destructive. See
 #!/bin/bash
 # slack-notify.sh
 payload=$(cat)
-session_id=$(echo "$payload" | jq -r '.session_id')
-message_count=$(echo "$payload" | jq -r '.data.message_count')
+session_key=$(echo "$payload" | jq -r '.session_key')
 
 curl -X POST "$SLACK_WEBHOOK_URL" \
   -H 'Content-Type: application/json' \
-  -d "{\"text\":\"Session $session_id ended with $message_count messages\"}"
+  -d "{\"text\":\"Session $session_key ended\"}"
 
 exit 0
 ```
 
-### Redact Secrets from Tool Output
+### Redact Secrets from Tool Arguments
 
 ```bash
 #!/bin/bash
 # redact-secrets.sh
 payload=$(cat)
 
-# Redact common secret patterns
-redacted=$(echo "$payload" | sed -E '
+# Redact secrets from exec-tool command arguments before execution
+command=$(echo "$payload" | jq -r '.arguments.command // ""')
+redacted=$(printf '%s' "$command" | sed -E '
   s/sk-[a-zA-Z0-9]{32,}/[REDACTED]/g
   s/ghp_[a-zA-Z0-9]{36}/[REDACTED]/g
-  s/password=[^&\s]+/password=[REDACTED]/g
+  s/password=[^&[:space:]]+/password=[REDACTED]/g
 ')
 
-echo "{\"action\":\"modify\",\"data\":$(echo "$redacted" | jq '.data')}"
+modified_args=$(echo "$payload" | jq --arg command "$redacted" '.arguments.command = $command | .arguments')
+echo "{\"action\":\"modify\",\"data\":$modified_args}"
 exit 0
 ```
 
@@ -476,10 +531,10 @@ exit 0
 #!/bin/bash
 # sandbox-writes.sh
 payload=$(cat)
-tool=$(echo "$payload" | jq -r '.data.tool')
+tool=$(echo "$payload" | jq -r '.tool_name')
 
 if [ "$tool" = "write_file" ]; then
-    path=$(echo "$payload" | jq -r '.data.arguments.path')
+    path=$(echo "$payload" | jq -r '.arguments.path')
 
     # Only allow writes under current project
     if [[ ! "$path" =~ ^/workspace/ ]]; then

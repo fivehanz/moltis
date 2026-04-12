@@ -102,6 +102,7 @@ const READ_METHODS: &[&str] = &[
     "chat.history",
     "chat.context",
     "chat.raw_prompt",
+    "chat.full_context",
     "providers.available",
     "providers.oauth.status",
     "providers.local.system_info",
@@ -133,6 +134,7 @@ const READ_METHODS: &[&str] = &[
 
 const WRITE_METHODS: &[&str] = &[
     "send",
+    "chat.prompt_memory.refresh",
     "agent",
     "agent.wait",
     "agent.identity.update",

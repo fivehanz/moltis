@@ -160,6 +160,14 @@ jobs:
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Install QMD CLI
+        run: |
+          npm install -g @tobilu/qmd
+          qmd --version
       - name: Initialize git repo in llama-cpp source to satisfy cmake
         run: |
           cargo fetch --locked
@@ -219,6 +227,14 @@ jobs:
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: llvm-tools-preview
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Install QMD CLI
+        run: |
+          npm install -g @tobilu/qmd
+          qmd --version
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           shared-key: coverage-v1
@@ -432,6 +448,14 @@ jobs:
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Install QMD CLI
+        run: |
+          npm install -g @tobilu/qmd
+          qmd --version
       - name: Initialize git repo in llama-cpp source to satisfy cmake
         run: |
           cargo fetch --locked

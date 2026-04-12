@@ -234,100 +234,29 @@ pub async fn handle_message_direct(
     // Check for voice/audio messages and transcribe them.
     // `voice_audio` carries the raw bytes + format so we can save them to the
     // session media directory once we have a reply target.
+    //
+    // If voice processing fails in any way (STT unconfigured, download error,
+    // transcription error, empty transcription), `handle_voice_message` sends
+    // a direct user-facing reply and returns `None`, so we bail out here
+    // without dispatching a placeholder string to the LLM (see issue #632).
     let (body, attachments, voice_audio): (
         String,
         Vec<ChannelAttachment>,
         Option<(Vec<u8>, String)>,
     ) = if let Some(voice_file) = extract_voice_file(&msg) {
-        // If STT is not configured, reply with guidance and do not dispatch to the LLM.
-        if let Some(ref sink) = event_sink
-            && !sink.voice_stt_available().await
+        match handle_voice_message(
+            bot,
+            &msg,
+            account_id,
+            text.as_deref(),
+            event_sink.as_ref(),
+            outbound.as_ref(),
+            &voice_file,
+        )
+        .await
         {
-            if let Err(e) = outbound
-                .send_text(
-                    account_id,
-                    &outbound_to_for_msg(&msg),
-                    "I can't understand voice, you did not configure it, please visit Settings -> Voice",
-                    None,
-                )
-                .await
-            {
-                warn!(account_id, "failed to send STT setup hint: {e}");
-            }
-            return Ok(());
-        }
-
-        // Try to transcribe the voice message
-        if let Some(ref sink) = event_sink {
-            match download_telegram_file(bot, &voice_file.file_id).await {
-                Ok(audio_data) => {
-                    debug!(
-                        account_id,
-                        file_id = %voice_file.file_id,
-                        format = %voice_file.format,
-                        size = audio_data.len(),
-                        "downloaded voice file, transcribing"
-                    );
-                    let saved_audio = Some((audio_data.clone(), voice_file.format.clone()));
-                    match sink.transcribe_voice(&audio_data, &voice_file.format).await {
-                        Ok(transcribed) if transcribed.trim().is_empty() => {
-                            warn!(
-                                account_id,
-                                audio_size = audio_data.len(),
-                                "voice transcription returned empty text"
-                            );
-                            (
-                                "[Voice message - could not transcribe]".to_string(),
-                                Vec::new(),
-                                saved_audio,
-                            )
-                        },
-                        Ok(transcribed) => {
-                            debug!(
-                                account_id,
-                                text_len = transcribed.len(),
-                                "voice transcription successful"
-                            );
-                            // Combine with any caption if present
-                            let caption = text.clone().unwrap_or_default();
-                            let body = if caption.is_empty() {
-                                transcribed
-                            } else {
-                                format!("{}\n\n[Voice message]: {}", caption, transcribed)
-                            };
-                            (body, Vec::new(), saved_audio)
-                        },
-                        Err(e) => {
-                            warn!(account_id, error = %e, "voice transcription failed");
-                            // Fall back to caption or indicate transcription failed
-                            (
-                                text.clone().unwrap_or_else(|| {
-                                    "[Voice message - transcription unavailable]".to_string()
-                                }),
-                                Vec::new(),
-                                saved_audio,
-                            )
-                        },
-                    }
-                },
-                Err(e) => {
-                    warn!(account_id, error = %e, "failed to download voice file");
-                    (
-                        text.clone()
-                            .unwrap_or_else(|| "[Voice message - download failed]".to_string()),
-                        Vec::new(),
-                        None,
-                    )
-                },
-            }
-        } else {
-            // No event sink, can't transcribe
-            (
-                text.clone()
-                    .unwrap_or_else(|| "[Voice message]".to_string()),
-                Vec::new(),
-                None,
-            )
+            Some(triple) => triple,
+            None => return Ok(()),
         }
     } else if let Some(photo_file) = extract_photo_file(&msg) {
         // Handle photo messages - download and send as multimodal content
@@ -765,6 +694,7 @@ pub async fn handle_message_direct(
             channel_type: ChannelType::Telegram,
             sender_name: sender_name.clone(),
             username: username.clone(),
+            sender_id: Some(peer_id.clone()),
             message_kind: message_kind(&msg),
             model: config.model.clone(),
             audio_filename,
@@ -1550,6 +1480,168 @@ struct VoiceFileInfo {
     format: String,
 }
 
+/// Plain-text fallback reply sent to the user when STT is unavailable or
+/// transcription fails. Kept as constants so tests can assert the exact text.
+pub(crate) const VOICE_REPLY_EMPTY_TRANSCRIPTION: &str =
+    "I couldn't hear anything in that voice message. Could you try again or type it out?";
+pub(crate) const VOICE_REPLY_TRANSCRIPTION_FAILED: &str =
+    "I couldn't transcribe your voice message. Could you try again or type it out?";
+pub(crate) const VOICE_REPLY_DOWNLOAD_FAILED: &str =
+    "I couldn't download your voice message. Please try again.";
+pub(crate) const VOICE_REPLY_UNAVAILABLE: &str =
+    "I received your voice message but voice processing is not available right now.";
+pub(crate) const VOICE_REPLY_STT_SETUP_HINT: &str =
+    "I can't understand voice, you did not configure it, please visit Settings -> Voice";
+
+/// Handle a voice/audio message: download, transcribe, and build the body
+/// for downstream dispatch.
+///
+/// Returns:
+/// - `Some((body, attachments, saved_audio))` when the caller should proceed
+///   with normal LLM dispatch (either because transcription succeeded, or
+///   because a non-empty caption was used as a fallback after a voice-path
+///   failure).
+/// - `None` when this function has already sent a direct user-facing reply
+///   to explain the failure. The caller must return early and **must not**
+///   dispatch anything to the LLM — otherwise the LLM would be asked to
+///   reply to a placeholder string and the user would hear a near-empty
+///   TTS message back (see GitHub issue #632).
+async fn handle_voice_message(
+    bot: &Bot,
+    msg: &Message,
+    account_id: &str,
+    caption: Option<&str>,
+    event_sink: Option<&Arc<dyn moltis_channels::ChannelEventSink>>,
+    outbound: &dyn ChannelOutbound,
+    voice_file: &VoiceFileInfo,
+) -> Option<(String, Vec<ChannelAttachment>, Option<(Vec<u8>, String)>)> {
+    let caption_text = caption
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let reply_target = outbound_to_for_msg(msg);
+
+    // Local helper: send a direct, user-facing text reply and log failures.
+    // Cannot be a closure because async closures are unstable, so we do it
+    // inline at each call site via this helper future.
+    async fn send_direct_reply(
+        outbound: &dyn ChannelOutbound,
+        account_id: &str,
+        to: &str,
+        text: &str,
+    ) {
+        if let Err(e) = outbound.send_text(account_id, to, text, None).await {
+            warn!(account_id, "failed to send voice fallback reply: {e}");
+        }
+    }
+
+    // No event sink means no STT pipeline is wired up at all. This is a
+    // misconfiguration, but we still owe the user an explanation rather
+    // than silently dispatching "[Voice message]" to the LLM.
+    let Some(sink) = event_sink else {
+        warn!(
+            account_id,
+            "no event sink available for voice message; sending direct reply"
+        );
+        // Without an event sink there is no session dispatch path at all, so
+        // "falling back" to caption text here would still be dropped later.
+        send_direct_reply(outbound, account_id, &reply_target, VOICE_REPLY_UNAVAILABLE).await;
+        return None;
+    };
+
+    // STT provider not configured. Send setup guidance and skip dispatch.
+    if !sink.voice_stt_available().await {
+        if let Some(caption) = caption_text {
+            return Some((caption, Vec::new(), None));
+        }
+        if let Err(e) = outbound
+            .send_text(account_id, &reply_target, VOICE_REPLY_STT_SETUP_HINT, None)
+            .await
+        {
+            warn!(account_id, "failed to send STT setup hint: {e}");
+        }
+        return None;
+    }
+
+    // Download the audio bytes from Telegram.
+    let audio_data = match download_telegram_file(bot, &voice_file.file_id).await {
+        Ok(data) => data,
+        Err(e) => {
+            warn!(account_id, error = %e, "failed to download voice file");
+            if let Some(caption) = caption_text {
+                // Caption gives us real user intent — fall through to normal
+                // dispatch using just the caption text.
+                return Some((caption, Vec::new(), None));
+            }
+            send_direct_reply(
+                outbound,
+                account_id,
+                &reply_target,
+                VOICE_REPLY_DOWNLOAD_FAILED,
+            )
+            .await;
+            return None;
+        },
+    };
+
+    debug!(
+        account_id,
+        file_id = %voice_file.file_id,
+        format = %voice_file.format,
+        size = audio_data.len(),
+        "downloaded voice file, transcribing"
+    );
+    let saved_audio = Some((audio_data.clone(), voice_file.format.clone()));
+
+    match sink.transcribe_voice(&audio_data, &voice_file.format).await {
+        Ok(transcribed) if transcribed.trim().is_empty() => {
+            warn!(
+                account_id,
+                audio_size = audio_data.len(),
+                "voice transcription returned empty text"
+            );
+            if let Some(caption) = caption_text {
+                return Some((caption, Vec::new(), saved_audio));
+            }
+            send_direct_reply(
+                outbound,
+                account_id,
+                &reply_target,
+                VOICE_REPLY_EMPTY_TRANSCRIPTION,
+            )
+            .await;
+            None
+        },
+        Ok(transcribed) => {
+            debug!(
+                account_id,
+                text_len = transcribed.len(),
+                "voice transcription successful"
+            );
+            let body = match caption_text {
+                Some(caption) => format!("{caption}\n\n[Voice message]: {transcribed}"),
+                None => transcribed,
+            };
+            Some((body, Vec::new(), saved_audio))
+        },
+        Err(e) => {
+            warn!(account_id, error = %e, "voice transcription failed");
+            if let Some(caption) = caption_text {
+                return Some((caption, Vec::new(), saved_audio));
+            }
+            send_direct_reply(
+                outbound,
+                account_id,
+                &reply_target,
+                VOICE_REPLY_TRANSCRIPTION_FAILED,
+            )
+            .await;
+            None
+        },
+    }
+}
+
 /// Extract voice or audio file info from a message.
 fn extract_voice_file(msg: &Message) -> Option<VoiceFileInfo> {
     match &msg.kind {
@@ -2061,11 +2153,23 @@ mod tests {
         sizes: Vec<usize>,
     }
 
+    fn escaped_telegram_reply_text(text: &str) -> String {
+        text.replace('>', "&gt;")
+    }
+
+    fn is_escaped_reply_to_chat(message: &SendMessageRequest, chat_id: i64, text: &str) -> bool {
+        message.chat_id == chat_id && message.text == escaped_telegram_reply_text(text)
+    }
+
     impl MockSink {
         fn with_stt(transcription: Result<String>) -> Self {
+            Self::with_voice_stt(true, Some(transcription))
+        }
+
+        fn with_voice_stt(stt_available: bool, transcription: Option<Result<String>>) -> Self {
             Self {
-                stt_available: true,
-                transcription_result: Mutex::new(Some(transcription)),
+                stt_available,
+                transcription_result: Mutex::new(transcription),
                 ..Default::default()
             }
         }
@@ -2696,11 +2800,8 @@ mod tests {
             assert!(
                 requests.iter().any(|request| {
                     if let CapturedTelegramRequest::SendMessage(body) = request {
-                        body.chat_id == 42
-                            && body.parse_mode.as_deref() == Some("HTML")
-                            && body
-                                .text
-                                .contains("I can't understand voice, you did not configure it")
+                        body.parse_mode.as_deref() == Some("HTML")
+                            && is_escaped_reply_to_chat(body, 42, VOICE_REPLY_STT_SETUP_HINT)
                     } else {
                         false
                     }
@@ -2742,36 +2843,84 @@ mod tests {
         server.await.expect("server join");
     }
 
-    /// Regression test: when STT is available but transcription returns an empty
-    /// string (e.g. noisy environment), the voice message must still be
-    /// dispatched to chat and the audio saved, rather than silently dropped.
-    #[tokio::test]
-    async fn voice_empty_transcription_still_dispatches_to_chat() {
-        use axum::{http::Method, routing::any};
+    /// Outcome of transcription in a voice-test scenario.
+    enum VoiceTranscriptionOutcome {
+        /// Transcription returns a non-empty transcript.
+        Ok(&'static str),
+        /// Transcription returns `Ok("")` — the STT heard nothing meaningful.
+        Empty,
+        /// Transcription returns an error.
+        Err,
+    }
+
+    /// Outcome of the Telegram file-download HTTP call in a voice-test
+    /// scenario.
+    enum VoiceDownloadOutcome {
+        /// Download succeeds with dummy audio bytes.
+        Ok,
+        /// Download returns HTTP 500.
+        Fail,
+    }
+
+    struct VoiceScenarioResult {
+        dispatch_calls: usize,
+        dispatched_texts: Vec<String>,
+        sent_messages: Vec<SendMessageRequest>,
+    }
+
+    /// Run a Telegram voice-message scenario end-to-end through
+    /// `handle_message_direct` and return everything the assertions below
+    /// need to verify the dispatch / direct-reply behavior.
+    ///
+    /// `caption` is attached to the voice JSON as `caption` so it round-trips
+    /// through `extract_text`. Telegram voice messages support captions per
+    /// the Bot API.
+    async fn run_voice_scenario(
+        caption: Option<&str>,
+        has_event_sink: bool,
+        stt_available: bool,
+        download: VoiceDownloadOutcome,
+        transcription: VoiceTranscriptionOutcome,
+    ) -> VoiceScenarioResult {
+        use axum::{
+            http::{Method, StatusCode},
+            response::IntoResponse,
+            routing::any,
+        };
+
+        #[derive(Clone)]
+        struct CombinedState {
+            api: MockTelegramApi,
+            download_succeeds: bool,
+        }
 
         async fn combined_handler(
             method: Method,
-            State(state): State<MockTelegramApi>,
+            State(state): State<CombinedState>,
             uri: Uri,
             body: Bytes,
         ) -> axum::response::Response {
-            use axum::response::IntoResponse;
             if method == Method::GET {
-                // File download endpoint — return dummy audio bytes.
-                return Bytes::from_static(b"fake-ogg-audio-data").into_response();
+                if state.download_succeeds {
+                    return Bytes::from_static(b"fake-ogg-audio-data").into_response();
+                }
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
-            // Delegate POST to the normal mock Telegram API handler.
-            let resp = telegram_api_handler(State(state), uri, body).await;
-            resp.into_response()
+            telegram_api_handler(State(state.api), uri, body)
+                .await
+                .into_response()
         }
 
         let recorded_requests = Arc::new(Mutex::new(Vec::<CapturedTelegramRequest>::new()));
-        let mock_api = MockTelegramApi {
-            requests: Arc::clone(&recorded_requests),
+        let combined_state = CombinedState {
+            api: MockTelegramApi {
+                requests: Arc::clone(&recorded_requests),
+            },
+            download_succeeds: matches!(download, VoiceDownloadOutcome::Ok),
         };
         let app = Router::new()
             .route("/{*path}", any(combined_handler))
-            .with_state(mock_api);
+            .with_state(combined_state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2795,8 +2944,19 @@ mod tests {
         let outbound = Arc::new(TelegramOutbound {
             accounts: Arc::clone(&accounts),
         });
-        // STT available, transcription returns empty string.
-        let sink = Arc::new(MockSink::with_stt(Ok(String::new())));
+
+        let sink = Arc::new(if stt_available {
+            let transcription_result = match transcription {
+                VoiceTranscriptionOutcome::Ok(text) => Ok(text.to_string()),
+                VoiceTranscriptionOutcome::Empty => Ok(String::new()),
+                VoiceTranscriptionOutcome::Err => {
+                    Err(ChannelError::unavailable("mock stt failure"))
+                },
+            };
+            MockSink::with_stt(transcription_result)
+        } else {
+            MockSink::with_voice_stt(false, None)
+        });
         let account_id = "test-account";
 
         {
@@ -2813,12 +2973,16 @@ mod tests {
                 outbound: Arc::clone(&outbound),
                 cancel: CancellationToken::new(),
                 message_log: None,
-                event_sink: Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>),
+                event_sink: if has_event_sink {
+                    Some(Arc::clone(&sink) as Arc<dyn ChannelEventSink>)
+                } else {
+                    None
+                },
                 otp: Mutex::new(OtpState::new(300)),
             });
         }
 
-        let msg: Message = serde_json::from_value(json!({
+        let mut voice_json = json!({
             "message_id": 1,
             "date": 1,
             "chat": { "id": 42, "type": "private", "first_name": "Alice" },
@@ -2835,31 +2999,346 @@ mod tests {
                 "mime_type": "audio/ogg",
                 "file_size": 123
             }
-        }))
-        .expect("deserialize voice message");
+        });
+        if let Some(caption_text) = caption {
+            voice_json
+                .as_object_mut()
+                .expect("voice json object")
+                .insert("caption".to_string(), json!(caption_text));
+        }
+        let msg: Message = serde_json::from_value(voice_json).expect("deserialize voice message");
 
         handle_message_direct(msg, &bot, account_id, &accounts)
             .await
             .expect("handle message");
 
-        assert_eq!(
-            sink.dispatch_calls
-                .load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "voice message with empty transcription must still be dispatched to chat"
-        );
-
-        {
-            let texts = sink.dispatched_texts.lock().expect("lock");
-            assert!(
-                texts[0].contains("could not transcribe"),
-                "dispatched text should indicate transcription was empty, got: {}",
-                texts[0]
-            );
-        }
+        let dispatch_calls = sink
+            .dispatch_calls
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let dispatched_texts = sink.dispatched_texts.lock().expect("lock").clone();
+        let sent_messages: Vec<SendMessageRequest> = recorded_requests
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter_map(|req| match req {
+                CapturedTelegramRequest::SendMessage(body) => Some(body.clone()),
+                _ => None,
+            })
+            .collect();
 
         let _ = shutdown_tx.send(());
         server.await.expect("server join");
+
+        VoiceScenarioResult {
+            dispatch_calls,
+            dispatched_texts,
+            sent_messages,
+        }
+    }
+
+    /// Regression for https://github.com/moltis-org/moltis/issues/632:
+    /// when STT returns an empty transcription and there is no caption
+    /// fallback, the handler must send a direct user-facing reply and
+    /// **must not** dispatch a placeholder string to the LLM (which would
+    /// produce a near-empty TTS reply back to the user).
+    #[tokio::test]
+    async fn voice_empty_transcription_sends_direct_reply_and_skips_dispatch() {
+        let result = run_voice_scenario(
+            None,
+            true,
+            true,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Empty,
+        )
+        .await;
+
+        assert_eq!(
+            result.dispatch_calls, 0,
+            "empty transcription with no caption must not dispatch to LLM"
+        );
+        assert!(
+            result
+                .sent_messages
+                .iter()
+                .any(|m| m.chat_id == 42 && m.text == VOICE_REPLY_EMPTY_TRANSCRIPTION),
+            "expected direct empty-transcription reply, got: {:?}",
+            result.sent_messages
+        );
+    }
+
+    /// When the voice message has a caption, an empty transcription should
+    /// fall back to dispatching the caption — the user clearly had text
+    /// intent so the LLM gets real content, not a placeholder.
+    #[tokio::test]
+    async fn voice_empty_transcription_with_caption_dispatches_caption() {
+        let result = run_voice_scenario(
+            Some("please review the attached audio"),
+            true,
+            true,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Empty,
+        )
+        .await;
+
+        assert_eq!(
+            result.dispatch_calls, 1,
+            "caption must be dispatched as the LLM body when transcription is empty"
+        );
+        assert_eq!(result.dispatched_texts, vec![
+            "please review the attached audio".to_string()
+        ]);
+        assert!(
+            result
+                .sent_messages
+                .iter()
+                .all(|m| m.text != VOICE_REPLY_EMPTY_TRANSCRIPTION),
+            "direct empty-transcription reply should not be sent when caption is present: {:?}",
+            result.sent_messages
+        );
+    }
+
+    /// When transcription errors out and there is no caption, the handler
+    /// must send a direct user-facing reply and must not dispatch a
+    /// placeholder string to the LLM.
+    #[tokio::test]
+    async fn voice_transcription_error_sends_direct_reply_and_skips_dispatch() {
+        let result = run_voice_scenario(
+            None,
+            true,
+            true,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Err,
+        )
+        .await;
+
+        assert_eq!(
+            result.dispatch_calls, 0,
+            "transcription error with no caption must not dispatch to LLM"
+        );
+        assert!(
+            result
+                .sent_messages
+                .iter()
+                .any(|m| m.chat_id == 42 && m.text == VOICE_REPLY_TRANSCRIPTION_FAILED),
+            "expected direct transcription-failed reply, got: {:?}",
+            result.sent_messages
+        );
+    }
+
+    /// When transcription errors out but a caption is present, fall back
+    /// to dispatching the caption rather than surfacing the error.
+    #[tokio::test]
+    async fn voice_transcription_error_with_caption_dispatches_caption() {
+        let result = run_voice_scenario(
+            Some("summarize this clip"),
+            true,
+            true,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Err,
+        )
+        .await;
+
+        assert_eq!(
+            result.dispatch_calls, 1,
+            "caption must be dispatched when transcription errors and a caption is present"
+        );
+        assert_eq!(result.dispatched_texts, vec![
+            "summarize this clip".to_string()
+        ]);
+        assert!(
+            result
+                .sent_messages
+                .iter()
+                .all(|m| m.text != VOICE_REPLY_TRANSCRIPTION_FAILED),
+            "direct transcription-failed reply should not be sent when caption is present: {:?}",
+            result.sent_messages
+        );
+    }
+
+    /// When the file download fails and there is no caption, the handler
+    /// must send a direct user-facing reply and must not dispatch.
+    #[tokio::test]
+    async fn voice_download_failure_sends_direct_reply_and_skips_dispatch() {
+        let result = run_voice_scenario(
+            None,
+            true,
+            true,
+            VoiceDownloadOutcome::Fail,
+            // transcription outcome is irrelevant because we never reach it.
+            VoiceTranscriptionOutcome::Ok("unused"),
+        )
+        .await;
+
+        assert_eq!(
+            result.dispatch_calls, 0,
+            "download failure with no caption must not dispatch to LLM"
+        );
+        assert!(
+            result
+                .sent_messages
+                .iter()
+                .any(|m| m.chat_id == 42 && m.text == VOICE_REPLY_DOWNLOAD_FAILED),
+            "expected direct download-failed reply, got: {:?}",
+            result.sent_messages
+        );
+    }
+
+    /// When the file download fails but a caption is present, fall back
+    /// to dispatching the caption.
+    #[tokio::test]
+    async fn voice_download_failure_with_caption_dispatches_caption() {
+        let result = run_voice_scenario(
+            Some("voice note about the design"),
+            true,
+            true,
+            VoiceDownloadOutcome::Fail,
+            VoiceTranscriptionOutcome::Ok("unused"),
+        )
+        .await;
+
+        assert_eq!(
+            result.dispatch_calls, 1,
+            "caption must be dispatched when voice download fails and a caption is present"
+        );
+        assert_eq!(result.dispatched_texts, vec![
+            "voice note about the design".to_string()
+        ]);
+        assert!(
+            result
+                .sent_messages
+                .iter()
+                .all(|m| m.text != VOICE_REPLY_DOWNLOAD_FAILED),
+            "direct download-failed reply should not be sent when caption is present: {:?}",
+            result.sent_messages
+        );
+    }
+
+    /// Happy path: transcription succeeds and is dispatched as the LLM body.
+    /// This guards against a refactor regression where the success branch
+    /// might accidentally stop dispatching.
+    #[tokio::test]
+    async fn voice_successful_transcription_dispatches_transcript() {
+        let result = run_voice_scenario(
+            None,
+            true,
+            true,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Ok("hello world"),
+        )
+        .await;
+
+        assert_eq!(result.dispatch_calls, 1);
+        assert_eq!(result.dispatched_texts, vec!["hello world".to_string()]);
+    }
+
+    /// Happy path with caption: transcript is combined with caption so the
+    /// LLM gets both the voice content and the user's text framing.
+    #[tokio::test]
+    async fn voice_successful_transcription_with_caption_combines_both() {
+        let result = run_voice_scenario(
+            Some("context: meeting notes"),
+            true,
+            true,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Ok("we decided to ship on friday"),
+        )
+        .await;
+
+        assert_eq!(result.dispatch_calls, 1);
+        assert_eq!(result.dispatched_texts, vec![
+            "context: meeting notes\n\n[Voice message]: we decided to ship on friday".to_string()
+        ]);
+    }
+
+    #[tokio::test]
+    async fn voice_stt_unavailable_without_caption_sends_setup_hint_and_skips_dispatch() {
+        let result = run_voice_scenario(
+            None,
+            true,
+            false,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Ok("unused"),
+        )
+        .await;
+
+        assert_eq!(result.dispatch_calls, 0);
+        assert!(
+            result
+                .sent_messages
+                .iter()
+                .any(|m| is_escaped_reply_to_chat(m, 42, VOICE_REPLY_STT_SETUP_HINT)),
+            "expected STT setup hint, got: {:?}",
+            result.sent_messages
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_stt_unavailable_with_caption_dispatches_caption() {
+        let result = run_voice_scenario(
+            Some("summarize this anyway"),
+            true,
+            false,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Ok("unused"),
+        )
+        .await;
+
+        assert_eq!(result.dispatch_calls, 1);
+        assert_eq!(result.dispatched_texts, vec![
+            "summarize this anyway".to_string()
+        ]);
+        assert!(
+            result
+                .sent_messages
+                .iter()
+                .all(|m| !is_escaped_reply_to_chat(m, 42, VOICE_REPLY_STT_SETUP_HINT)),
+            "setup hint should not be sent when caption is present: {:?}",
+            result.sent_messages
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_without_event_sink_and_without_caption_sends_unavailable_reply() {
+        let result = run_voice_scenario(
+            None,
+            false,
+            false,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Ok("unused"),
+        )
+        .await;
+
+        assert_eq!(result.dispatch_calls, 0);
+        assert!(
+            result
+                .sent_messages
+                .iter()
+                .any(|m| is_escaped_reply_to_chat(m, 42, VOICE_REPLY_UNAVAILABLE)),
+            "expected unavailable reply, got: {:?}",
+            result.sent_messages
+        );
+    }
+
+    #[tokio::test]
+    async fn voice_without_event_sink_with_caption_sends_unavailable_reply() {
+        let result = run_voice_scenario(
+            Some("please use the caption"),
+            false,
+            false,
+            VoiceDownloadOutcome::Ok,
+            VoiceTranscriptionOutcome::Ok("unused"),
+        )
+        .await;
+
+        assert_eq!(result.dispatch_calls, 0);
+        assert!(
+            result
+                .sent_messages
+                .iter()
+                .any(|m| is_escaped_reply_to_chat(m, 42, VOICE_REPLY_UNAVAILABLE)),
+            "expected unavailable reply even with caption, got: {:?}",
+            result.sent_messages
+        );
     }
 
     #[test]

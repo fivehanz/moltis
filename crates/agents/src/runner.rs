@@ -8,13 +8,18 @@ use {
 #[cfg(feature = "metrics")]
 use moltis_metrics::{counter, histogram, labels, llm as llm_metrics};
 
-use moltis_common::hooks::{HookAction, HookPayload, HookRegistry};
+use moltis_common::hooks::{ChannelBinding, HookAction, HookPayload, HookRegistry};
 
 use crate::{
     model::{
         ChatMessage, CompletionResponse, LlmProvider, StreamEvent, ToolCall, Usage, UserContent,
     },
     response_sanitizer::{clean_response, recover_tool_calls_from_content},
+    tool_arg_validator::validate_tool_args,
+    tool_loop_detector::{
+        LoopDetectorAction, ToolCallFingerprint, ToolLoopDetector, format_intervention_message,
+        format_strip_tools_message,
+    },
     tool_parsing::{
         looks_like_failed_tool_call, new_synthetic_tool_call_id, parse_tool_calls_from_text,
     },
@@ -528,6 +533,24 @@ pub enum RunnerEvent {
         iteration: usize,
         max_iterations: usize,
     },
+    /// A tool call was rejected by pre-dispatch schema validation before the
+    /// tool's `execute` method ran. Used in place of the usual
+    /// `ToolCallStart`/`ToolCallEnd` pair for rejected calls so the UI does
+    /// not render a misleading "executing" status for a call that never
+    /// actually executed.
+    ToolCallRejected {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+        error: String,
+    },
+    /// The loop detector fired after observing repeated identical tool-call
+    /// failures. `stage` is 1 for the nudge/directive intervention and 2 for
+    /// the stronger tool-stripping escalation (see issue #658).
+    LoopInterventionFired {
+        stage: u8,
+        tool_name: String,
+    },
 }
 
 /// Detect an explicit shell command in the latest user turn.
@@ -823,6 +846,24 @@ pub async fn run_agent_loop(
     .await
 }
 
+fn channel_binding_from_tool_context(
+    session_key: &str,
+    tool_context: Option<&serde_json::Value>,
+) -> Option<ChannelBinding> {
+    let channel_value = tool_context.and_then(|ctx| ctx.get("_channel"))?;
+    match serde_json::from_value(channel_value.clone()) {
+        Ok(binding) => Some(binding),
+        Err(error) => {
+            warn!(
+                error = %error,
+                session = %session_key,
+                "failed to parse _channel tool context for hooks; ignoring channel provenance"
+            );
+            None
+        },
+    }
+}
+
 /// Like `run_agent_loop` but accepts optional context values that are injected
 /// into every tool call's parameters (e.g. `_session_key`).
 pub async fn run_agent_loop_with_context(
@@ -877,6 +918,8 @@ pub async fn run_agent_loop_with_context(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let channel_for_hooks =
+        channel_binding_from_tool_context(&session_key_for_hooks, tool_context.as_ref());
 
     let mut iterations = 0;
     let mut total_tool_calls = 0;
@@ -889,6 +932,11 @@ pub async fn run_agent_loop_with_context(
     let mut malformed_retry_count: u8 = 0;
     let mut empty_tool_name_retry_count: u8 = 0;
     let mut auto_continue_count: usize = 0;
+    let mut loop_detector = ToolLoopDetector::new(
+        config.tools.agent_loop_detector_window,
+        config.tools.agent_loop_detector_strip_tools_on_second_fire,
+    );
+    let mut strip_tools_next_iter = false;
 
     loop {
         iterations += 1;
@@ -901,11 +949,17 @@ pub async fn run_agent_loop_with_context(
         }
 
         // Re-compute schemas each iteration so activated tools appear immediately.
-        let schemas_for_api = if native_tools {
+        // When the loop detector has escalated to stage 2, pass an empty tool
+        // list for this single turn so the model is forced to respond in text.
+        let schemas_for_api = if native_tools && !strip_tools_next_iter {
             tools.list_schemas()
         } else {
             vec![]
         };
+        if strip_tools_next_iter {
+            strip_tools_next_iter = false;
+            loop_detector.clear_strip_tools();
+        }
 
         enforce_tool_result_context_budget(
             &mut messages,
@@ -1229,19 +1283,14 @@ pub async fn run_agent_loop_with_context(
         // Execute tool calls concurrently.
         total_tool_calls += response.tool_calls.len();
 
-        // Emit all ToolCallStart events first (preserves notification order).
-        for tc in &response.tool_calls {
-            if let Some(cb) = on_event {
-                cb(RunnerEvent::ToolCallStart {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments: tc.arguments.clone(),
-                });
-            }
-            info!(tool = %tc.name, id = %tc.id, args = %tc.arguments, "executing tool");
-        }
-
         // Build futures for all tool calls (executed concurrently).
+        //
+        // Pre-dispatch schema validation runs synchronously against each
+        // tool's declared `parameters_schema`. Calls that fail validation
+        // are short-circuited to a directive error response — the tool's
+        // `execute` method is never invoked, and the UI receives a
+        // `ToolCallRejected` event instead of the misleading
+        // `ToolCallStart`/"executing" status (issue #658).
         let tool_futures: Vec<_> = response
             .tool_calls
             .iter()
@@ -1256,6 +1305,7 @@ pub async fn run_agent_loop_with_context(
                 // Dispatch BeforeToolCall hook — may block or modify arguments.
                 let hook_registry = hook_registry.clone();
                 let session_key = session_key_for_hooks.clone();
+                let channel_for_hooks = channel_for_hooks.clone();
                 let tc_name = sanitized.to_string();
                 let _tc_id = tc.id.clone();
 
@@ -1266,13 +1316,55 @@ pub async fn run_agent_loop_with_context(
                         args_obj.insert(k.clone(), v.clone());
                     }
                 }
+
+                // Pre-dispatch validation against the tool's schema.
+                let validation_error: Option<String> = if let Some(ref t) = tool {
+                    let schema = t.parameters_schema();
+                    match validate_tool_args(&schema, &args) {
+                        Ok(()) => None,
+                        Err(e) => {
+                            warn!(
+                                tool = %tc_name,
+                                summary = %e.short_summary(),
+                                "tool call rejected by pre-dispatch schema validation"
+                            );
+                            Some(e.to_llm_error_message(&tc_name))
+                        },
+                    }
+                } else {
+                    None
+                };
+
+                // Emit ToolCallStart only for calls that will actually run.
+                // Rejected calls get a single `ToolCallRejected` event after
+                // the concurrent batch completes (handled in the result loop).
+                if validation_error.is_none() {
+                    if let Some(cb) = on_event {
+                        cb(RunnerEvent::ToolCallStart {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: args.clone(),
+                        });
+                    }
+                    info!(tool = %tc_name, id = %tc.id, args = %args, "executing tool");
+                }
+
                 async move {
+                    if let Some(err_msg) = validation_error {
+                        return (
+                            false,
+                            serde_json::json!({ "error": err_msg.clone() }),
+                            Some(err_msg),
+                            true,
+                        );
+                    }
                     // Run BeforeToolCall hook.
                     if let Some(ref hooks) = hook_registry {
                         let payload = HookPayload::BeforeToolCall {
                             session_key: session_key.clone(),
                             tool_name: tc_name.clone(),
                             arguments: args.clone(),
+                            channel: channel_for_hooks.clone(),
                         };
                         match hooks.dispatch(&payload).await {
                             Ok(HookAction::Block(reason)) => {
@@ -1282,6 +1374,7 @@ pub async fn run_agent_loop_with_context(
                                     false,
                                     serde_json::json!({ "error": err_str }),
                                     Some(err_str),
+                                    false,
                                 );
                             },
                             Ok(HookAction::ModifyPayload(v)) => {
@@ -1316,6 +1409,7 @@ pub async fn run_agent_loop_with_context(
                                         tool_name: tc_name.clone(),
                                         success: !has_error,
                                         result: Some(val.clone()),
+                                        channel: channel_for_hooks.clone(),
                                     };
                                     if let Err(e) = hooks.dispatch(&payload).await {
                                         warn!(tool = %tc_name, error = %e, "AfterToolCall hook dispatch failed");
@@ -1324,9 +1418,9 @@ pub async fn run_agent_loop_with_context(
 
                                 if has_error {
                                     // Tool executed but returned an error in the result
-                                    (false, serde_json::json!({ "result": val }), error_msg)
+                                    (false, serde_json::json!({ "result": val }), error_msg, false)
                                 } else {
-                                    (true, serde_json::json!({ "result": val }), None)
+                                    (true, serde_json::json!({ "result": val }), None, false)
                                 }
                             },
                             Err(e) => {
@@ -1338,6 +1432,7 @@ pub async fn run_agent_loop_with_context(
                                         tool_name: tc_name.clone(),
                                         success: false,
                                         result: None,
+                                        channel: channel_for_hooks.clone(),
                                     };
                                     if let Err(e) = hooks.dispatch(&payload).await {
                                         warn!(tool = %tc_name, error = %e, "AfterToolCall hook dispatch failed");
@@ -1347,6 +1442,7 @@ pub async fn run_agent_loop_with_context(
                                     false,
                                     serde_json::json!({ "error": err_str }),
                                     Some(err_str),
+                                    false,
                                 )
                             },
                         }
@@ -1356,6 +1452,7 @@ pub async fn run_agent_loop_with_context(
                             false,
                             serde_json::json!({ "error": err_str }),
                             Some(err_str),
+                            false,
                         )
                     }
                 }
@@ -1366,26 +1463,94 @@ pub async fn run_agent_loop_with_context(
         let results = futures::future::join_all(tool_futures).await;
 
         // Process results in original order: emit events, append messages.
-        for (tc, (success, result, error)) in response.tool_calls.iter().zip(results) {
+        // The loop detector records each outcome as it is processed; the
+        // authoritative intervention decision is derived AFTER the loop from
+        // the detector's post-batch state via `consume_pending_action()`.
+        // This avoids two edge cases that per-call return values hit in
+        // mixed batches:
+        //   1. Trailing success after a triggering failure must NOT leave a
+        //      stale intervention — the reset() abandons it cleanly.
+        //   2. A batch that races through both escalation stages must still
+        //      deliver the stage-1 nudge first, not skip straight to strip.
+        for (tc, (success, mut result, error, rejected)) in response.tool_calls.iter().zip(results)
+        {
             if success {
                 info!(tool = %tc.name, id = %tc.id, "tool execution succeeded");
                 trace!(tool = %tc.name, result = %result, "tool result");
+            } else if rejected {
+                warn!(
+                    tool = %tc.name,
+                    id = %tc.id,
+                    "tool call rejected before execution by pre-dispatch validation"
+                );
             } else {
                 warn!(tool = %tc.name, id = %tc.id, error = %error.as_deref().unwrap_or(""), "tool execution failed");
             }
 
+            // Record outcome in the loop detector. Use explicit success/failure
+            // constructors so tools returning `{success: false}` without an
+            // `error` field still register as failures.
+            if loop_detector.is_enabled() {
+                let fp = if success {
+                    ToolCallFingerprint::success(&tc.name, &tc.arguments)
+                } else {
+                    ToolCallFingerprint::failure(&tc.name, &tc.arguments, error.as_deref())
+                };
+                let _ = loop_detector.record(fp);
+            }
+
             if let Some(cb) = on_event {
-                cb(RunnerEvent::ToolCallEnd {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    success,
-                    error,
-                    result: if success {
-                        result.get("result").cloned()
-                    } else {
-                        None
+                if rejected {
+                    cb(RunnerEvent::ToolCallRejected {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                        error: error.clone().unwrap_or_default(),
+                    });
+                } else {
+                    cb(RunnerEvent::ToolCallEnd {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        success,
+                        error,
+                        result: if success {
+                            result.get("result").cloned()
+                        } else {
+                            None
+                        },
+                    });
+                }
+            }
+
+            // Dispatch ToolResultPersist hook — the last opportunity for a handler
+            // to sanitize, redact, or block attacker-controlled tool output before
+            // it enters the messages array and is reasoned on by the next LLM
+            // iteration. Block substitutes an error marker instead of aborting the
+            // run, so a single hostile tool result cannot kill a long-running
+            // autonomous agent.
+            if let Some(ref hooks) = hook_registry {
+                let payload = HookPayload::ToolResultPersist {
+                    session_key: session_key_for_hooks.clone(),
+                    tool_name: sanitize_tool_name(&tc.name).into_owned(),
+                    result: result.clone(),
+                    channel: channel_for_hooks.clone(),
+                };
+                match hooks.dispatch(&payload).await {
+                    Ok(HookAction::ModifyPayload(v)) => {
+                        debug!(tool = %tc.name, "ToolResultPersist replaced tool result");
+                        result = v;
                     },
-                });
+                    Ok(HookAction::Block(reason)) => {
+                        warn!(tool = %tc.name, reason = %reason, "ToolResultPersist blocked result — substituting error marker");
+                        result = serde_json::json!({
+                            "error": format!("blocked by hook: {reason}")
+                        });
+                    },
+                    Ok(HookAction::Continue) => {},
+                    Err(e) => {
+                        warn!(tool = %tc.name, error = %e, "ToolResultPersist hook dispatch failed");
+                    },
+                }
             }
 
             // Always sanitize tool results as strings - most LLM APIs don't support
@@ -1402,6 +1567,71 @@ pub async fn run_agent_loop_with_context(
 
             messages.push(ChatMessage::tool(&tc.id, &tool_result_str));
         }
+
+        // Apply loop-detector intervention if one fired during this batch.
+        apply_loop_detector_intervention(
+            &mut loop_detector,
+            &mut messages,
+            &mut strip_tools_next_iter,
+            on_event,
+        );
+    }
+}
+
+/// Consume the detector's post-batch action (if any) and apply it to the
+/// runner state: push the directive user message into `messages`, emit the
+/// `LoopInterventionFired` UI event, and set `strip_tools_next_iter` when
+/// stage 2 fires. Shared by the streaming and non-streaming loops (issue
+/// #658).
+fn apply_loop_detector_intervention(
+    loop_detector: &mut ToolLoopDetector,
+    messages: &mut Vec<ChatMessage>,
+    strip_tools_next_iter: &mut bool,
+    on_event: Option<&OnEvent>,
+) {
+    if !loop_detector.is_enabled() {
+        return;
+    }
+    match loop_detector.consume_pending_action() {
+        LoopDetectorAction::None => {},
+        LoopDetectorAction::InjectNudge => {
+            let window = loop_detector.window_snapshot();
+            let stuck_tool = window
+                .first()
+                .map(|fp| fp.tool_name.clone())
+                .unwrap_or_default();
+            let intervention = format_intervention_message(&window);
+            info!(
+                tool = %stuck_tool,
+                "loop detector fired (stage 1): injecting directive intervention"
+            );
+            if let Some(cb) = on_event {
+                cb(RunnerEvent::LoopInterventionFired {
+                    stage: 1,
+                    tool_name: stuck_tool,
+                });
+            }
+            messages.push(ChatMessage::user(intervention));
+        },
+        LoopDetectorAction::StripTools => {
+            let stuck_tool = loop_detector
+                .window_snapshot()
+                .first()
+                .map(|fp| fp.tool_name.clone())
+                .unwrap_or_default();
+            info!(
+                tool = %stuck_tool,
+                "loop detector fired (stage 2): stripping tools for next iteration"
+            );
+            if let Some(cb) = on_event {
+                cb(RunnerEvent::LoopInterventionFired {
+                    stage: 2,
+                    tool_name: stuck_tool,
+                });
+            }
+            messages.push(ChatMessage::user(format_strip_tools_message()));
+            *strip_tools_next_iter = true;
+        },
     }
 }
 
@@ -1469,6 +1699,8 @@ pub async fn run_agent_loop_streaming(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    let channel_for_hooks =
+        channel_binding_from_tool_context(&session_key_for_hooks, tool_context.as_ref());
 
     let mut iterations = 0;
     let mut total_tool_calls = 0;
@@ -1485,6 +1717,11 @@ pub async fn run_agent_loop_streaming(
     let mut malformed_retry_count: u8 = 0;
     let mut empty_tool_name_retry_count: u8 = 0;
     let mut auto_continue_count: usize = 0;
+    let mut loop_detector = ToolLoopDetector::new(
+        config.tools.agent_loop_detector_window,
+        config.tools.agent_loop_detector_strip_tools_on_second_fire,
+    );
+    let mut strip_tools_next_iter = false;
 
     loop {
         iterations += 1;
@@ -1500,11 +1737,18 @@ pub async fn run_agent_loop_streaming(
         }
 
         // Re-compute schemas each iteration so activated tools appear immediately.
-        let schemas_for_api = if native_tools {
+        // When the loop detector has escalated to stage 2, pass an empty tool
+        // list for this single turn so the model is forced to respond in text
+        // (issue #658).
+        let schemas_for_api = if native_tools && !strip_tools_next_iter {
             tools.list_schemas()
         } else {
             vec![]
         };
+        if strip_tools_next_iter {
+            strip_tools_next_iter = false;
+            loop_detector.clear_strip_tools();
+        }
 
         enforce_tool_result_context_budget(
             &mut messages,
@@ -1716,6 +1960,14 @@ pub async fn run_agent_loop_streaming(
         // Use stream_idx_to_vec_pos to map streaming indices (which may not
         // start at 0) to the actual position in the tool_calls vec.
         for (stream_idx, args_str) in &tool_call_args {
+            // Emit raw accumulated string at debug level so future variants of
+            // "default to {} because no deltas arrived" can be diagnosed
+            // without a repro (issue #658).
+            debug!(
+                stream_idx,
+                args_str = %args_str,
+                "finalizing tool call args"
+            );
             if let Some(&vec_pos) = stream_idx_to_vec_pos.get(stream_idx)
                 && vec_pos < tool_calls.len()
                 && !args_str.is_empty()
@@ -1952,19 +2204,13 @@ pub async fn run_agent_loop_streaming(
         // Execute tool calls concurrently.
         total_tool_calls += tool_calls.len();
 
-        // Emit all ToolCallStart events first (preserves notification order).
-        for tc in &tool_calls {
-            if let Some(cb) = on_event {
-                cb(RunnerEvent::ToolCallStart {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments: tc.arguments.clone(),
-                });
-            }
-            info!(tool = %tc.name, id = %tc.id, args = %tc.arguments, "executing tool");
-        }
-
         // Build futures for all tool calls (executed concurrently).
+        //
+        // Pre-dispatch schema validation runs synchronously against each
+        // tool's declared `parameters_schema`. Calls that fail validation
+        // are short-circuited to a directive error response without invoking
+        // `execute`, and the UI receives `ToolCallRejected` instead of the
+        // misleading "executing" status (issue #658).
         let tool_futures: Vec<_> = tool_calls
             .iter()
             .map(|tc| {
@@ -1977,6 +2223,7 @@ pub async fn run_agent_loop_streaming(
 
                 let hook_registry = hook_registry.clone();
                 let session_key = session_key_for_hooks.clone();
+                let channel_for_hooks = channel_for_hooks.clone();
                 let tc_name = sanitized.to_string();
 
                 if let Some(ref ctx) = tool_context
@@ -1986,13 +2233,52 @@ pub async fn run_agent_loop_streaming(
                         args_obj.insert(k.clone(), v.clone());
                     }
                 }
+
+                // Pre-dispatch validation against the tool's schema.
+                let validation_error: Option<String> = if let Some(ref t) = tool {
+                    let schema = t.parameters_schema();
+                    match validate_tool_args(&schema, &args) {
+                        Ok(()) => None,
+                        Err(e) => {
+                            warn!(
+                                tool = %tc_name,
+                                summary = %e.short_summary(),
+                                "tool call rejected by pre-dispatch schema validation"
+                            );
+                            Some(e.to_llm_error_message(&tc_name))
+                        },
+                    }
+                } else {
+                    None
+                };
+
+                if validation_error.is_none() {
+                    if let Some(cb) = on_event {
+                        cb(RunnerEvent::ToolCallStart {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: args.clone(),
+                        });
+                    }
+                    info!(tool = %tc_name, id = %tc.id, args = %args, "executing tool");
+                }
+
                 async move {
+                    if let Some(err_msg) = validation_error {
+                        return (
+                            false,
+                            serde_json::json!({ "error": err_msg.clone() }),
+                            Some(err_msg),
+                            true,
+                        );
+                    }
                     // Run BeforeToolCall hook.
                     if let Some(ref hooks) = hook_registry {
                         let payload = HookPayload::BeforeToolCall {
                             session_key: session_key.clone(),
                             tool_name: tc_name.clone(),
                             arguments: args.clone(),
+                            channel: channel_for_hooks.clone(),
                         };
                         match hooks.dispatch(&payload).await {
                             Ok(HookAction::Block(reason)) => {
@@ -2002,6 +2288,7 @@ pub async fn run_agent_loop_streaming(
                                     false,
                                     serde_json::json!({ "error": err_str }),
                                     Some(err_str),
+                                    false,
                                 );
                             }
                             Ok(HookAction::ModifyPayload(v)) => {
@@ -2035,6 +2322,7 @@ pub async fn run_agent_loop_streaming(
                                         tool_name: tc_name.clone(),
                                         success: !has_error,
                                         result: Some(val.clone()),
+                                        channel: channel_for_hooks.clone(),
                                     };
                                     if let Err(e) = hooks.dispatch(&payload).await {
                                         warn!(tool = %tc_name, error = %e, "AfterToolCall hook dispatch failed");
@@ -2042,9 +2330,9 @@ pub async fn run_agent_loop_streaming(
                                 }
 
                                 if has_error {
-                                    (false, serde_json::json!({ "result": val }), error_msg)
+                                    (false, serde_json::json!({ "result": val }), error_msg, false)
                                 } else {
-                                    (true, serde_json::json!({ "result": val }), None)
+                                    (true, serde_json::json!({ "result": val }), None, false)
                                 }
                             }
                             Err(e) => {
@@ -2055,6 +2343,7 @@ pub async fn run_agent_loop_streaming(
                                         tool_name: tc_name.clone(),
                                         success: false,
                                         result: None,
+                                        channel: channel_for_hooks.clone(),
                                     };
                                     if let Err(e) = hooks.dispatch(&payload).await {
                                         warn!(tool = %tc_name, error = %e, "AfterToolCall hook dispatch failed");
@@ -2064,6 +2353,7 @@ pub async fn run_agent_loop_streaming(
                                     false,
                                     serde_json::json!({ "error": err_str }),
                                     Some(err_str),
+                                    false,
                                 )
                             }
                         }
@@ -2073,6 +2363,7 @@ pub async fn run_agent_loop_streaming(
                             false,
                             serde_json::json!({ "error": err_str }),
                             Some(err_str),
+                            false,
                         )
                     }
                 }
@@ -2083,26 +2374,85 @@ pub async fn run_agent_loop_streaming(
         let results = futures::future::join_all(tool_futures).await;
 
         // Process results in original order: emit events, append messages.
-        for (tc, (success, result, error)) in tool_calls.iter().zip(results) {
+        // Intervention is derived from the detector's post-batch state
+        // via `consume_pending_action()` below — see the non-streaming
+        // path for the rationale (issue #658).
+        for (tc, (success, mut result, error, rejected)) in tool_calls.iter().zip(results) {
             if success {
                 info!(tool = %tc.name, id = %tc.id, "tool execution succeeded");
                 trace!(tool = %tc.name, result = %result, "tool result");
+            } else if rejected {
+                warn!(
+                    tool = %tc.name,
+                    id = %tc.id,
+                    "tool call rejected before execution by pre-dispatch validation"
+                );
             } else {
                 warn!(tool = %tc.name, id = %tc.id, error = %error.as_deref().unwrap_or(""), "tool execution failed");
             }
 
+            // Record outcome in the loop detector (issue #658).
+            if loop_detector.is_enabled() {
+                let fp = if success {
+                    ToolCallFingerprint::success(&tc.name, &tc.arguments)
+                } else {
+                    ToolCallFingerprint::failure(&tc.name, &tc.arguments, error.as_deref())
+                };
+                let _ = loop_detector.record(fp);
+            }
+
             if let Some(cb) = on_event {
-                cb(RunnerEvent::ToolCallEnd {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    success,
-                    error,
-                    result: if success {
-                        result.get("result").cloned()
-                    } else {
-                        None
+                if rejected {
+                    cb(RunnerEvent::ToolCallRejected {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                        error: error.clone().unwrap_or_default(),
+                    });
+                } else {
+                    cb(RunnerEvent::ToolCallEnd {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        success,
+                        error,
+                        result: if success {
+                            result.get("result").cloned()
+                        } else {
+                            None
+                        },
+                    });
+                }
+            }
+
+            // Dispatch ToolResultPersist hook — the last opportunity for a handler
+            // to sanitize, redact, or block attacker-controlled tool output before
+            // it enters the messages array and is reasoned on by the next LLM
+            // iteration. Block substitutes an error marker instead of aborting the
+            // run, so a single hostile tool result cannot kill a long-running
+            // autonomous agent.
+            if let Some(ref hooks) = hook_registry {
+                let payload = HookPayload::ToolResultPersist {
+                    session_key: session_key_for_hooks.clone(),
+                    tool_name: sanitize_tool_name(&tc.name).into_owned(),
+                    result: result.clone(),
+                    channel: channel_for_hooks.clone(),
+                };
+                match hooks.dispatch(&payload).await {
+                    Ok(HookAction::ModifyPayload(v)) => {
+                        debug!(tool = %tc.name, "ToolResultPersist replaced tool result");
+                        result = v;
                     },
-                });
+                    Ok(HookAction::Block(reason)) => {
+                        warn!(tool = %tc.name, reason = %reason, "ToolResultPersist blocked result — substituting error marker");
+                        result = serde_json::json!({
+                            "error": format!("blocked by hook: {reason}")
+                        });
+                    },
+                    Ok(HookAction::Continue) => {},
+                    Err(e) => {
+                        warn!(tool = %tc.name, error = %e, "ToolResultPersist hook dispatch failed");
+                    },
+                }
             }
 
             // Always sanitize tool results as strings - most LLM APIs don't support
@@ -2119,6 +2469,14 @@ pub async fn run_agent_loop_streaming(
 
             messages.push(ChatMessage::tool(&tc.id, &tool_result_str));
         }
+
+        // Apply loop-detector intervention if one fired during this batch.
+        apply_loop_detector_intervention(
+            &mut loop_detector,
+            &mut messages,
+            &mut strip_tools_next_iter,
+            on_event,
+        );
     }
 }
 
@@ -2132,9 +2490,35 @@ mod tests {
             tool_parsing::parse_tool_call_from_text,
         },
         async_trait::async_trait,
+        moltis_common::hooks::{HookEvent, HookHandler},
         std::pin::Pin,
         tokio_stream::Stream,
     };
+
+    struct RecordingHook {
+        payloads: Arc<std::sync::Mutex<Vec<HookPayload>>>,
+    }
+
+    #[async_trait]
+    impl HookHandler for RecordingHook {
+        fn name(&self) -> &str {
+            "recording-hook"
+        }
+
+        fn events(&self) -> &[HookEvent] {
+            static EVENTS: [HookEvent; 2] = [HookEvent::BeforeToolCall, HookEvent::AfterToolCall];
+            &EVENTS
+        }
+
+        async fn handle(
+            &self,
+            _event: HookEvent,
+            payload: &HookPayload,
+        ) -> moltis_common::error::Result<HookAction> {
+            self.payloads.lock().unwrap().push(payload.clone());
+            Ok(HookAction::Continue)
+        }
+    }
 
     // ── parse_tool_call_from_text tests (delegates to tool_parsing) ──
 
@@ -5532,6 +5916,151 @@ mod tests {
         assert_eq!(args["command"], "pwd");
     }
 
+    #[tokio::test]
+    async fn before_tool_call_hook_receives_channel_binding_from_tool_context() {
+        let provider = Arc::new(NativeTextFunctionStreamProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestProcessTool));
+
+        let payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut hook_registry = HookRegistry::new();
+        hook_registry.register(Arc::new(RecordingHook {
+            payloads: Arc::clone(&payloads),
+        }));
+
+        let user_content = UserContent::Text("execute pwd".to_string());
+        let result = run_agent_loop_streaming(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &user_content,
+            None,
+            None,
+            Some(serde_json::json!({
+                "_session_key": "telegram:bot-main:-100123",
+                "_channel": {
+                    "surface": "telegram",
+                    "session_kind": "channel",
+                    "channel_type": "telegram",
+                    "account_id": "bot-main",
+                    "chat_id": "-100123",
+                    "chat_type": "channel_or_supergroup"
+                }
+            })),
+            Some(Arc::new(hook_registry)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.tool_calls_made, 1);
+
+        let payloads = payloads.lock().unwrap();
+        let payload = payloads
+            .iter()
+            .find(|payload| matches!(payload, HookPayload::BeforeToolCall { .. }))
+            .unwrap_or_else(|| panic!("missing BeforeToolCall payload"));
+        match payload {
+            HookPayload::BeforeToolCall { channel, .. } => {
+                let channel = channel.clone().unwrap_or_else(|| panic!("missing channel"));
+                assert_eq!(channel.channel_type.as_deref(), Some("telegram"));
+                assert_eq!(channel.account_id.as_deref(), Some("bot-main"));
+                assert_eq!(channel.chat_id.as_deref(), Some("-100123"));
+                assert_eq!(channel.chat_type.as_deref(), Some("channel_or_supergroup"));
+            },
+            other => panic!("unexpected payload: {other:?}"),
+        }
+
+        let payload = payloads
+            .iter()
+            .find(|payload| matches!(payload, HookPayload::AfterToolCall { .. }))
+            .unwrap_or_else(|| panic!("missing AfterToolCall payload"));
+        match payload {
+            HookPayload::AfterToolCall { channel, .. } => {
+                let channel = channel.clone().unwrap_or_else(|| panic!("missing channel"));
+                assert_eq!(channel.channel_type.as_deref(), Some("telegram"));
+                assert_eq!(channel.account_id.as_deref(), Some("bot-main"));
+                assert_eq!(channel.chat_id.as_deref(), Some("-100123"));
+                assert_eq!(channel.chat_type.as_deref(), Some("channel_or_supergroup"));
+            },
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_binding_from_tool_context_returns_none_for_invalid_channel_json() {
+        let tool_context = serde_json::json!({
+            "_session_key": "telegram:bot-main:-100123",
+            "_channel": {
+                "surface": 42
+            }
+        });
+
+        let binding =
+            channel_binding_from_tool_context("telegram:bot-main:-100123", Some(&tool_context));
+
+        assert!(binding.is_none());
+    }
+
+    #[tokio::test]
+    async fn non_streaming_hooks_ignore_invalid_channel_binding_from_tool_context() {
+        let provider = Arc::new(NativeTextFunctionProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestProcessTool));
+
+        let payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut hook_registry = HookRegistry::new();
+        hook_registry.register(Arc::new(RecordingHook {
+            payloads: Arc::clone(&payloads),
+        }));
+
+        let result = run_agent_loop_with_context(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("execute pwd"),
+            None,
+            None,
+            Some(serde_json::json!({
+                "_session_key": "telegram:bot-main:-100123",
+                "_channel": {
+                    "surface": 42
+                }
+            })),
+            Some(Arc::new(hook_registry)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.tool_calls_made, 1);
+
+        let payloads = payloads.lock().unwrap();
+        let before_payload = payloads
+            .iter()
+            .find(|payload| matches!(payload, HookPayload::BeforeToolCall { .. }))
+            .unwrap_or_else(|| panic!("missing BeforeToolCall payload"));
+        match before_payload {
+            HookPayload::BeforeToolCall { channel, .. } => {
+                assert!(channel.is_none());
+            },
+            other => panic!("unexpected payload: {other:?}"),
+        }
+
+        let after_payload = payloads
+            .iter()
+            .find(|payload| matches!(payload, HookPayload::AfterToolCall { .. }))
+            .unwrap_or_else(|| panic!("missing AfterToolCall payload"));
+        match after_payload {
+            HookPayload::AfterToolCall { channel, .. } => {
+                assert!(channel.is_none());
+            },
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
     /// Streaming provider that returns plain text only (no tool calls) on
     /// an explicit `/sh` prompt. Runner should force an exec call on iteration 1.
     struct DirectCommandNoToolStreamProvider {
@@ -7390,5 +7919,1422 @@ mod tests {
         // At threshold (40 chars).
         assert!(is_substantive_answer_text(&"x".repeat(40)));
         assert!(is_substantive_answer_text(GH_628_LONG_ANSWER));
+    }
+
+    // ── ToolResultPersist hook dispatch (GH #638) ────────────────────────────
+    //
+    // These tests pin down the contract that `ToolResultPersist` fires on the
+    // last leg of the tool-result path — after execution, before the result
+    // lands in the messages array — and that handlers can modify, block
+    // (with graceful error substitution), or fail non-fatally.
+
+    mod tool_result_persist_hook {
+        use {
+            super::*,
+            moltis_common::{
+                Result as HookResult,
+                hooks::{
+                    HookAction as HA, HookEvent as HE, HookHandler, HookPayload as HP,
+                    HookRegistry as HR,
+                },
+            },
+            std::sync::{
+                Mutex,
+                atomic::{AtomicUsize, Ordering},
+            },
+        };
+
+        /// Handler that just counts invocations.
+        struct CountingHandler {
+            count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl HookHandler for CountingHandler {
+            fn name(&self) -> &str {
+                "counter"
+            }
+
+            fn events(&self) -> &[HE] {
+                &[HE::ToolResultPersist]
+            }
+
+            async fn handle(&self, _event: HE, _payload: &HP) -> HookResult<HA> {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                Ok(HA::Continue)
+            }
+        }
+
+        /// Handler that replaces the tool result with a fixed sanitized value.
+        struct ReplacingHandler;
+
+        #[async_trait]
+        impl HookHandler for ReplacingHandler {
+            fn name(&self) -> &str {
+                "replacer"
+            }
+
+            fn events(&self) -> &[HE] {
+                &[HE::ToolResultPersist]
+            }
+
+            async fn handle(&self, _event: HE, _payload: &HP) -> HookResult<HA> {
+                Ok(HA::ModifyPayload(serde_json::json!({
+                    "sanitized": "safe-replacement"
+                })))
+            }
+        }
+
+        /// Handler that blocks persistence with a reason.
+        struct BlockingHandler {
+            reason: String,
+        }
+
+        #[async_trait]
+        impl HookHandler for BlockingHandler {
+            fn name(&self) -> &str {
+                "blocker"
+            }
+
+            fn events(&self) -> &[HE] {
+                &[HE::ToolResultPersist]
+            }
+
+            async fn handle(&self, _event: HE, _payload: &HP) -> HookResult<HA> {
+                Ok(HA::Block(self.reason.clone()))
+            }
+        }
+
+        /// Handler that always errors — runner must treat this as non-fatal.
+        struct ErroringHandler;
+
+        #[async_trait]
+        impl HookHandler for ErroringHandler {
+            fn name(&self) -> &str {
+                "errorer"
+            }
+
+            fn events(&self) -> &[HE] {
+                &[HE::ToolResultPersist]
+            }
+
+            async fn handle(&self, _event: HE, _payload: &HP) -> HookResult<HA> {
+                Err(moltis_common::Error::message("boom"))
+            }
+        }
+
+        /// Handler that records the tool name seen in the hook payload.
+        struct ToolNameRecordingHandler {
+            tool_names: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl HookHandler for ToolNameRecordingHandler {
+            fn name(&self) -> &str {
+                "tool-name-recorder"
+            }
+
+            fn events(&self) -> &[HE] {
+                &[HE::ToolResultPersist]
+            }
+
+            async fn handle(&self, _event: HE, payload: &HP) -> HookResult<HA> {
+                if let HP::ToolResultPersist { tool_name, .. } = payload {
+                    self.tool_names
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(tool_name.clone());
+                }
+                Ok(HA::Continue)
+            }
+        }
+
+        /// Provider that makes one tool call, then on its second invocation
+        /// captures the messages it receives (so the test can inspect the
+        /// exact tool-message content the hook produced) and returns final
+        /// text.
+        struct CapturingProvider {
+            call_count: AtomicUsize,
+            captured: Arc<Mutex<Vec<ChatMessage>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for CapturingProvider {
+            fn name(&self) -> &str {
+                "capture"
+            }
+
+            fn id(&self) -> &str {
+                "capture-model"
+            }
+
+            fn supports_tools(&self) -> bool {
+                true
+            }
+
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                _tools: &[serde_json::Value],
+            ) -> Result<CompletionResponse> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Ok(CompletionResponse {
+                        text: None,
+                        tool_calls: vec![ToolCall {
+                            id: "call_1".into(),
+                            name: "echo_tool".into(),
+                            arguments: serde_json::json!({"text": "unsanitized-original"}),
+                        }],
+                        usage: Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        },
+                    })
+                } else {
+                    *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
+                    Ok(CompletionResponse {
+                        text: Some("done".into()),
+                        tool_calls: vec![],
+                        usage: Usage {
+                            input_tokens: 20,
+                            output_tokens: 10,
+                            ..Default::default()
+                        },
+                    })
+                }
+            }
+
+            fn stream(
+                &self,
+                _messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                Box::pin(tokio_stream::empty())
+            }
+        }
+
+        fn tool_message_content(messages: &[ChatMessage]) -> Option<String> {
+            messages.iter().find_map(|m| {
+                if let ChatMessage::Tool { content, .. } = m {
+                    Some(content.clone())
+                } else {
+                    None
+                }
+            })
+        }
+
+        #[tokio::test]
+        async fn dispatch_fires_exactly_once_per_tool_result() {
+            let count = Arc::new(AtomicUsize::new(0));
+            let mut registry = HR::new();
+            registry.register(Arc::new(CountingHandler {
+                count: Arc::clone(&count),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(CapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_with_context(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.tool_calls_made, 1);
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "ToolResultPersist must fire once per tool result"
+            );
+
+            // Unmodified result reaches the next iteration intact.
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages)
+                .expect("tool message must reach the next LLM iteration");
+            assert!(
+                tool_msg.contains("unsanitized-original"),
+                "Continue must leave the result unchanged, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn modify_payload_replaces_tool_message_content() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(ReplacingHandler));
+
+            let (result, captured) = {
+                // Use the async path directly since run_once uses block_on.
+                let captured = Arc::new(Mutex::new(Vec::new()));
+                let provider = Arc::new(CapturingProvider {
+                    call_count: AtomicUsize::new(0),
+                    captured: Arc::clone(&captured),
+                });
+                let mut tools = ToolRegistry::new();
+                tools.register(Box::new(EchoTool));
+                let uc = UserContent::text("run the tool");
+                let result = run_agent_loop_with_context(
+                    provider,
+                    &tools,
+                    "You are a test bot.",
+                    &uc,
+                    None,
+                    None,
+                    None,
+                    Some(Arc::new(registry)),
+                )
+                .await
+                .unwrap();
+                (result, captured)
+            };
+
+            assert_eq!(result.tool_calls_made, 1);
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages).expect("tool message must be present");
+            assert!(
+                tool_msg.contains("safe-replacement"),
+                "ModifyPayload must rewrite the persisted result, got: {tool_msg}"
+            );
+            assert!(
+                !tool_msg.contains("unsanitized-original"),
+                "original result must not leak through, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn block_substitutes_error_marker_without_aborting() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(BlockingHandler {
+                reason: "injection detected".into(),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(CapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+            let result = run_agent_loop_with_context(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .expect("Block must NOT abort the agent run");
+
+            // Agent reached the final text iteration successfully.
+            assert_eq!(result.tool_calls_made, 1);
+            assert_eq!(result.text, "done");
+
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages).expect("tool message must be present");
+            assert!(
+                tool_msg.contains("blocked by hook: injection detected"),
+                "Block must substitute an error marker, got: {tool_msg}"
+            );
+            assert!(
+                !tool_msg.contains("unsanitized-original"),
+                "original hostile result must not leak through, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn handler_error_is_non_fatal_and_preserves_original_result() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(ErroringHandler));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(CapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+            let result = run_agent_loop_with_context(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .expect("handler error must not kill the agent run");
+
+            assert_eq!(result.tool_calls_made, 1);
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages).expect("tool message must be present");
+            assert!(
+                tool_msg.contains("unsanitized-original"),
+                "handler error must leave original result intact, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn dispatch_uses_sanitized_tool_name_in_payload() {
+            let tool_names = Arc::new(Mutex::new(Vec::new()));
+            let mut registry = HR::new();
+            registry.register(Arc::new(ToolNameRecordingHandler {
+                tool_names: Arc::clone(&tool_names),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(MangledCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured,
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+            let result = run_agent_loop_with_context(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.tool_calls_made, 1);
+            let tool_names = tool_names.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(tool_names.as_slice(), ["echo_tool"]);
+        }
+
+        // ── Streaming-path coverage ──────────────────────────────────────
+
+        /// Streaming equivalent of `CapturingProvider`: first call emits a
+        /// native tool call via stream events, second call captures the
+        /// messages it receives and emits final text.
+        struct StreamingCapturingProvider {
+            call_count: AtomicUsize,
+            captured: Arc<Mutex<Vec<ChatMessage>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for StreamingCapturingProvider {
+            fn name(&self) -> &str {
+                "stream-capture"
+            }
+
+            fn id(&self) -> &str {
+                "stream-capture-model"
+            }
+
+            fn supports_tools(&self) -> bool {
+                true
+            }
+
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[serde_json::Value],
+            ) -> Result<CompletionResponse> {
+                Ok(CompletionResponse {
+                    text: Some("fallback".into()),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                })
+            }
+
+            fn stream(
+                &self,
+                messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Box::pin(tokio_stream::iter(vec![
+                        StreamEvent::ToolCallStart {
+                            id: "call_1".into(),
+                            name: "echo_tool".into(),
+                            index: 0,
+                        },
+                        StreamEvent::ToolCallArgumentsDelta {
+                            index: 0,
+                            delta: r#"{"text":"unsanitized-original"}"#.into(),
+                        },
+                        StreamEvent::ToolCallComplete { index: 0 },
+                        StreamEvent::Done(Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        }),
+                    ]))
+                } else {
+                    *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = messages;
+                    Box::pin(tokio_stream::iter(vec![
+                        StreamEvent::Delta("done".into()),
+                        StreamEvent::Done(Usage {
+                            input_tokens: 5,
+                            output_tokens: 3,
+                            ..Default::default()
+                        }),
+                    ]))
+                }
+            }
+        }
+
+        struct MangledCapturingProvider {
+            call_count: AtomicUsize,
+            captured: Arc<Mutex<Vec<ChatMessage>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for MangledCapturingProvider {
+            fn name(&self) -> &str {
+                "mangled-capture"
+            }
+
+            fn id(&self) -> &str {
+                "mangled-capture-model"
+            }
+
+            fn supports_tools(&self) -> bool {
+                true
+            }
+
+            async fn complete(
+                &self,
+                messages: &[ChatMessage],
+                _tools: &[serde_json::Value],
+            ) -> Result<CompletionResponse> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Ok(CompletionResponse {
+                        text: None,
+                        tool_calls: vec![ToolCall {
+                            id: "call_1".into(),
+                            name: "echo_tool_2".into(),
+                            arguments: serde_json::json!({"text": "unsanitized-original"}),
+                        }],
+                        usage: Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        },
+                    })
+                } else {
+                    *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
+                    Ok(CompletionResponse {
+                        text: Some("done".into()),
+                        tool_calls: vec![],
+                        usage: Usage {
+                            input_tokens: 20,
+                            output_tokens: 10,
+                            ..Default::default()
+                        },
+                    })
+                }
+            }
+
+            fn stream(
+                &self,
+                _messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                Box::pin(tokio_stream::empty())
+            }
+        }
+
+        struct MangledStreamingCapturingProvider {
+            call_count: AtomicUsize,
+            captured: Arc<Mutex<Vec<ChatMessage>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for MangledStreamingCapturingProvider {
+            fn name(&self) -> &str {
+                "mangled-stream-capture"
+            }
+
+            fn id(&self) -> &str {
+                "mangled-stream-capture-model"
+            }
+
+            fn supports_tools(&self) -> bool {
+                true
+            }
+
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[serde_json::Value],
+            ) -> Result<CompletionResponse> {
+                Ok(CompletionResponse {
+                    text: Some("fallback".into()),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                })
+            }
+
+            fn stream(
+                &self,
+                messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Box::pin(tokio_stream::iter(vec![
+                        StreamEvent::ToolCallStart {
+                            id: "call_1".into(),
+                            name: "echo_tool_2".into(),
+                            index: 0,
+                        },
+                        StreamEvent::ToolCallArgumentsDelta {
+                            index: 0,
+                            delta: r#"{"text":"unsanitized-original"}"#.into(),
+                        },
+                        StreamEvent::ToolCallComplete { index: 0 },
+                        StreamEvent::Done(Usage {
+                            input_tokens: 10,
+                            output_tokens: 5,
+                            ..Default::default()
+                        }),
+                    ]))
+                } else {
+                    *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = messages;
+                    Box::pin(tokio_stream::iter(vec![
+                        StreamEvent::Delta("done".into()),
+                        StreamEvent::Done(Usage {
+                            input_tokens: 5,
+                            output_tokens: 3,
+                            ..Default::default()
+                        }),
+                    ]))
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn streaming_dispatch_fires_exactly_once_per_tool_result() {
+            let count = Arc::new(AtomicUsize::new(0));
+            let mut registry = HR::new();
+            registry.register(Arc::new(CountingHandler {
+                count: Arc::clone(&count),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(StreamingCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_streaming(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.tool_calls_made, 1);
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "streaming: ToolResultPersist must fire once per tool result"
+            );
+
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages)
+                .expect("tool message must reach the next LLM iteration");
+            assert!(
+                tool_msg.contains("unsanitized-original"),
+                "streaming: Continue must leave the result unchanged, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn streaming_modify_payload_replaces_tool_message_content() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(ReplacingHandler));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(StreamingCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_streaming(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.tool_calls_made, 1);
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages)
+                .expect("tool message must be present in streaming path");
+            assert!(
+                tool_msg.contains("safe-replacement"),
+                "streaming: ModifyPayload must rewrite the persisted result, got: {tool_msg}"
+            );
+            assert!(
+                !tool_msg.contains("unsanitized-original"),
+                "streaming: original result must not leak, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn streaming_block_substitutes_error_marker_without_aborting() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(BlockingHandler {
+                reason: "injection detected".into(),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(StreamingCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_streaming(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .expect("streaming: Block must NOT abort the agent run");
+
+            assert_eq!(result.tool_calls_made, 1);
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages)
+                .expect("tool message must be present in streaming path");
+            assert!(
+                tool_msg.contains("blocked by hook: injection detected"),
+                "streaming: Block must substitute an error marker, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn streaming_handler_error_is_non_fatal_and_preserves_original_result() {
+            let mut registry = HR::new();
+            registry.register(Arc::new(ErroringHandler));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(StreamingCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured: Arc::clone(&captured),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_streaming(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .expect("streaming: handler error must not kill the agent run");
+
+            assert_eq!(result.tool_calls_made, 1);
+            let messages = captured.lock().unwrap_or_else(|e| e.into_inner());
+            let tool_msg = tool_message_content(&messages)
+                .expect("tool message must be present in streaming path");
+            assert!(
+                tool_msg.contains("unsanitized-original"),
+                "streaming: handler error must leave original result intact, got: {tool_msg}"
+            );
+        }
+
+        #[tokio::test]
+        async fn streaming_dispatch_uses_sanitized_tool_name_in_payload() {
+            let tool_names = Arc::new(Mutex::new(Vec::new()));
+            let mut registry = HR::new();
+            registry.register(Arc::new(ToolNameRecordingHandler {
+                tool_names: Arc::clone(&tool_names),
+            }));
+
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let provider = Arc::new(MangledStreamingCapturingProvider {
+                call_count: AtomicUsize::new(0),
+                captured,
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(EchoTool));
+            let uc = UserContent::text("run the tool");
+
+            let result = run_agent_loop_streaming(
+                provider,
+                &tools,
+                "You are a test bot.",
+                &uc,
+                None,
+                None,
+                None,
+                Some(Arc::new(registry)),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(result.tool_calls_made, 1);
+            let tool_names = tool_names.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(tool_names.as_slice(), ["echo_tool"]);
+        }
+    }
+
+    // Reflex-loop detector tests — issue #658.
+
+    struct ReflexExecProvider {
+        reflex_count: std::sync::atomic::AtomicUsize,
+        saw_intervention: std::sync::atomic::AtomicBool,
+    }
+
+    fn history_contains_intervention(messages: &[ChatMessage]) -> bool {
+        messages.iter().any(|m| match m {
+            ChatMessage::User {
+                content: UserContent::Text(text),
+            } => text.contains("LOOP DETECTED") || text.contains("TOOLS DISABLED"),
+            _ => false,
+        })
+    }
+
+    #[async_trait]
+    impl LlmProvider for ReflexExecProvider {
+        fn name(&self) -> &str {
+            "mock-reflex"
+        }
+
+        fn id(&self) -> &str {
+            "mock-reflex"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            if history_contains_intervention(messages) {
+                self.saw_intervention
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return Ok(CompletionResponse {
+                    text: Some("Sorry, I do not know what command you wanted.".into()),
+                    tool_calls: vec![],
+                    usage: Usage {
+                        input_tokens: 5,
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
+                });
+            }
+            let n = self
+                .reflex_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CompletionResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: format!("call_{n}"),
+                    name: "exec".into(),
+                    arguments: serde_json::json!({}),
+                }],
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+            })
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn reflex_loop_fires_detector_and_terminates_non_streaming() {
+        let provider = Arc::new(ReflexExecProvider {
+            reflex_count: std::sync::atomic::AtomicUsize::new(0),
+            saw_intervention: std::sync::atomic::AtomicBool::new(false),
+        });
+        let saw = Arc::clone(&provider) as Arc<dyn LlmProvider>;
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestExecTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        });
+
+        let result = run_agent_loop(
+            saw,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("Run something"),
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.iterations <= 5,
+            "runner should intervene before iter 5, got {}",
+            result.iterations
+        );
+        assert!(result.text.contains("Sorry"));
+
+        assert!(
+            provider
+                .saw_intervention
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "provider never saw the loop-detector intervention message"
+        );
+
+        let events_snapshot = events.lock().unwrap().clone();
+        let any_start = events_snapshot
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::ToolCallStart { .. }));
+        assert!(
+            !any_start,
+            "rejected calls must not emit ToolCallStart, got: {events_snapshot:?}"
+        );
+        let rejected_count = events_snapshot
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::ToolCallRejected { .. }))
+            .count();
+        assert!(
+            rejected_count >= 3,
+            "expected at least 3 ToolCallRejected events, got {rejected_count}"
+        );
+        assert!(
+            events_snapshot
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::LoopInterventionFired { .. })),
+            "expected a LoopInterventionFired event"
+        );
+    }
+
+    struct ReflexExecStreamProvider {
+        reflex_count: std::sync::atomic::AtomicUsize,
+        saw_intervention: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ReflexExecStreamProvider {
+        fn name(&self) -> &str {
+            "mock-reflex-stream"
+        }
+
+        fn id(&self) -> &str {
+            "mock-reflex-stream"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            unreachable!("streaming test should not call complete()")
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+
+        fn stream_with_tools(
+            &self,
+            messages: Vec<ChatMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            if history_contains_intervention(&messages) {
+                self.saw_intervention
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let events = vec![
+                    StreamEvent::Delta(
+                        "I cannot proceed because I do not know what command you wanted me to run. \
+                         Please tell me the exact command to execute.".into(),
+                    ),
+                    StreamEvent::Done(Usage {
+                        input_tokens: 5,
+                        output_tokens: 5,
+                        ..Default::default()
+                    }),
+                ];
+                return Box::pin(tokio_stream::iter(events));
+            }
+            let n = self
+                .reflex_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let events = vec![
+                StreamEvent::ToolCallStart {
+                    id: format!("call_{n}"),
+                    name: "exec".into(),
+                    index: 0,
+                },
+                StreamEvent::ToolCallComplete { index: 0 },
+                StreamEvent::Done(Usage {
+                    input_tokens: 5,
+                    output_tokens: 5,
+                    ..Default::default()
+                }),
+            ];
+            Box::pin(tokio_stream::iter(events))
+        }
+    }
+
+    #[tokio::test]
+    async fn reflex_loop_fires_detector_and_terminates_streaming() {
+        let provider = Arc::new(ReflexExecStreamProvider {
+            reflex_count: std::sync::atomic::AtomicUsize::new(0),
+            saw_intervention: std::sync::atomic::AtomicBool::new(false),
+        });
+        let saw = Arc::clone(&provider) as Arc<dyn LlmProvider>;
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestExecTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        });
+
+        let result = run_agent_loop_streaming(
+            saw,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("Run something"),
+            Some(&on_event),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.iterations <= 5,
+            "streaming runner should intervene before iter 5, got {}",
+            result.iterations
+        );
+        assert!(
+            provider
+                .saw_intervention
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "streaming provider never saw the loop-detector intervention"
+        );
+
+        let events_snapshot = events.lock().unwrap().clone();
+        let rejected_count = events_snapshot
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::ToolCallRejected { .. }))
+            .count();
+        assert!(
+            rejected_count >= 3,
+            "streaming: expected >=3 ToolCallRejected events, got {rejected_count}"
+        );
+        assert!(
+            events_snapshot
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::LoopInterventionFired { .. })),
+            "streaming: expected LoopInterventionFired event"
+        );
+    }
+
+    struct LegitimateRetryProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for LegitimateRetryProvider {
+        fn name(&self) -> &str {
+            "mock-legitimate-retry"
+        }
+
+        fn id(&self) -> &str {
+            "mock-legitimate-retry"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match n {
+                0 => Ok(CompletionResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "exec".into(),
+                        arguments: serde_json::json!({"command": "ls /nonexistent-xyz"}),
+                    }],
+                    usage: Usage::default(),
+                }),
+                1 => Ok(CompletionResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "c2".into(),
+                        name: "exec".into(),
+                        arguments: serde_json::json!({"command": "echo recovered"}),
+                    }],
+                    usage: Usage::default(),
+                }),
+                _ => Ok(CompletionResponse {
+                    text: Some("Done".into()),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                }),
+            }
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn legitimate_retry_does_not_fire_loop_detector() {
+        let provider = Arc::new(LegitimateRetryProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestExecTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        });
+
+        let result = run_agent_loop(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("Run something"),
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.text, "Done");
+        let events_snapshot = events.lock().unwrap().clone();
+        assert!(
+            !events_snapshot
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::LoopInterventionFired { .. })),
+            "legitimate retry must not trigger loop detector, got {events_snapshot:?}"
+        );
+    }
+
+    /// Provider that emits a parallel batch `[exec({}), exec("ls /tmp")]`
+    /// on the first turn — one call will fail schema validation and one
+    /// will succeed — then returns text. Exercises the "trailing success in
+    /// the same batch suppresses intervention" edge case end-to-end (Greptile
+    /// finding #1 on commit cf39c1a6).
+    struct MixedBatchProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for MixedBatchProvider {
+        fn name(&self) -> &str {
+            "mock-mixed-batch"
+        }
+
+        fn id(&self) -> &str {
+            "mock-mixed-batch"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // Two failures followed by a success in a single batch is
+                // the trickiest input for the loop detector: per-call
+                // return values would accumulate a pending nudge that the
+                // success then silently abandons. The runner must agree
+                // with the detector's post-batch state (None) and NOT
+                // inject an intervention.
+                return Ok(CompletionResponse {
+                    text: None,
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "c1".into(),
+                            name: "exec".into(),
+                            arguments: serde_json::json!({}),
+                        },
+                        ToolCall {
+                            id: "c2".into(),
+                            name: "exec".into(),
+                            arguments: serde_json::json!({}),
+                        },
+                        ToolCall {
+                            id: "c3".into(),
+                            name: "exec".into(),
+                            arguments: serde_json::json!({"command": "true"}),
+                        },
+                    ],
+                    usage: Usage::default(),
+                });
+            }
+            Ok(CompletionResponse {
+                text: Some(
+                    "Mixed batch complete — proceeding to the next step of the task.".into(),
+                ),
+                tool_calls: vec![],
+                usage: Usage::default(),
+            })
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_batch_with_trailing_success_does_not_fire_intervention() {
+        // Regression for Greptile finding #1: trailing success must cancel
+        // any pending intervention from earlier rejects in the same batch.
+        let provider = Arc::new(MixedBatchProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestExecTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        });
+
+        let _result = run_agent_loop(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("Run something"),
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let events_snapshot = events.lock().unwrap().clone();
+        assert!(
+            !events_snapshot
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::LoopInterventionFired { .. })),
+            "trailing success in the same batch must not fire an intervention; \
+             got events: {events_snapshot:?}"
+        );
+        // Confirm the expected mix of rejected + successful calls was dispatched.
+        let rejected = events_snapshot
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::ToolCallRejected { .. }))
+            .count();
+        let started = events_snapshot
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::ToolCallStart { .. }))
+            .count();
+        assert_eq!(rejected, 2, "two calls should have been rejected");
+        assert_eq!(started, 1, "one successful call should have started");
+    }
+
+    /// Provider that emits FOUR identical `exec({})` calls in a single
+    /// batch. This races the loop detector through both escalation stages
+    /// within one batch; the runner must still deliver the stage-1 nudge
+    /// first rather than skipping straight to strip-tools (Greptile finding
+    /// #2 on commit cf39c1a6).
+    struct ParallelReflexProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ParallelReflexProvider {
+        fn name(&self) -> &str {
+            "mock-parallel-reflex"
+        }
+
+        fn id(&self) -> &str {
+            "mock-parallel-reflex"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            if history_contains_intervention(messages) {
+                return Ok(CompletionResponse {
+                    text: Some(
+                        "I cannot proceed without knowing what command to run. Please advise."
+                            .into(),
+                    ),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                });
+            }
+            let _n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CompletionResponse {
+                text: None,
+                tool_calls: (0..4)
+                    .map(|i| ToolCall {
+                        id: format!("call_{i}"),
+                        name: "exec".into(),
+                        arguments: serde_json::json!({}),
+                    })
+                    .collect(),
+                usage: Usage::default(),
+            })
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_batch_with_stage_skip_delivers_nudge_first() {
+        // Regression for Greptile finding #2: four identical failing calls
+        // in one batch race past the nudge stage and would skip straight to
+        // strip-tools. The runner must still deliver the stage-1 nudge.
+        let provider = Arc::new(ParallelReflexProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestExecTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        });
+
+        let _result = run_agent_loop(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("Run something"),
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let events_snapshot = events.lock().unwrap().clone();
+        let intervention_stages: Vec<u8> = events_snapshot
+            .iter()
+            .filter_map(|e| match e {
+                RunnerEvent::LoopInterventionFired { stage, .. } => Some(*stage),
+                _ => None,
+            })
+            .collect();
+        // The first intervention fired must be stage 1 (nudge), not stage 2.
+        assert!(
+            !intervention_stages.is_empty(),
+            "expected at least one LoopInterventionFired event"
+        );
+        assert_eq!(
+            intervention_stages[0], 1,
+            "stage-1 nudge must be delivered first even when a single batch races \
+             through both escalation stages; stages were: {intervention_stages:?}"
+        );
     }
 }

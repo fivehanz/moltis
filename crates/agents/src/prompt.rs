@@ -69,6 +69,8 @@ pub struct PromptHostRuntimeContext {
     pub channel_chat_id: Option<String>,
     /// Best-effort channel chat type (for example `private`, `group`, `channel`).
     pub channel_chat_type: Option<String>,
+    /// Platform-specific sender/peer ID for the current channel message.
+    pub channel_sender_id: Option<String>,
     /// Persistent Moltis workspace root (`data_dir`), e.g. `~/.moltis`
     /// or `/home/moltis/.moltis` in containerized deploys.
     pub data_dir: Option<String>,
@@ -384,7 +386,9 @@ const EXEC_ROUTING_GUIDANCE_SANDBOX: &str = "Execution routing:\n\
 - `exec` runs inside sandbox when `Sandbox(exec): enabled=true`.\n\
 - When sandbox is disabled, `exec` runs on the host and may require approval.\n\
 - In sandbox mode, `~` and relative paths resolve under `Sandbox(exec): home=...` (usually `/home/sandbox`).\n\
-- Persistent workspace files live under `Host: data_dir=...`; when mounted, the same path appears as `Sandbox(exec): workspace_path=...`.\n";
+- Persistent workspace files live under `Host: data_dir=...`; when mounted, the same path appears as `Sandbox(exec): workspace_path=...`.\n\
+- With `workspace_mount=ro`, sandbox commands may read mounted files but cannot modify them.\n\
+- For durable long-term memory writes, prefer `memory_save` over shell writes to `MEMORY.md` or `memory/*.md`.\n";
 const EXEC_ROUTING_SANDBOX_CLOSING: &str = "- Sandbox/host routing changes are expected runtime behavior. Do not frame them as surprising or anomalous.\n";
 const EXEC_ROUTING_GUIDANCE_HOST_ONLY: &str = "Execution routing:\n\
 - `exec` runs on the host and may require approval.\n";
@@ -1278,6 +1282,7 @@ mod tests {
                 channel_account_id: None,
                 channel_chat_id: None,
                 channel_chat_type: None,
+                channel_sender_id: None,
                 data_dir: Some("/home/moltis/.moltis".into()),
                 sudo_non_interactive: Some(true),
                 sudo_status: Some("passwordless".into()),

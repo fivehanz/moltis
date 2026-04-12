@@ -362,6 +362,7 @@ async fn handle_message(
         channel_type: ChannelType::Whatsapp,
         sender_name,
         username: Some(username),
+        sender_id: Some(peer_id.clone()),
         message_kind: Some(message_kind),
         model: effective_config.model.clone(),
         audio_filename: None,

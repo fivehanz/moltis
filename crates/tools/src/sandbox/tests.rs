@@ -381,6 +381,28 @@ fn test_docker_workspace_args_ro() {
 }
 
 #[test]
+fn test_workspace_mount_points_sandbox_at_moltis_data_dir_memory_files() {
+    let config = SandboxConfig {
+        workspace_mount: WorkspaceMount::Ro,
+        ..Default::default()
+    };
+    let docker = DockerSandbox::new(config);
+    let args = docker.workspace_args();
+    let workspace_dir = moltis_config::data_dir();
+    let guest_memory_file = workspace_dir.join("MEMORY.md");
+    let guest_memory_dir = workspace_dir.join("memory");
+
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0], "-v");
+    assert!(
+        args[1].contains(&format!(":{}:ro", workspace_dir.display())),
+        "workspace mount should expose the Moltis data dir inside the sandbox"
+    );
+    assert_eq!(guest_memory_file, workspace_dir.join("MEMORY.md"));
+    assert_eq!(guest_memory_dir, workspace_dir.join("memory"));
+}
+
+#[test]
 fn test_docker_workspace_args_uses_host_data_dir_override() {
     let config = SandboxConfig {
         workspace_mount: WorkspaceMount::Ro,
@@ -437,6 +459,29 @@ fn test_docker_home_persistence_args_default_shared() {
         .join("shared");
     let expected_volume = format!("{}:/home/sandbox:rw", expected_host_dir.display());
     assert_eq!(args[1], expected_volume);
+}
+
+#[test]
+fn test_sandbox_home_persistence_is_separate_from_memory_workspace() {
+    let config = SandboxConfig::default();
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "sess-1".into(),
+    };
+
+    let home_dir =
+        guest_visible_sandbox_home_persistence_host_dir(&config, &id).expect("shared home path");
+    let data_dir = moltis_config::data_dir();
+
+    assert_eq!(
+        home_dir,
+        data_dir.join("sandbox").join("home").join("shared")
+    );
+    assert_ne!(home_dir, data_dir);
+    assert_eq!(
+        home_dir.parent(),
+        Some(data_dir.join("sandbox").join("home").as_path())
+    );
 }
 
 #[test]

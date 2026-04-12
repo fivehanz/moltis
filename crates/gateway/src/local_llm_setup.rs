@@ -1723,8 +1723,6 @@ struct HfModelInfo {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
     use super::*;
 
     fn sample_system_info() -> local_gguf::system_info::SystemInfo {
@@ -1739,11 +1737,6 @@ mod tests {
         }
     }
 
-    fn local_model_config_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
-
     struct LocalModelConfigTestGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
@@ -1751,7 +1744,7 @@ mod tests {
     impl LocalModelConfigTestGuard {
         fn new() -> Self {
             Self {
-                _lock: local_model_config_test_lock(),
+                _lock: crate::config_override_test_lock(),
             }
         }
     }

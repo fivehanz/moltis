@@ -338,13 +338,14 @@ test.describe("Session management", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
-	test("main session hides delete while non-main sessions show delete in more controls", async ({ page }) => {
+	test("main session hides session-specific controls, non-main shows delete only", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await page.goto("/");
 		await waitForWsConnected(page);
 		await expectPageContentMounted(page);
 
 		await openChatMoreModal(page);
+		await expect(page.locator("#sessionControlsSection")).toBeHidden();
 		await expect(page.locator('#chatMoreModal button[title="Clear session"]')).toBeHidden();
 		await expect(page.locator('#chatMoreModal button[title="Delete session"]')).toHaveCount(0);
 		await closeChatMoreModal(page);
@@ -352,6 +353,7 @@ test.describe("Session management", () => {
 		await createSession(page);
 
 		await openChatMoreModal(page);
+		await expect(page.locator("#sessionControlsSection")).toBeVisible();
 		await expect(page.locator('#chatMoreModal button[title="Clear session"]')).toHaveCount(0);
 		await expect(page.locator('#chatMoreModal button[title="Delete session"]')).toBeVisible();
 		await closeChatMoreModal(page);

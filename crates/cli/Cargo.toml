@@ -113,6 +113,7 @@ default = [
   "firecrawl",
   "graphql",
   "jemalloc",
+  "llm-compaction",
   "local-llm",
   "local-llm-metal",
   "matrix",
@@ -132,6 +133,7 @@ default = [
   "web-ui",
   "whatsapp",
 ]
+llm-compaction  = ["moltis-gateway/llm-compaction"]
 # Minimal build for memory-constrained devices (Raspberry Pi, etc.).
 # Build with: cargo build --release --no-default-features --features lightweight
 code-splitter   = ["moltis-memory/code-splitter"]

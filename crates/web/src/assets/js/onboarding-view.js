@@ -920,10 +920,10 @@ function OnboardingProviderRow({
 				}
 				${error ? html`<${ErrorPanel} message=${error} />` : null}
 				<div class="flex items-center gap-2 mt-1">
-					<button type="submit" class="provider-btn provider-btn-sm" disabled=${phase === "validating"}>${phase === "validating" ? "Validating\u2026" : "Save & Validate"}</button>
+					<button type="submit" class="provider-btn provider-btn-sm" disabled=${phase === "validating"}>${phase === "validating" ? "Saving\u2026" : "Save"}</button>
 					<button type="button" class="provider-btn provider-btn-secondary provider-btn-sm" onClick=${onCancelConfigure} disabled=${phase === "validating"}>Cancel</button>
 				</div>
-				${phase === "validating" ? html`<div class="text-xs text-[var(--muted)] mt-1">Testing connection and discovering available models\u2026</div>` : null}
+				${phase === "validating" ? html`<div class="text-xs text-[var(--muted)] mt-1">Discovering available models\u2026</div>` : null}
 			</form>`
 				: null
 		}

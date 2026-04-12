@@ -316,7 +316,7 @@ impl GatewayInner {
             #[cfg(feature = "push-notifications")]
             push_service: None,
             llm_providers: None,
-            cached_location: moltis_config::load_user().and_then(|u| u.location),
+            cached_location: moltis_config::resolve_user_profile().location,
             channel_status_log: HashMap::new(),
             channel_command_mode_sessions: HashSet::new(),
             channels_offered: vec![
@@ -372,9 +372,9 @@ pub struct GatewayState {
     /// SQLite-backed pairing store for device token persistence.
     /// `None` in tests that don't need pairing.
     pub pairing_store: Option<Arc<PairingStore>>,
-    /// Memory manager for long-term memory search (None if no embedding provider).
+    /// Memory runtime for long-term memory search.
     /// `Arc` because it is cloned into background tokio tasks.
-    pub memory_manager: Option<Arc<moltis_memory::manager::MemoryManager>>,
+    pub memory_manager: Option<moltis_memory::runtime::DynMemoryRuntime>,
     /// Whether the server is bound to a loopback address (localhost/127.0.0.1/::1).
     pub localhost_only: bool,
     /// Whether the server is known to be behind a reverse proxy.
@@ -483,7 +483,7 @@ impl GatewayState {
         behind_proxy: bool,
         tls_active: bool,
         hook_registry: Option<Arc<moltis_common::hooks::HookRegistry>>,
-        memory_manager: Option<Arc<moltis_memory::manager::MemoryManager>>,
+        memory_manager: Option<moltis_memory::runtime::DynMemoryRuntime>,
         port: u16,
         ws_request_logs: bool,
         deploy_platform: Option<String>,

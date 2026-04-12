@@ -465,6 +465,7 @@ impl MsTeamsPlugin {
             channel_type: ChannelType::MsTeams,
             sender_name,
             username: None,
+            sender_id: Some(peer_id.clone()),
             message_kind: Some(if !downloaded_attachments.is_empty() {
                 ChannelMessageKind::Photo
             } else {

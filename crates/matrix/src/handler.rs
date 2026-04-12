@@ -325,6 +325,7 @@ pub async fn handle_room_message(
         channel_type: ChannelType::Matrix,
         sender_name: sender_name.clone(),
         username: Some(sender_id.clone()),
+        sender_id: Some(sender_id.clone()),
         message_kind: Some(kind),
         model: config.resolve_model(&room_id, &sender_id).map(String::from),
         audio_filename: None,

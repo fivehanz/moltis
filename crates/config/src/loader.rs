@@ -4,7 +4,10 @@ use std::{
     sync::Mutex,
 };
 
-use tracing::{debug, info, warn};
+use {
+    serde::{Deserialize, Serialize},
+    tracing::{debug, info, warn},
+};
 
 use crate::{
     env_subst::substitute_env,
@@ -354,6 +357,22 @@ pub fn memory_path() -> PathBuf {
     data_dir().join("MEMORY.md")
 }
 
+/// Origin of a loaded workspace markdown file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMarkdownSource {
+    AgentWorkspace,
+    RootWorkspace,
+}
+
+/// Loaded workspace markdown content with its source path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadedWorkspaceMarkdown {
+    pub content: String,
+    pub path: PathBuf,
+    pub source: WorkspaceMarkdownSource,
+}
+
 /// Return the workspace directory for a named agent: `data_dir()/agents/<id>`.
 pub fn agent_workspace_dir(agent_id: &str) -> PathBuf {
     data_dir().join("agents").join(agent_id)
@@ -399,6 +418,29 @@ pub fn resolve_identity() -> ResolvedIdentity {
     resolve_identity_from_config(&config)
 }
 
+/// Build a fully-resolved user profile by merging `moltis.toml` `[user]` with `USER.md`.
+pub fn resolve_user_profile() -> UserProfile {
+    let config = discover_and_load();
+    resolve_user_profile_from_config(&config)
+}
+
+/// Like [`resolve_user_profile`] but accepts a pre-loaded config.
+pub fn resolve_user_profile_from_config(config: &MoltisConfig) -> UserProfile {
+    let mut user = config.user.clone();
+    if let Some(file_user) = load_user() {
+        if file_user.name.is_some() {
+            user.name = file_user.name;
+        }
+        if file_user.timezone.is_some() {
+            user.timezone = file_user.timezone;
+        }
+        if file_user.location.is_some() {
+            user.location = file_user.location;
+        }
+    }
+    user
+}
+
 /// Like [`resolve_identity`] but accepts a pre-loaded config.
 pub fn resolve_identity_from_config(config: &MoltisConfig) -> ResolvedIdentity {
     let mut id = ResolvedIdentity::from_config(config);
@@ -418,9 +460,7 @@ pub fn resolve_identity_from_config(config: &MoltisConfig) -> ResolvedIdentity {
         }
     }
 
-    if let Some(file_user) = load_user()
-        && let Some(name) = file_user.name
-    {
+    if let Some(name) = resolve_user_profile_from_config(config).name {
         id.user_name = Some(name);
     }
 
@@ -596,14 +636,30 @@ pub fn load_memory_md() -> Option<String> {
 /// For `"main"`, this checks `data_dir()/agents/main/MEMORY.md` first and
 /// falls back to the root `MEMORY.md`.
 pub fn load_memory_md_for_agent(agent_id: &str) -> Option<String> {
+    load_memory_md_for_agent_with_source(agent_id).map(|loaded| loaded.content)
+}
+
+/// Load MEMORY.md for a specific agent workspace and report its resolved path.
+///
+/// For `"main"`, this checks `data_dir()/agents/main/MEMORY.md` first and
+/// falls back to the root `MEMORY.md`.
+pub fn load_memory_md_for_agent_with_source(agent_id: &str) -> Option<LoadedWorkspaceMarkdown> {
     if agent_id == "main" {
         let main_path = agent_workspace_dir("main").join("MEMORY.md");
-        if let Some(memory) = load_workspace_markdown(main_path) {
+        if let Some(memory) =
+            load_workspace_markdown_with_source(main_path, WorkspaceMarkdownSource::AgentWorkspace)
+        {
             return Some(memory);
         }
-        return load_memory_md();
+        return load_workspace_markdown_with_source(
+            memory_path(),
+            WorkspaceMarkdownSource::RootWorkspace,
+        );
     }
-    load_workspace_markdown(agent_workspace_dir(agent_id).join("MEMORY.md"))
+    load_workspace_markdown_with_source(
+        agent_workspace_dir(agent_id).join("MEMORY.md"),
+        WorkspaceMarkdownSource::AgentWorkspace,
+    )
 }
 
 /// Persist SOUL.md in the workspace root (`data_dir`).
@@ -758,6 +814,25 @@ pub fn save_user(user: &UserProfile) -> crate::Result<PathBuf> {
     Ok(path)
 }
 
+/// Persist `USER.md` according to the configured write mode.
+///
+/// When writes are disabled, any existing `USER.md` file is removed and no new
+/// file is created.
+pub fn save_user_with_mode(
+    user: &UserProfile,
+    mode: crate::schema::UserProfileWriteMode,
+) -> crate::Result<Option<PathBuf>> {
+    if mode.allows_explicit_write() {
+        return save_user(user).map(Some);
+    }
+
+    let path = user_path();
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(None)
+}
+
 pub fn extract_yaml_frontmatter(content: &str) -> Option<&str> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
@@ -896,6 +971,17 @@ pub fn normalize_workspace_markdown_content(content: &str) -> Option<String> {
 fn load_workspace_markdown(path: PathBuf) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     normalize_workspace_markdown_content(&content)
+}
+
+fn load_workspace_markdown_with_source(
+    path: PathBuf,
+    source: WorkspaceMarkdownSource,
+) -> Option<LoadedWorkspaceMarkdown> {
+    load_workspace_markdown(path.clone()).map(|content| LoadedWorkspaceMarkdown {
+        content,
+        path,
+        source,
+    })
 }
 
 fn load_identity_from_path(path: &Path) -> Option<AgentIdentity> {
@@ -1680,6 +1766,71 @@ name = "Rex"
     }
 
     #[test]
+    fn resolve_user_profile_prefers_user_md_over_config() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        let config = MoltisConfig {
+            user: UserProfile {
+                name: Some("Config User".to_string()),
+                timezone: Some(crate::schema::Timezone::from(chrono_tz::Europe::Paris)),
+                location: Some(crate::schema::GeoLocation {
+                    latitude: 1.0,
+                    longitude: 2.0,
+                    place: Some("Config Place".to_string()),
+                    updated_at: Some(100),
+                }),
+            },
+            ..Default::default()
+        };
+        save_user(&UserProfile {
+            name: Some("File User".to_string()),
+            timezone: Some(crate::schema::Timezone::from(chrono_tz::US::Eastern)),
+            location: Some(crate::schema::GeoLocation {
+                latitude: 3.0,
+                longitude: 4.0,
+                place: Some("File Place".to_string()),
+                updated_at: Some(200),
+            }),
+        })
+        .expect("save user");
+
+        let resolved = resolve_user_profile_from_config(&config);
+        assert_eq!(resolved.name.as_deref(), Some("File User"));
+        assert_eq!(
+            resolved.timezone.as_ref().map(|tz| tz.name()),
+            Some("US/Eastern")
+        );
+        let location = resolved.location.expect("resolved location");
+        assert_eq!(location.place.as_deref(), Some("File Place"));
+        assert_eq!(location.updated_at, Some(200));
+
+        clear_data_dir();
+    }
+
+    #[test]
+    fn save_user_with_mode_off_removes_existing_file() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        let user = UserProfile {
+            name: Some("Alice".to_string()),
+            ..Default::default()
+        };
+        let path = save_user(&user).expect("seed user");
+        assert!(path.exists());
+
+        let saved_path = save_user_with_mode(&user, crate::schema::UserProfileWriteMode::Off)
+            .expect("disable user profile writes");
+        assert!(saved_path.is_none());
+        assert!(!path.exists());
+
+        clear_data_dir();
+    }
+
+    #[test]
     fn load_boot_md_reads_trimmed_content() {
         let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1785,6 +1936,72 @@ name = "Rex"
         set_data_dir(dir.path().to_path_buf());
 
         assert_eq!(load_memory_md(), None);
+
+        clear_data_dir();
+    }
+
+    #[test]
+    fn load_memory_md_for_main_prefers_agent_workspace_then_root() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        std::fs::write(dir.path().join("MEMORY.md"), "root memory").unwrap();
+        assert_eq!(
+            load_memory_md_for_agent("main").as_deref(),
+            Some("root memory")
+        );
+
+        let agent_dir = dir.path().join("agents").join("main");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("MEMORY.md"), "main agent memory").unwrap();
+        assert_eq!(
+            load_memory_md_for_agent("main").as_deref(),
+            Some("main agent memory")
+        );
+
+        clear_data_dir();
+    }
+
+    #[test]
+    fn load_memory_md_for_non_main_is_agent_scoped() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        std::fs::write(dir.path().join("MEMORY.md"), "root memory").unwrap();
+        assert_eq!(load_memory_md_for_agent("ops"), None);
+
+        let agent_dir = dir.path().join("agents").join("ops");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("MEMORY.md"), "ops memory").unwrap();
+        assert_eq!(
+            load_memory_md_for_agent("ops").as_deref(),
+            Some("ops memory")
+        );
+
+        clear_data_dir();
+    }
+
+    #[test]
+    fn load_memory_md_for_agent_reports_resolved_source_and_path() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        set_data_dir(dir.path().to_path_buf());
+
+        std::fs::write(dir.path().join("MEMORY.md"), "root memory").unwrap();
+        let main_root = load_memory_md_for_agent_with_source("main").unwrap();
+        assert_eq!(main_root.content, "root memory");
+        assert_eq!(main_root.path, dir.path().join("MEMORY.md"));
+        assert_eq!(main_root.source, WorkspaceMarkdownSource::RootWorkspace);
+
+        let agent_dir = dir.path().join("agents").join("ops");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("MEMORY.md"), "ops memory").unwrap();
+        let ops_memory = load_memory_md_for_agent_with_source("ops").unwrap();
+        assert_eq!(ops_memory.content, "ops memory");
+        assert_eq!(ops_memory.path, agent_dir.join("MEMORY.md"));
+        assert_eq!(ops_memory.source, WorkspaceMarkdownSource::AgentWorkspace);
 
         clear_data_dir();
     }

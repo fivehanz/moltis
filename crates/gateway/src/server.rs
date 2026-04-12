@@ -68,6 +68,90 @@ async fn start_skill_hot_reload_watcher() -> anyhow::Result<(
     moltis_skills::watcher::SkillWatcher::start(watch_specs)
 }
 
+#[cfg(feature = "qmd")]
+fn sanitize_qmd_index_name(root: &FsPath) -> String {
+    let mut sanitized = String::new();
+    let mut previous_was_separator = false;
+    for character in root.to_string_lossy().chars() {
+        let normalized = character.to_ascii_lowercase();
+        if normalized.is_ascii_alphanumeric() {
+            sanitized.push(normalized);
+            previous_was_separator = false;
+        } else if !previous_was_separator {
+            sanitized.push('_');
+            previous_was_separator = true;
+        }
+    }
+    let sanitized = sanitized.trim_matches('_').to_string();
+    if sanitized.is_empty() {
+        "moltis".into()
+    } else {
+        format!("moltis-{sanitized}")
+    }
+}
+
+#[cfg(feature = "qmd")]
+fn build_qmd_collections(
+    data_dir: &FsPath,
+    config: &moltis_config::schema::QmdConfig,
+) -> HashMap<String, moltis_qmd::QmdCollection> {
+    if config.collections.is_empty() {
+        return HashMap::from([
+            ("moltis-root-memory".into(), moltis_qmd::QmdCollection {
+                path: data_dir.to_path_buf(),
+                glob: "MEMORY.md".into(),
+            }),
+            (
+                "moltis-root-memory-lower".into(),
+                moltis_qmd::QmdCollection {
+                    path: data_dir.to_path_buf(),
+                    glob: "memory.md".into(),
+                },
+            ),
+            ("moltis-memory".into(), moltis_qmd::QmdCollection {
+                path: data_dir.join("memory"),
+                glob: "**/*.md".into(),
+            }),
+            ("moltis-agents".into(), moltis_qmd::QmdCollection {
+                path: data_dir.join("agents"),
+                glob: "**/*.md".into(),
+            }),
+        ]);
+    }
+
+    let mut collections = HashMap::new();
+    for (name, collection) in &config.collections {
+        let globs = if collection.globs.is_empty() {
+            vec!["**/*.md".to_string()]
+        } else {
+            collection.globs.clone()
+        };
+
+        for (path_index, path) in collection.paths.iter().enumerate() {
+            let root = FsPath::new(path);
+            let root = if root.is_absolute() {
+                root.to_path_buf()
+            } else {
+                data_dir.join(root)
+            };
+
+            for (glob_index, glob) in globs.iter().enumerate() {
+                let key = if collection.paths.len() == 1 && globs.len() == 1 {
+                    name.clone()
+                } else {
+                    format!("{name}-{path_index}-{glob_index}")
+                };
+                collections.insert(key, moltis_qmd::QmdCollection {
+                    path: root.clone(),
+                    glob: glob.clone(),
+                });
+            }
+        }
+    }
+
+    collections
+}
+
 // ── Location requester ───────────────────────────────────────────────────────
 
 /// Gateway implementation of [`moltis_tools::location::LocationRequester`].
@@ -2865,7 +2949,7 @@ pub async fn prepare_gateway_core(
     }
 
     // ── Memory system initialization ─────────────────────────────────────
-    let memory_manager: Option<Arc<moltis_memory::manager::MemoryManager>> = {
+    let memory_manager: Option<moltis_memory::runtime::DynMemoryRuntime> = {
         // Build embedding provider(s) for the fallback chain.
         let mut embedding_providers: Vec<(
             String,
@@ -2878,9 +2962,9 @@ pub async fn prepare_gateway_core(
             info!("memory: RAG disabled via memory.disable_rag=true, using keyword-only search");
         } else {
             // 1. If user explicitly configured an embedding provider, use it.
-            if let Some(ref provider_name) = mem_cfg.provider {
-                match provider_name.as_str() {
-                    "local" => {
+            if let Some(provider) = mem_cfg.provider {
+                match provider {
+                    moltis_config::MemoryProvider::Local => {
                         // Local GGUF embeddings require the `local-embeddings` feature on moltis-memory.
                         #[cfg(feature = "local-embeddings")]
                         {
@@ -2912,14 +2996,16 @@ pub async fn prepare_gateway_core(
                             "memory: 'local' embedding provider requires the 'local-embeddings' feature"
                         );
                     },
-                    "ollama" | "custom" | "openai" => {
-                        let base_url = mem_cfg.base_url.clone().unwrap_or_else(|| {
-                            match provider_name.as_str() {
-                                "ollama" => "http://localhost:11434".into(),
-                                _ => "https://api.openai.com".into(),
-                            }
+                    moltis_config::MemoryProvider::Ollama
+                    | moltis_config::MemoryProvider::Custom
+                    | moltis_config::MemoryProvider::OpenAi => {
+                        let base_url = mem_cfg.base_url.clone().unwrap_or_else(|| match provider {
+                            moltis_config::MemoryProvider::Ollama => {
+                                "http://localhost:11434".into()
+                            },
+                            _ => "https://api.openai.com".into(),
                         });
-                        if provider_name == "ollama" {
+                        if provider == moltis_config::MemoryProvider::Ollama {
                             let model = mem_cfg.model.as_deref().unwrap_or("nomic-embed-text");
                             ensure_ollama_model(&base_url, model).await;
                         }
@@ -2940,9 +3026,14 @@ pub async fn prepare_gateway_core(
                             // Use a sensible default dims; the API returns the actual dims.
                             e = e.with_model(model.clone(), 1536);
                         }
-                        embedding_providers.push((provider_name.clone(), Box::new(e)));
+                        let provider_name = match provider {
+                            moltis_config::MemoryProvider::Ollama => "ollama",
+                            moltis_config::MemoryProvider::Custom => "custom",
+                            moltis_config::MemoryProvider::OpenAi => "openai",
+                            moltis_config::MemoryProvider::Local => "local",
+                        };
+                        embedding_providers.push((provider_name.to_owned(), Box::new(e)));
                     },
-                    other => warn!("memory: unknown embedding provider '{other}'"),
                 }
             }
 
@@ -3081,7 +3172,7 @@ pub async fn prepare_gateway_core(
                         );
                     }
 
-                    let config = moltis_memory::config::MemoryConfig {
+                    let memory_runtime_config = moltis_memory::config::MemoryConfig {
                         db_path: memory_db_path.to_string_lossy().into(),
                         data_dir: Some(data_dir.clone()),
                         memory_dirs: vec![
@@ -3092,18 +3183,94 @@ pub async fn prepare_gateway_core(
                             // remain indexed across periodic full syncs.
                             agents_root,
                         ],
+                        citations: match mem_cfg.citations {
+                            moltis_config::MemoryCitationsMode::On => {
+                                moltis_memory::config::CitationMode::On
+                            },
+                            moltis_config::MemoryCitationsMode::Off => {
+                                moltis_memory::config::CitationMode::Off
+                            },
+                            moltis_config::MemoryCitationsMode::Auto => {
+                                moltis_memory::config::CitationMode::Auto
+                            },
+                        },
+                        llm_reranking: mem_cfg.llm_reranking,
+                        merge_strategy: match mem_cfg.search_merge_strategy {
+                            moltis_config::MemorySearchMergeStrategy::Rrf => {
+                                moltis_memory::config::MergeStrategy::Rrf
+                            },
+                            moltis_config::MemorySearchMergeStrategy::Linear => {
+                                moltis_memory::config::MergeStrategy::Linear
+                            },
+                        },
                         ..Default::default()
                     };
 
                     let store = Box::new(moltis_memory::store_sqlite::SqliteMemoryStore::new(
                         memory_pool,
                     ));
-                    let memory_dirs_for_watch = config.memory_dirs.clone();
-                    let manager = Arc::new(if let Some(embedder) = embedder {
-                        moltis_memory::manager::MemoryManager::new(config, store, embedder)
+                    let memory_dirs_for_watch = memory_runtime_config.memory_dirs.clone();
+                    let builtin_manager = Arc::new(if let Some(embedder) = embedder {
+                        moltis_memory::manager::MemoryManager::new(
+                            memory_runtime_config,
+                            store,
+                            embedder,
+                        )
                     } else {
-                        moltis_memory::manager::MemoryManager::keyword_only(config, store)
+                        moltis_memory::manager::MemoryManager::keyword_only(
+                            memory_runtime_config,
+                            store,
+                        )
                     });
+                    let manager: moltis_memory::runtime::DynMemoryRuntime = match mem_cfg.backend {
+                        moltis_config::MemoryBackend::Builtin => builtin_manager.clone(),
+                        moltis_config::MemoryBackend::Qmd => {
+                            #[cfg(feature = "qmd")]
+                            {
+                                let qmd_manager = Arc::new(moltis_qmd::QmdManager::new(
+                                    moltis_qmd::QmdManagerConfig {
+                                        command: mem_cfg
+                                            .qmd
+                                            .command
+                                            .clone()
+                                            .unwrap_or_else(|| "qmd".into()),
+                                        collections: build_qmd_collections(&data_dir, &mem_cfg.qmd),
+                                        max_results: mem_cfg.qmd.max_results.unwrap_or(20),
+                                        timeout_ms: mem_cfg.qmd.timeout_ms.unwrap_or(30_000),
+                                        work_dir: data_dir.clone(),
+                                        index_name: sanitize_qmd_index_name(&data_dir),
+                                        env_overrides: HashMap::new(),
+                                    },
+                                ));
+
+                                if qmd_manager.is_available().await {
+                                    info!(
+                                        index = %qmd_manager.index_name(),
+                                        collections = qmd_manager.collections().len(),
+                                        "memory: using QMD backend"
+                                    );
+                                    Arc::new(moltis_qmd::QmdMemoryRuntime::new(
+                                        qmd_manager,
+                                        builtin_manager.clone(),
+                                        mem_cfg.disable_rag,
+                                    ))
+                                } else {
+                                    warn!(
+                                        "memory: QMD backend requested but qmd is unavailable, falling back to builtin memory"
+                                    );
+                                    builtin_manager.clone()
+                                }
+                            }
+
+                            #[cfg(not(feature = "qmd"))]
+                            {
+                                warn!(
+                                    "memory: QMD backend requested but the gateway was built without the qmd feature, falling back to builtin memory"
+                                );
+                                builtin_manager.clone()
+                            }
+                        },
+                    };
 
                     // Initial sync + periodic re-sync (15min with watcher, 5min without).
                     let sync_manager = Arc::clone(&manager);
@@ -3198,6 +3365,7 @@ pub async fn prepare_gateway_core(
                     });
 
                     info!(
+                        backend = manager.backend_name(),
                         embeddings = manager.has_embeddings(),
                         "memory system initialized"
                     );
@@ -3985,6 +4153,7 @@ pub async fn prepare_gateway_core(
             Arc::clone(&session_store),
             Arc::clone(&session_metadata),
         )
+        .with_session_state_store(Arc::clone(&session_state_store))
         .with_tools(Arc::clone(&shared_tool_registry))
         .with_failover(config.failover.clone());
 
@@ -4502,8 +4671,13 @@ echo "$(date -Iseconds) tool=$tool" >> /tmp/moltis-hook.log
 
 **Can modify or block (sequential dispatch):**
 - `BeforeAgentStart` — before a new agent run begins
+- `BeforeLLMCall` — before a prompt is sent to the LLM provider
+- `AfterLLMCall` — after an LLM response arrives, before any tool execution
 - `BeforeToolCall` — before executing a tool (inspect/modify arguments)
 - `BeforeCompaction` — before compacting chat history
+- `MessageReceived` — when an inbound channel/UI message arrives;
+  `Block(reason)` rejects it, `ModifyPayload({"content": "..."})` rewrites
+  the text before the turn begins
 - `MessageSending` — before sending a message to the LLM
 - `ToolResultPersist` — before persisting a tool result
 
@@ -4511,7 +4685,6 @@ echo "$(date -Iseconds) tool=$tool" >> /tmp/moltis-hook.log
 - `AgentEnd` — after an agent run completes
 - `AfterToolCall` — after a tool finishes (observe result)
 - `AfterCompaction` — after compaction completes
-- `MessageReceived` — after receiving an LLM response
 - `MessageSent` — after a message is sent
 - `SessionStart` / `SessionEnd` — session lifecycle
 - `GatewayStart` / `GatewayStop` — server lifecycle
@@ -4841,6 +5014,7 @@ pub(crate) async fn discover_and_build_hooks(
 
     let discoverer = FsHookDiscoverer::new(FsHookDiscoverer::default_paths());
     let discovered = discoverer.discover().await.unwrap_or_default();
+    let session_export_mode = moltis_config::discover_and_load().memory.session_export;
 
     let mut registry = moltis_common::hooks::HookRegistry::new();
     let mut info_list = Vec::with_capacity(discovered.len());
@@ -4919,13 +5093,20 @@ pub(crate) async fn discover_and_build_hooks(
         registry.register(Arc::new(logger));
 
         // session-memory: save conversation to memory on /new or /reset.
-        if let Some(store) = session_store {
+        if let Some(store) = session_store
+            && !matches!(session_export_mode, moltis_config::SessionExportMode::Off)
+        {
             let memory_hook = SessionMemoryHook::new(data.clone(), Arc::clone(store));
             registry.register(Arc::new(memory_hook));
         }
     }
 
     for (name, description, events, source_file) in builtin_hook_metadata() {
+        let enabled = if name == "session-memory" {
+            !matches!(session_export_mode, moltis_config::SessionExportMode::Off)
+        } else {
+            true
+        };
         info_list.push(crate::state::DiscoveredHookInfo {
             name: name.to_string(),
             description: description.to_string(),
@@ -4940,7 +5121,7 @@ pub(crate) async fn discover_and_build_hooks(
             missing_os: false,
             missing_bins: vec![],
             missing_env: vec![],
-            enabled: true,
+            enabled,
             body: String::new(),
             body_html: format!(
                 "<p><em>Built-in hook implemented in Rust.</em></p><p>{}</p>",
@@ -4976,19 +5157,9 @@ mod tests {
         moltis_providers::raw_model_id,
         secrecy::Secret,
         sqlx::SqlitePool,
-        std::{
-            collections::{HashMap, HashSet},
-            sync::OnceLock,
-        },
+        std::collections::{HashMap, HashSet},
         tokio::sync::Mutex,
     };
-
-    fn local_model_config_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap()
-    }
 
     struct LocalModelConfigTestGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -4997,7 +5168,7 @@ mod tests {
     impl LocalModelConfigTestGuard {
         fn new() -> Self {
             Self {
-                _lock: local_model_config_test_lock(),
+                _lock: crate::config_override_test_lock(),
             }
         }
     }
@@ -5178,6 +5349,22 @@ mod tests {
             gateway.passkey_host_update_pending().await.is_empty(),
             "passkey warning should not be queued without existing passkeys"
         );
+    }
+
+    #[cfg(feature = "qmd")]
+    #[test]
+    fn sanitize_qmd_index_name_normalizes_non_alphanumeric_segments() {
+        let path = FsPath::new("/Users/Penso/.moltis/data///");
+        assert_eq!(
+            sanitize_qmd_index_name(path),
+            "moltis-users_penso_moltis_data"
+        );
+    }
+
+    #[cfg(feature = "qmd")]
+    #[test]
+    fn sanitize_qmd_index_name_falls_back_for_empty_root() {
+        assert_eq!(sanitize_qmd_index_name(FsPath::new("///")), "moltis");
     }
 
     #[tokio::test]
@@ -5368,7 +5555,18 @@ mod tests {
 
     #[tokio::test]
     async fn discover_hooks_registers_builtin_handlers() {
+        let _guard = LocalModelConfigTestGuard::new();
         let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(project_dir.path()).unwrap();
+        std::fs::write(
+            config_dir.path().join("moltis.toml"),
+            "[memory]\nsession_export = \"on-new-or-reset\"\n",
+        )
+        .unwrap();
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
         let sessions_dir = tmp.path().join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let session_store = Arc::new(SessionStore::new(sessions_dir));
@@ -5389,6 +5587,44 @@ mod tests {
             info.iter()
                 .any(|h| h.name == "session-memory" && h.source == "builtin")
         );
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        moltis_config::clear_config_dir();
+    }
+
+    #[tokio::test]
+    async fn discover_hooks_respects_session_export_mode_off() {
+        let _guard = LocalModelConfigTestGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        let project_dir = tempfile::tempdir().unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(project_dir.path()).unwrap();
+        std::fs::write(
+            config_dir.path().join("moltis.toml"),
+            "[memory]\nsession_export = \"off\"\n",
+        )
+        .unwrap();
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+
+        let sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session_store = Arc::new(SessionStore::new(sessions_dir));
+
+        let (registry, info) =
+            discover_and_build_hooks(&HashSet::new(), Some(&session_store)).await;
+        let registry = registry.expect("expected hook registry to be created");
+        let handler_names = registry.handler_names();
+
+        assert!(handler_names.iter().any(|n| n == "command-logger"));
+        assert!(!handler_names.iter().any(|n| n == "session-memory"));
+        assert!(
+            info.iter()
+                .any(|h| h.name == "session-memory" && h.source == "builtin" && !h.enabled)
+        );
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        moltis_config::clear_config_dir();
     }
 
     #[tokio::test]

@@ -198,7 +198,7 @@ async-graphql-axum = "7"
 gix                = "0.78"
 hex                = "0.4"
 hmac               = "0.12"
-jsonwebtoken       = "9"
+jsonwebtoken       = { features = ["aws_lc_rs"], version = "10" }
 llama-cpp-2        = "0.1"
 matrix-sdk         = { default-features = false, features = ["e2e-encryption", "markdown", "native-tls", "sqlite"], version = "0.16" }
 mockito            = "1.7"
@@ -248,7 +248,7 @@ tower       = "0.5"
 tower-http  = "0.6"
 url         = "2"
 urlencoding = "2"
-web-push    = "0.10"
+web-push    = "0.11"
 # Metrics
 metrics                     = "0.24"
 metrics-exporter-prometheus = "0.16"

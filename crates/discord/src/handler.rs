@@ -1,8 +1,8 @@
 use {
     serenity::{
         all::{
-            Context, CreateMessage, EventHandler, GatewayIntents, Interaction, Message, MessageId,
-            ReactionType, Ready,
+            Attachment, Context, CreateMessage, EventHandler, GatewayIntents, Interaction, Message,
+            MessageId, ReactionType, Ready,
         },
         async_trait,
         gateway::ActivityData,
@@ -17,15 +17,22 @@ use crate::config::{
 
 use crate::access;
 
-use moltis_channels::{
-    ChannelEvent, ChannelType,
-    gating::DmPolicy,
-    message_log::MessageLogEntry,
-    otp::{
-        OtpInitResult, OtpVerifyResult, approve_sender_via_otp, emit_otp_challenge,
-        emit_otp_resolution,
+use {
+    moltis_channels::{
+        ChannelEvent, ChannelType, Error as ChannelError, InboundMediaDownloader,
+        InboundMediaSource, Result as ChannelsResult,
+        gating::DmPolicy,
+        message_log::MessageLogEntry,
+        otp::{
+            OtpInitResult, OtpVerifyResult, approve_sender_via_otp, emit_otp_challenge,
+            emit_otp_resolution,
+        },
+        plugin::{
+            ChannelAttachment, ChannelEventSink, ChannelMessageKind, ChannelMessageMeta,
+            ChannelReplyTarget,
+        },
     },
-    plugin::{ChannelEventSink, ChannelMessageKind, ChannelMessageMeta, ChannelReplyTarget},
+    moltis_common::{http_client::build_default_http_client, ssrf::ssrf_check},
 };
 
 use crate::state::AccountStateMap;
@@ -44,6 +51,18 @@ pub fn required_intents() -> GatewayIntents {
 pub struct Handler {
     pub account_id: String,
     pub accounts: AccountStateMap,
+    downloader: DiscordInboundMediaDownloader,
+}
+
+impl Handler {
+    #[must_use]
+    pub fn new(account_id: String, accounts: AccountStateMap) -> Self {
+        Self {
+            account_id,
+            accounts,
+            downloader: DiscordInboundMediaDownloader::new(),
+        }
+    }
 }
 
 fn unix_now() -> i64 {
@@ -172,6 +191,421 @@ fn extract_location_coordinates(text: &str) -> Option<(f64, f64)> {
     parse_map_link_coordinates(text).or_else(|| parse_plain_text_coordinates(text))
 }
 
+/// Maximum byte size for inbound Discord attachments we download. Matches the
+/// 25 MiB free-tier upload limit; anything larger is either a Discord Nitro
+/// upload we don't want to spend bandwidth on or a misbehaving client.
+const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+
+/// Resolved inbound media from a Discord message: the body text the LLM sees,
+/// any multimodal attachments, and — if voice — the raw audio bytes so the
+/// gateway can persist them to the session media directory.
+#[derive(Debug)]
+struct InboundMedia {
+    body: String,
+    attachments: Vec<ChannelAttachment>,
+    voice_audio: Option<(Vec<u8>, String)>,
+    kind: ChannelMessageKind,
+}
+
+/// Outcome of attempting to handle inbound Discord attachments.
+#[derive(Debug)]
+enum MediaResolveOutcome {
+    /// No audio or image attachment present; caller should dispatch text only.
+    NoMedia,
+    /// Media was handled (successfully or with a recoverable error-fallback body).
+    Media(InboundMedia),
+    /// A voice attachment was present but STT is not configured. Caller should
+    /// send the user-facing hint and stop.
+    VoiceSttUnavailable,
+}
+
+#[derive(Debug, Clone)]
+struct DiscordInboundMediaDownloader {
+    client: reqwest::Client,
+}
+
+impl DiscordInboundMediaDownloader {
+    fn new() -> Self {
+        Self {
+            client: build_default_http_client(),
+        }
+    }
+}
+
+/// Returns true if the attachment looks like an audio/voice file.
+fn attachment_is_audio(a: &Attachment) -> bool {
+    if a.content_type
+        .as_deref()
+        .is_some_and(|ct| ct.starts_with("audio/"))
+    {
+        return true;
+    }
+    let name = a.filename.to_ascii_lowercase();
+    [".ogg", ".opus", ".mp3", ".wav", ".m4a", ".webm"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
+}
+
+/// Returns true if the attachment looks like a still image.
+fn attachment_is_image(a: &Attachment) -> bool {
+    if a.content_type
+        .as_deref()
+        .is_some_and(|ct| ct.starts_with("image/"))
+    {
+        return true;
+    }
+    let name = a.filename.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
+}
+
+/// Pick the first handleable attachment. Audio wins over image when both are
+/// present, matching Telegram's voice-first ordering.
+fn select_media_attachment(attachments: &[Attachment]) -> Option<&Attachment> {
+    if let Some(a) = attachments.iter().find(|a| attachment_is_audio(a)) {
+        return Some(a);
+    }
+    attachments.iter().find(|a| attachment_is_image(a))
+}
+
+/// Normalize an audio attachment to a short format string the STT provider
+/// understands (`ogg`, `mp3`, `wav`, `m4a`, `webm`).
+fn audio_format_from_attachment(content_type: Option<&str>, filename: &str) -> String {
+    if let Some(ct) = content_type
+        && let Some(rest) = ct.strip_prefix("audio/")
+    {
+        let first = rest.split(';').next().unwrap_or(rest).trim();
+        let first = first.strip_prefix("x-").unwrap_or(first);
+        return match first {
+            "mpeg" | "mp3" => "mp3".to_string(),
+            "mp4" | "m4a" => "m4a".to_string(),
+            "wav" | "wave" => "wav".to_string(),
+            "webm" => "webm".to_string(),
+            "ogg" | "opus" | "vorbis" => "ogg".to_string(),
+            other if !other.is_empty() => other.to_string(),
+            _ => "ogg".to_string(),
+        };
+    }
+    let lower = filename.to_ascii_lowercase();
+    for (ext, fmt) in [
+        (".mp3", "mp3"),
+        (".m4a", "m4a"),
+        (".wav", "wav"),
+        (".webm", "webm"),
+        (".opus", "ogg"),
+        (".ogg", "ogg"),
+    ] {
+        if lower.ends_with(ext) {
+            return fmt.to_string();
+        }
+    }
+    // Discord voice messages are OGG Opus; safe default.
+    "ogg".to_string()
+}
+
+/// Normalize an image attachment to a MIME media type. Used as a fallback when
+/// `optimize_for_llm` fails and we must send the original bytes anyway.
+fn image_media_type_fallback(content_type: Option<&str>, filename: &str) -> String {
+    if let Some(ct) = content_type
+        && ct.starts_with("image/")
+    {
+        return ct.split(';').next().unwrap_or(ct).trim().to_string();
+    }
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "image/png".to_string()
+    } else if lower.ends_with(".gif") {
+        "image/gif".to_string()
+    } else if lower.ends_with(".webp") {
+        "image/webp".to_string()
+    } else {
+        "image/jpeg".to_string()
+    }
+}
+
+fn voice_stt_unavailable_log_body(caption: &str) -> String {
+    if caption.is_empty() {
+        "[Voice message - STT unavailable]".to_string()
+    } else {
+        format!("{caption}\n\n[Voice message - STT unavailable]")
+    }
+}
+
+/// Download a Discord CDN attachment, enforcing a size cap.
+async fn download_discord_attachment(
+    client: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+) -> ChannelsResult<Vec<u8>> {
+    let parsed_url = reqwest::Url::parse(url).map_err(|error| {
+        ChannelError::invalid_input(format!("invalid discord attachment URL: {error}"))
+    })?;
+    ssrf_check(&parsed_url, &[])
+        .await
+        .map_err(|error| ChannelError::external("discord attachment ssrf check", error))?;
+
+    let response = client
+        .get(parsed_url)
+        .send()
+        .await
+        .map_err(|e| ChannelError::external("discord attachment request", e))?;
+    if !response.status().is_success() {
+        return Err(ChannelError::unavailable(format!(
+            "discord attachment request returned HTTP {}",
+            response.status()
+        )));
+    }
+    if let Some(len) = response.content_length()
+        && len as usize > max_bytes
+    {
+        return Err(ChannelError::unavailable(format!(
+            "attachment too large: {len} bytes (cap {max_bytes})"
+        )));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| ChannelError::external("discord attachment read body", e))?;
+    if bytes.len() > max_bytes {
+        return Err(ChannelError::unavailable(format!(
+            "attachment too large: {} bytes (cap {max_bytes})",
+            bytes.len()
+        )));
+    }
+    Ok(bytes.to_vec())
+}
+
+#[async_trait]
+impl InboundMediaDownloader for DiscordInboundMediaDownloader {
+    async fn download_media(
+        &self,
+        source: &InboundMediaSource,
+        max_bytes: usize,
+    ) -> ChannelsResult<Vec<u8>> {
+        match source {
+            InboundMediaSource::RemoteUrl { url } => {
+                download_discord_attachment(&self.client, url, max_bytes).await
+            },
+            _ => Err(ChannelError::invalid_input(
+                "discord downloader received unsupported media source",
+            )),
+        }
+    }
+}
+
+async fn log_discord_message(
+    message_log: Option<&std::sync::Arc<dyn moltis_channels::message_log::MessageLog>>,
+    account_id: &str,
+    peer_id: &str,
+    username: &Option<String>,
+    sender_name: &Option<String>,
+    chat_id: &str,
+    is_guild: bool,
+    body: &str,
+    access_granted: bool,
+) {
+    if let Some(log) = message_log {
+        let _ = log
+            .log(MessageLogEntry {
+                id: 0,
+                account_id: account_id.to_string(),
+                channel_type: "discord".into(),
+                peer_id: peer_id.to_string(),
+                username: username.clone(),
+                sender_name: sender_name.clone(),
+                chat_id: chat_id.to_string(),
+                chat_type: if is_guild {
+                    "group".into()
+                } else {
+                    "private".into()
+                },
+                body: body.to_string(),
+                access_granted,
+                created_at: unix_now(),
+            })
+            .await;
+    }
+}
+
+/// Resolve inbound media attachments on a Discord message into a body +
+/// multimodal attachment list the gateway can dispatch.
+async fn resolve_discord_inbound_media(
+    attachments: &[Attachment],
+    caption: &str,
+    sink: &dyn ChannelEventSink,
+    account_id: &str,
+    downloader: &dyn InboundMediaDownloader,
+) -> MediaResolveOutcome {
+    let Some(media) = select_media_attachment(attachments) else {
+        return MediaResolveOutcome::NoMedia;
+    };
+
+    if attachment_is_audio(media) {
+        if !sink.voice_stt_available().await {
+            return MediaResolveOutcome::VoiceSttUnavailable;
+        }
+
+        let format = audio_format_from_attachment(media.content_type.as_deref(), &media.filename);
+        let source = InboundMediaSource::RemoteUrl {
+            url: media.url.clone(),
+        };
+        match downloader
+            .download_media(&source, MAX_ATTACHMENT_BYTES)
+            .await
+        {
+            Ok(audio_data) => {
+                debug!(
+                    account_id,
+                    attachment_id = %media.id,
+                    format,
+                    size = audio_data.len(),
+                    "downloaded discord voice attachment, transcribing"
+                );
+                let saved_audio = Some((audio_data.clone(), format.clone()));
+                match sink.transcribe_voice(&audio_data, &format).await {
+                    Ok(transcribed) if transcribed.trim().is_empty() => {
+                        warn!(
+                            account_id,
+                            audio_size = audio_data.len(),
+                            "discord voice transcription returned empty text"
+                        );
+                        MediaResolveOutcome::Media(InboundMedia {
+                            body: "[Voice message - could not transcribe]".to_string(),
+                            attachments: Vec::new(),
+                            voice_audio: saved_audio,
+                            kind: ChannelMessageKind::Voice,
+                        })
+                    },
+                    Ok(transcribed) => {
+                        debug!(
+                            account_id,
+                            text_len = transcribed.len(),
+                            "discord voice transcription successful"
+                        );
+                        let body = if caption.is_empty() {
+                            transcribed
+                        } else {
+                            format!("{caption}\n\n[Voice message]: {transcribed}")
+                        };
+                        MediaResolveOutcome::Media(InboundMedia {
+                            body,
+                            attachments: Vec::new(),
+                            voice_audio: saved_audio,
+                            kind: ChannelMessageKind::Voice,
+                        })
+                    },
+                    Err(e) => {
+                        warn!(account_id, error = %e, "discord voice transcription failed");
+                        let body = if caption.is_empty() {
+                            "[Voice message - transcription unavailable]".to_string()
+                        } else {
+                            caption.to_string()
+                        };
+                        MediaResolveOutcome::Media(InboundMedia {
+                            body,
+                            attachments: Vec::new(),
+                            voice_audio: saved_audio,
+                            kind: ChannelMessageKind::Voice,
+                        })
+                    },
+                }
+            },
+            Err(e) => {
+                warn!(account_id, error = %e, "failed to download discord voice attachment");
+                let body = if caption.is_empty() {
+                    "[Voice message - download failed]".to_string()
+                } else {
+                    caption.to_string()
+                };
+                MediaResolveOutcome::Media(InboundMedia {
+                    body,
+                    attachments: Vec::new(),
+                    voice_audio: None,
+                    kind: ChannelMessageKind::Voice,
+                })
+            },
+        }
+    } else {
+        let source = InboundMediaSource::RemoteUrl {
+            url: media.url.clone(),
+        };
+        match downloader
+            .download_media(&source, MAX_ATTACHMENT_BYTES)
+            .await
+        {
+            Ok(image_data) => {
+                debug!(
+                    account_id,
+                    attachment_id = %media.id,
+                    size = image_data.len(),
+                    "downloaded discord image attachment"
+                );
+                let (final_data, media_type) =
+                    match moltis_media::image_ops::optimize_for_llm(&image_data, None) {
+                        Ok(optimized) => {
+                            if optimized.was_resized {
+                                info!(
+                                    account_id,
+                                    original_size = image_data.len(),
+                                    final_size = optimized.data.len(),
+                                    original_dims = %format!(
+                                        "{}x{}",
+                                        optimized.original_width, optimized.original_height
+                                    ),
+                                    final_dims = %format!(
+                                        "{}x{}",
+                                        optimized.final_width, optimized.final_height
+                                    ),
+                                    "resized discord image for LLM"
+                                );
+                            }
+                            (optimized.data, optimized.media_type)
+                        },
+                        Err(e) => {
+                            warn!(
+                                account_id,
+                                error = %e,
+                                "failed to optimize discord image, using original"
+                            );
+                            (
+                                image_data,
+                                image_media_type_fallback(
+                                    media.content_type.as_deref(),
+                                    &media.filename,
+                                ),
+                            )
+                        },
+                    };
+                let attachment = ChannelAttachment {
+                    media_type,
+                    data: final_data,
+                };
+                MediaResolveOutcome::Media(InboundMedia {
+                    body: caption.to_string(),
+                    attachments: vec![attachment],
+                    voice_audio: None,
+                    kind: ChannelMessageKind::Photo,
+                })
+            },
+            Err(e) => {
+                warn!(account_id, error = %e, "failed to download discord image attachment");
+                let body = if caption.is_empty() {
+                    "[Photo - download failed]".to_string()
+                } else {
+                    caption.to_string()
+                };
+                MediaResolveOutcome::Media(InboundMedia {
+                    body,
+                    attachments: Vec::new(),
+                    voice_audio: None,
+                    kind: ChannelMessageKind::Photo,
+                })
+            },
+        }
+    }
+}
+
 /// Strip the bot mention (e.g. `<@123456789>`) from the beginning of a message.
 pub fn strip_bot_mention(text: &str, bot_id: u64) -> String {
     let mention = format!("<@{bot_id}>");
@@ -261,7 +695,9 @@ impl EventHandler for Handler {
             msg.content.clone()
         };
 
-        if text.is_empty() {
+        // Drop truly empty messages (no text and no attachments). Messages with
+        // attachments but no caption still need processing (e.g. voice notes).
+        if text.is_empty() && msg.attachments.is_empty() {
             return;
         }
 
@@ -311,29 +747,6 @@ impl EventHandler for Handler {
         .is_ok();
         let access_granted = policy_allowed;
 
-        // Log the message.
-        if let Some(log) = message_log {
-            let _ = log
-                .log(MessageLogEntry {
-                    id: 0,
-                    account_id: self.account_id.clone(),
-                    channel_type: "discord".into(),
-                    peer_id: peer_id.clone(),
-                    username: username.clone(),
-                    sender_name: sender_name.clone(),
-                    chat_id: chat_id.clone(),
-                    chat_type: if is_guild {
-                        "group".into()
-                    } else {
-                        "private".into()
-                    },
-                    body: text.clone(),
-                    access_granted,
-                    created_at: unix_now(),
-                })
-                .await;
-        }
-
         // Emit inbound message event.
         if let Some(sink) = event_sink.as_ref() {
             sink.emit(ChannelEvent::InboundMessage {
@@ -349,6 +762,19 @@ impl EventHandler for Handler {
         }
 
         if !access_granted {
+            log_discord_message(
+                message_log.as_ref(),
+                &self.account_id,
+                &peer_id,
+                &username,
+                &sender_name,
+                &chat_id,
+                is_guild,
+                &text,
+                access_granted,
+            )
+            .await;
+
             // OTP self-approval for non-allowlisted DM users.
             if !is_guild
                 && !policy_allowed
@@ -401,6 +827,19 @@ impl EventHandler for Handler {
 
         // Handle slash commands.
         if let Some(command) = text.strip_prefix('/') {
+            log_discord_message(
+                message_log.as_ref(),
+                &self.account_id,
+                &peer_id,
+                &username,
+                &sender_name,
+                &chat_id,
+                is_guild,
+                &text,
+                access_granted,
+            )
+            .await;
+
             let response_text = match sink
                 .dispatch_command(command.trim(), reply_to.clone())
                 .await
@@ -424,8 +863,70 @@ impl EventHandler for Handler {
             return;
         }
 
-        let mut inferred_kind = ChannelMessageKind::Text;
-        if let Some((latitude, longitude)) = extract_location_coordinates(&text) {
+        // Resolve inbound media attachments (voice transcription, image
+        // optimization) before further processing. This mirrors the Telegram
+        // flow in `crates/telegram/src/handlers.rs`.
+        let (body, attachments, voice_audio, mut inferred_kind) =
+            match resolve_discord_inbound_media(
+                &msg.attachments,
+                &text,
+                sink.as_ref(),
+                &self.account_id,
+                &self.downloader,
+            )
+            .await
+            {
+                MediaResolveOutcome::NoMedia => {
+                    (text.clone(), Vec::new(), None, ChannelMessageKind::Text)
+                },
+                MediaResolveOutcome::Media(media) => {
+                    (media.body, media.attachments, media.voice_audio, media.kind)
+                },
+                MediaResolveOutcome::VoiceSttUnavailable => {
+                    let body = voice_stt_unavailable_log_body(&text);
+                    log_discord_message(
+                        message_log.as_ref(),
+                        &self.account_id,
+                        &peer_id,
+                        &username,
+                        &sender_name,
+                        &chat_id,
+                        is_guild,
+                        &body,
+                        access_granted,
+                    )
+                    .await;
+                    if let Err(e) = send_discord_text_simple(
+                        &ctx,
+                        msg.channel_id,
+                        "I can't understand voice, you did not configure it, please visit Settings -> Voice",
+                    )
+                    .await
+                    {
+                        warn!(
+                            account_id = %self.account_id,
+                            chat_id,
+                            "failed to send STT setup hint: {e}"
+                        );
+                    }
+                    return;
+                },
+            };
+
+        log_discord_message(
+            message_log.as_ref(),
+            &self.account_id,
+            &peer_id,
+            &username,
+            &sender_name,
+            &chat_id,
+            is_guild,
+            &body,
+            access_granted,
+        )
+        .await;
+
+        if let Some((latitude, longitude)) = extract_location_coordinates(&body) {
             let resolved = sink
                 .resolve_pending_location(&reply_to, latitude, longitude)
                 .await;
@@ -452,12 +953,23 @@ impl EventHandler for Handler {
             inferred_kind = ChannelMessageKind::Location;
         }
 
+        // Save voice audio to the session media directory (best-effort).
+        let audio_filename = if let Some((ref audio_data, ref format)) = voice_audio {
+            let filename = format!("voice-discord-{}.{format}", msg.id.get());
+            sink.save_channel_voice(audio_data, &filename, &reply_to)
+                .await
+        } else {
+            None
+        };
+
         // Dispatch to chat.
         info!(
             account_id = %self.account_id,
             chat_id,
             peer_id,
-            text_len = text.len(),
+            body_len = body.len(),
+            attachment_count = attachments.len(),
+            ?inferred_kind,
             "discord dispatching to chat"
         );
 
@@ -468,15 +980,22 @@ impl EventHandler for Handler {
         )
         .increment(1);
 
-        sink.dispatch_to_chat(&text, reply_to, ChannelMessageMeta {
+        let meta = ChannelMessageMeta {
             channel_type: ChannelType::Discord,
             sender_name,
             username,
+            sender_id: Some(peer_id.clone()),
             message_kind: Some(inferred_kind),
             model: config.model.clone(),
-            audio_filename: None,
-        })
-        .await;
+            audio_filename,
+        };
+
+        if attachments.is_empty() {
+            sink.dispatch_to_chat(&body, reply_to, meta).await;
+        } else {
+            sink.dispatch_to_chat_with_attachments(&body, attachments, reply_to, meta)
+                .await;
+        }
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
@@ -1077,5 +1596,409 @@ mod tests {
         // Example snowflake from Discord docs / Serenity tests.
         let id = MessageId::new(175_928_847_299_117_063);
         assert_eq!(discord_message_created_ms(id), 1_462_015_105_796);
+    }
+
+    // ── Inbound media attachment tests ───────────────────────────────
+
+    fn make_attachment(content_type: Option<&str>, filename: &str) -> Attachment {
+        let content_type_json = match content_type {
+            Some(ct) => format!("\"{ct}\""),
+            None => "null".to_string(),
+        };
+        let json = format!(
+            r#"{{
+                "id": "1",
+                "filename": "{filename}",
+                "size": 1024,
+                "url": "https://cdn.discordapp.com/attachments/1/2/{filename}",
+                "proxy_url": "https://media.discordapp.net/attachments/1/2/{filename}",
+                "content_type": {content_type_json}
+            }}"#
+        );
+        match serde_json::from_str(&json) {
+            Ok(attachment) => attachment,
+            Err(error) => panic!("attachment json should deserialize: {error}"),
+        }
+    }
+
+    #[test]
+    fn audio_format_maps_common_mime_types() {
+        assert_eq!(
+            audio_format_from_attachment(Some("audio/ogg"), "x.ogg"),
+            "ogg"
+        );
+        assert_eq!(
+            audio_format_from_attachment(Some("audio/ogg; codecs=opus"), "voice.ogg"),
+            "ogg"
+        );
+        assert_eq!(
+            audio_format_from_attachment(Some("audio/mpeg"), "x.mp3"),
+            "mp3"
+        );
+        assert_eq!(
+            audio_format_from_attachment(Some("audio/mp3"), "x.mp3"),
+            "mp3"
+        );
+        assert_eq!(
+            audio_format_from_attachment(Some("audio/mp4"), "x.m4a"),
+            "m4a"
+        );
+        assert_eq!(
+            audio_format_from_attachment(Some("audio/x-m4a"), "x.m4a"),
+            "m4a"
+        );
+        assert_eq!(
+            audio_format_from_attachment(Some("audio/wav"), "x.wav"),
+            "wav"
+        );
+        assert_eq!(
+            audio_format_from_attachment(Some("audio/webm"), "x.webm"),
+            "webm"
+        );
+    }
+
+    #[test]
+    fn audio_format_falls_back_to_extension() {
+        assert_eq!(audio_format_from_attachment(None, "note.mp3"), "mp3");
+        assert_eq!(audio_format_from_attachment(None, "note.Ogg"), "ogg");
+        assert_eq!(audio_format_from_attachment(None, "note.opus"), "ogg");
+        assert_eq!(audio_format_from_attachment(None, "note.webm"), "webm");
+        // Unknown: default to ogg (Discord voice messages are OGG Opus).
+        assert_eq!(audio_format_from_attachment(None, "mystery.bin"), "ogg");
+    }
+
+    #[test]
+    fn image_media_type_fallback_picks_extension() {
+        assert_eq!(
+            image_media_type_fallback(Some("image/png; charset=binary"), "x.png"),
+            "image/png"
+        );
+        assert_eq!(
+            image_media_type_fallback(None, "screenshot.PNG"),
+            "image/png"
+        );
+        assert_eq!(image_media_type_fallback(None, "pic.gif"), "image/gif");
+        assert_eq!(image_media_type_fallback(None, "pic.webp"), "image/webp");
+        // Unknown: default to jpeg.
+        assert_eq!(image_media_type_fallback(None, "pic.bin"), "image/jpeg");
+    }
+
+    #[test]
+    fn voice_stt_unavailable_body_uses_marker_and_caption() {
+        assert_eq!(
+            voice_stt_unavailable_log_body(""),
+            "[Voice message - STT unavailable]"
+        );
+        assert_eq!(
+            voice_stt_unavailable_log_body("caption"),
+            "caption\n\n[Voice message - STT unavailable]"
+        );
+    }
+
+    #[test]
+    fn attachment_is_audio_detects_mime_and_extension() {
+        assert!(attachment_is_audio(&make_attachment(
+            Some("audio/ogg"),
+            "v.ogg"
+        )));
+        assert!(attachment_is_audio(&make_attachment(None, "v.opus")));
+        assert!(attachment_is_audio(&make_attachment(None, "clip.MP3")));
+        assert!(!attachment_is_audio(&make_attachment(
+            Some("image/png"),
+            "x.png"
+        )));
+        assert!(!attachment_is_audio(&make_attachment(None, "notes.txt")));
+    }
+
+    #[test]
+    fn attachment_is_image_detects_mime_and_extension() {
+        assert!(attachment_is_image(&make_attachment(
+            Some("image/jpeg"),
+            "x.jpg"
+        )));
+        assert!(attachment_is_image(&make_attachment(None, "x.PNG")));
+        assert!(attachment_is_image(&make_attachment(None, "x.webp")));
+        assert!(!attachment_is_image(&make_attachment(
+            Some("audio/ogg"),
+            "v.ogg"
+        )));
+        assert!(!attachment_is_image(&make_attachment(None, "doc.pdf")));
+    }
+
+    #[test]
+    fn select_media_prefers_audio_over_image() {
+        let image = make_attachment(Some("image/png"), "a.png");
+        let audio = make_attachment(Some("audio/ogg"), "b.ogg");
+        let attachments = vec![image, audio];
+        let picked = match select_media_attachment(&attachments) {
+            Some(attachment) => attachment,
+            None => panic!("expected audio attachment to be selected"),
+        };
+        assert_eq!(picked.filename, "b.ogg");
+    }
+
+    #[test]
+    fn select_media_returns_none_for_unsupported() {
+        let doc = make_attachment(Some("application/pdf"), "spec.pdf");
+        assert!(select_media_attachment(&[doc]).is_none());
+        assert!(select_media_attachment(&[]).is_none());
+    }
+
+    #[test]
+    fn select_media_picks_image_when_no_audio() {
+        let doc = make_attachment(Some("application/pdf"), "spec.pdf");
+        let image = make_attachment(Some("image/jpeg"), "pic.jpg");
+        let attachments = [doc, image];
+        let picked = match select_media_attachment(&attachments) {
+            Some(attachment) => attachment,
+            None => panic!("expected image attachment to be selected"),
+        };
+        assert_eq!(picked.filename, "pic.jpg");
+    }
+
+    // ── resolve_discord_inbound_media via mock sink ──────────────────
+    //
+    // These tests exercise the branching logic without hitting the network.
+    // We use a minimal sink mock that only implements the required trait
+    // methods; everything else falls through to trait defaults.
+
+    use {
+        image::{DynamicImage, ImageBuffer, ImageFormat, Rgb},
+        std::io::Cursor,
+    };
+
+    use moltis_channels::Result as ChannelsResult;
+
+    enum MockTranscription {
+        Success(String),
+        Failure(String),
+    }
+
+    enum MockDownload {
+        Success(Vec<u8>),
+        Failure(String),
+    }
+
+    struct MockDownloader {
+        outcome: MockDownload,
+    }
+
+    #[async_trait]
+    impl InboundMediaDownloader for MockDownloader {
+        async fn download_media(
+            &self,
+            _source: &InboundMediaSource,
+            _max_bytes: usize,
+        ) -> ChannelsResult<Vec<u8>> {
+            match &self.outcome {
+                MockDownload::Success(bytes) => Ok(bytes.clone()),
+                MockDownload::Failure(message) => Err(ChannelError::unavailable(message)),
+            }
+        }
+    }
+
+    struct MockSink {
+        stt_available: bool,
+        transcription: MockTranscription,
+    }
+
+    #[async_trait]
+    impl ChannelEventSink for MockSink {
+        async fn emit(&self, _event: ChannelEvent) {}
+
+        async fn dispatch_to_chat(
+            &self,
+            _text: &str,
+            _reply_to: ChannelReplyTarget,
+            _meta: ChannelMessageMeta,
+        ) {
+        }
+
+        async fn dispatch_command(
+            &self,
+            _command: &str,
+            _reply_to: ChannelReplyTarget,
+        ) -> ChannelsResult<String> {
+            Ok(String::new())
+        }
+
+        async fn transcribe_voice(
+            &self,
+            _audio_data: &[u8],
+            _format: &str,
+        ) -> ChannelsResult<String> {
+            match &self.transcription {
+                MockTranscription::Success(text) => Ok(text.clone()),
+                MockTranscription::Failure(message) => Err(ChannelError::unavailable(message)),
+            }
+        }
+
+        async fn request_disable_account(
+            &self,
+            _channel_type: &str,
+            _account_id: &str,
+            _reason: &str,
+        ) {
+        }
+
+        async fn voice_stt_available(&self) -> bool {
+            self.stt_available
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_returns_no_media_when_attachments_empty() {
+        let sink = MockSink {
+            stt_available: true,
+            transcription: MockTranscription::Success(String::new()),
+        };
+        let downloader = MockDownloader {
+            outcome: MockDownload::Success(Vec::new()),
+        };
+        let outcome = resolve_discord_inbound_media(&[], "hello", &sink, "acct", &downloader).await;
+        assert!(matches!(outcome, MediaResolveOutcome::NoMedia));
+    }
+
+    #[tokio::test]
+    async fn resolve_returns_no_media_when_only_unsupported() {
+        let sink = MockSink {
+            stt_available: true,
+            transcription: MockTranscription::Success(String::new()),
+        };
+        let downloader = MockDownloader {
+            outcome: MockDownload::Success(Vec::new()),
+        };
+        let doc = make_attachment(Some("application/pdf"), "spec.pdf");
+        let outcome = resolve_discord_inbound_media(&[doc], "", &sink, "acct", &downloader).await;
+        assert!(matches!(outcome, MediaResolveOutcome::NoMedia));
+    }
+
+    #[tokio::test]
+    async fn resolve_voice_without_stt_returns_unavailable() {
+        let sink = MockSink {
+            stt_available: false,
+            transcription: MockTranscription::Success(String::new()),
+        };
+        let downloader = MockDownloader {
+            outcome: MockDownload::Success(Vec::new()),
+        };
+        let voice = make_attachment(Some("audio/ogg"), "v.ogg");
+        let outcome = resolve_discord_inbound_media(&[voice], "", &sink, "acct", &downloader).await;
+        assert!(matches!(outcome, MediaResolveOutcome::VoiceSttUnavailable));
+    }
+
+    fn tiny_jpeg() -> Vec<u8> {
+        let image = ImageBuffer::from_pixel(1, 1, Rgb([255, 0, 0]));
+        let mut cursor = Cursor::new(Vec::new());
+        let write_result = DynamicImage::ImageRgb8(image).write_to(&mut cursor, ImageFormat::Jpeg);
+        match write_result {
+            Ok(()) => cursor.into_inner(),
+            Err(error) => panic!("tiny jpeg generation should succeed: {error}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_voice_success_combines_caption_and_transcript() {
+        let sink = MockSink {
+            stt_available: true,
+            transcription: MockTranscription::Success("transcribed discord voice".to_string()),
+        };
+        let downloader = MockDownloader {
+            outcome: MockDownload::Success(b"voice-bytes".to_vec()),
+        };
+        let voice = make_attachment(Some("audio/ogg"), "v.ogg");
+
+        let outcome =
+            resolve_discord_inbound_media(&[voice], "caption", &sink, "acct", &downloader).await;
+
+        let media = match outcome {
+            MediaResolveOutcome::Media(media) => media,
+            _ => panic!("expected voice media outcome"),
+        };
+        assert_eq!(
+            media.body,
+            "caption\n\n[Voice message]: transcribed discord voice"
+        );
+        assert!(media.attachments.is_empty());
+        assert!(matches!(media.kind, ChannelMessageKind::Voice));
+        let (voice_audio, format) = match media.voice_audio {
+            Some(audio) => audio,
+            None => panic!("expected saved voice audio"),
+        };
+        assert_eq!(voice_audio, b"voice-bytes".to_vec());
+        assert_eq!(format, "ogg");
+    }
+
+    #[tokio::test]
+    async fn resolve_voice_download_failure_falls_back_to_marker() {
+        let sink = MockSink {
+            stt_available: true,
+            transcription: MockTranscription::Success(String::new()),
+        };
+        let downloader = MockDownloader {
+            outcome: MockDownload::Failure("boom".to_string()),
+        };
+        let voice = make_attachment(Some("audio/ogg"), "v.ogg");
+
+        let outcome = resolve_discord_inbound_media(&[voice], "", &sink, "acct", &downloader).await;
+
+        let media = match outcome {
+            MediaResolveOutcome::Media(media) => media,
+            _ => panic!("expected voice media fallback outcome"),
+        };
+        assert_eq!(media.body, "[Voice message - download failed]");
+        assert!(media.attachments.is_empty());
+        assert!(media.voice_audio.is_none());
+        assert!(matches!(media.kind, ChannelMessageKind::Voice));
+    }
+
+    #[tokio::test]
+    async fn resolve_voice_transcription_failure_falls_back_to_caption() {
+        let sink = MockSink {
+            stt_available: true,
+            transcription: MockTranscription::Failure("stt offline".to_string()),
+        };
+        let downloader = MockDownloader {
+            outcome: MockDownload::Success(b"voice-bytes".to_vec()),
+        };
+        let voice = make_attachment(Some("audio/ogg"), "v.ogg");
+
+        let outcome =
+            resolve_discord_inbound_media(&[voice], "caption", &sink, "acct", &downloader).await;
+
+        let media = match outcome {
+            MediaResolveOutcome::Media(media) => media,
+            _ => panic!("expected voice media fallback outcome"),
+        };
+        assert_eq!(media.body, "caption");
+        assert!(media.attachments.is_empty());
+        assert!(matches!(media.kind, ChannelMessageKind::Voice));
+        assert!(media.voice_audio.is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_image_success_builds_multimodal_attachment() {
+        let sink = MockSink {
+            stt_available: true,
+            transcription: MockTranscription::Success(String::new()),
+        };
+        let downloader = MockDownloader {
+            outcome: MockDownload::Success(tiny_jpeg()),
+        };
+        let image = make_attachment(Some("image/jpeg"), "pic.jpg");
+
+        let outcome =
+            resolve_discord_inbound_media(&[image], "diagram", &sink, "acct", &downloader).await;
+
+        let media = match outcome {
+            MediaResolveOutcome::Media(media) => media,
+            _ => panic!("expected image media outcome"),
+        };
+        assert_eq!(media.body, "diagram");
+        assert_eq!(media.attachments.len(), 1);
+        assert!(matches!(media.kind, ChannelMessageKind::Photo));
+        assert!(media.voice_audio.is_none());
+        assert_eq!(media.attachments[0].media_type, "image/jpeg");
+        assert!(!media.attachments[0].data.is_empty());
     }
 }

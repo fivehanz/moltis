@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use {async_trait::async_trait, moltis_common::types::ReplyPayload, tokio::sync::mpsc};
+use {
+    async_trait::async_trait,
+    moltis_common::{hooks::ChannelBinding, types::ReplyPayload},
+    tokio::sync::mpsc,
+};
 
 use crate::{Error, Result, config_view::ChannelConfigView};
 
@@ -42,6 +46,23 @@ impl ChannelType {
             Self::Discord => "Discord",
             Self::Slack => "Slack",
             Self::Matrix => "Matrix",
+        }
+    }
+
+    /// Best-effort chat classification for hook and prompt context.
+    #[must_use]
+    pub fn classify_chat(&self, chat_id: &str) -> Option<String> {
+        match self {
+            Self::Telegram => {
+                if chat_id.starts_with("-100") {
+                    Some("channel_or_supergroup".to_string())
+                } else if chat_id.starts_with('-') {
+                    Some("group".to_string())
+                } else {
+                    Some("private".to_string())
+                }
+            },
+            _ => None,
         }
     }
 
@@ -154,7 +175,7 @@ impl ChannelType {
                     supports_streaming: true,
                     supports_interactive: true,
                     supports_threads: true,
-                    supports_voice_ingest: false,
+                    supports_voice_ingest: true,
                     supports_pairing: false,
                     supports_otp: false,
                     supports_reactions: false,
@@ -437,6 +458,10 @@ pub struct ChannelMessageMeta {
     pub channel_type: ChannelType,
     pub sender_name: Option<String>,
     pub username: Option<String>,
+    /// Platform-specific sender/peer ID (e.g. Telegram user ID, Discord user ID).
+    /// Used for per-sender tool policy resolution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<String>,
     /// Original inbound message media kind (voice, audio, photo, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_kind: Option<ChannelMessageKind>,
@@ -501,6 +526,58 @@ impl ChannelReplyTarget {
             None => std::borrow::Cow::Borrowed(&self.chat_id),
         }
     }
+}
+
+impl From<&ChannelReplyTarget> for ChannelBinding {
+    fn from(target: &ChannelReplyTarget) -> Self {
+        let channel_type = target.channel_type.as_str().to_string();
+        Self {
+            surface: Some(channel_type.clone()),
+            session_kind: Some("channel".to_string()),
+            channel_type: Some(channel_type),
+            account_id: Some(target.account_id.clone()),
+            chat_id: Some(target.chat_id.clone()),
+            chat_type: target.channel_type.classify_chat(&target.chat_id),
+            sender_id: None,
+        }
+    }
+}
+
+#[must_use]
+pub fn web_session_channel_binding() -> ChannelBinding {
+    ChannelBinding {
+        surface: Some("web".to_string()),
+        session_kind: Some("web".to_string()),
+        ..Default::default()
+    }
+}
+
+pub fn resolve_session_channel_binding(
+    session_key: &str,
+    binding_json: Option<&str>,
+) -> std::result::Result<ChannelBinding, serde_json::Error> {
+    if session_key == "cron:heartbeat" {
+        return Ok(ChannelBinding {
+            surface: Some("heartbeat".to_string()),
+            session_kind: Some("cron".to_string()),
+            ..Default::default()
+        });
+    }
+
+    if session_key.starts_with("cron:") {
+        return Ok(ChannelBinding {
+            surface: Some("cron".to_string()),
+            session_kind: Some("cron".to_string()),
+            ..Default::default()
+        });
+    }
+
+    if let Some(binding_json) = binding_json {
+        let binding = serde_json::from_str::<ChannelReplyTarget>(binding_json)?;
+        return Ok((&binding).into());
+    }
+
+    Ok(web_session_channel_binding())
 }
 
 // ── Interactive messages ─────────────────────────────────────────────────────
@@ -1176,5 +1253,91 @@ mod tests {
         assert_eq!(json, "\"socket_mode\"");
         let json = serde_json::to_string(&InboundMode::Webhook).unwrap();
         assert_eq!(json, "\"webhook\"");
+    }
+
+    #[test]
+    fn telegram_chat_classification_matches_chat_id_shape() {
+        assert_eq!(
+            ChannelType::Telegram.classify_chat("-100123").as_deref(),
+            Some("channel_or_supergroup")
+        );
+        assert_eq!(
+            ChannelType::Telegram.classify_chat("-42").as_deref(),
+            Some("group")
+        );
+        assert_eq!(
+            ChannelType::Telegram.classify_chat("123").as_deref(),
+            Some("private")
+        );
+        assert!(ChannelType::Discord.classify_chat("123").is_none());
+    }
+
+    #[test]
+    fn channel_reply_target_converts_to_hook_channel_binding() {
+        let target = ChannelReplyTarget {
+            channel_type: ChannelType::Telegram,
+            account_id: "bot1".into(),
+            chat_id: "-100999".into(),
+            message_id: Some("7".into()),
+            thread_id: Some("42".into()),
+        };
+
+        let binding: ChannelBinding = (&target).into();
+        assert_eq!(binding.surface.as_deref(), Some("telegram"));
+        assert_eq!(binding.session_kind.as_deref(), Some("channel"));
+        assert_eq!(binding.channel_type.as_deref(), Some("telegram"));
+        assert_eq!(binding.account_id.as_deref(), Some("bot1"));
+        assert_eq!(binding.chat_id.as_deref(), Some("-100999"));
+        assert_eq!(binding.chat_type.as_deref(), Some("channel_or_supergroup"));
+        assert!(binding.sender_id.is_none());
+    }
+
+    #[test]
+    fn resolve_session_channel_binding_classifies_special_sessions() {
+        let heartbeat = resolve_session_channel_binding("cron:heartbeat", None)
+            .unwrap_or_else(|error| panic!("heartbeat binding should resolve: {error}"));
+        assert_eq!(heartbeat.surface.as_deref(), Some("heartbeat"));
+        assert_eq!(heartbeat.session_kind.as_deref(), Some("cron"));
+
+        let cron = resolve_session_channel_binding("cron:nightly", None)
+            .unwrap_or_else(|error| panic!("cron binding should resolve: {error}"));
+        assert_eq!(cron.surface.as_deref(), Some("cron"));
+        assert_eq!(cron.session_kind.as_deref(), Some("cron"));
+
+        let web = resolve_session_channel_binding("main", None)
+            .unwrap_or_else(|error| panic!("web binding should resolve: {error}"));
+        assert_eq!(web.surface.as_deref(), Some("web"));
+        assert_eq!(web.session_kind.as_deref(), Some("web"));
+    }
+
+    #[test]
+    fn resolve_session_channel_binding_extracts_channel_target() {
+        let binding_json = serde_json::to_string(&ChannelReplyTarget {
+            channel_type: ChannelType::Telegram,
+            account_id: "bot-main".into(),
+            chat_id: "-100123".into(),
+            message_id: Some("11".into()),
+            thread_id: None,
+        })
+        .unwrap_or_else(|error| panic!("serialize binding: {error}"));
+
+        let binding =
+            resolve_session_channel_binding("telegram:bot-main:-100123", Some(&binding_json))
+                .unwrap_or_else(|error| panic!("channel binding should resolve: {error}"));
+
+        assert_eq!(binding.surface.as_deref(), Some("telegram"));
+        assert_eq!(binding.session_kind.as_deref(), Some("channel"));
+        assert_eq!(binding.channel_type.as_deref(), Some("telegram"));
+        assert_eq!(binding.account_id.as_deref(), Some("bot-main"));
+        assert_eq!(binding.chat_id.as_deref(), Some("-100123"));
+        assert_eq!(binding.chat_type.as_deref(), Some("channel_or_supergroup"));
+    }
+
+    #[test]
+    fn resolve_session_channel_binding_returns_error_for_invalid_json() {
+        let error = resolve_session_channel_binding("telegram:bot-main:-100123", Some("{not-json"))
+            .err()
+            .unwrap_or_else(|| panic!("invalid binding json should fail"));
+        assert!(error.is_syntax());
     }
 }

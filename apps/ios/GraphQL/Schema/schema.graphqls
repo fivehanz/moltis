@@ -520,11 +520,17 @@ type McpTool {
 }
 
 type MemoryConfig {
+	style: String
+	agentWriteMode: String
+	userProfileWriteMode: String
 	backend: String
+	provider: String
 	citations: String
 	disableRag: Boolean
 	llmReranking: Boolean
-	sessionExport: Boolean
+	searchMergeStrategy: String
+	sessionExport: String
+	promptMemoryMode: String
 	qmdFeatureEnabled: Boolean
 }
 

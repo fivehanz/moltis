@@ -660,7 +660,12 @@ test.describe("Onboarding wizard", () => {
 			return;
 		}
 		await expect(page.getByText("Encrypted Matrix chats require Password auth.", { exact: false })).toBeVisible();
-		await expect(page.getByText("Use Password if you want encrypted Matrix chats.", { exact: false })).toBeVisible();
+		await expect(
+			page.getByText("Password is the default because it supports encrypted Matrix chats", { exact: false }),
+		).toBeVisible();
+		await expect(
+			page.getByText("Use Password so Moltis creates and persists its own Matrix device keys", { exact: false }),
+		).toBeVisible();
 		await expect(
 			page.getByText("do not transfer that device's private encryption keys into Moltis", { exact: false }),
 		).toBeVisible();

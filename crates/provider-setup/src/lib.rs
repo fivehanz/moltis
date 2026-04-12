@@ -2546,7 +2546,7 @@ impl ProviderSetupService for LiveProviderSetupService {
         let temp_registry = self.build_registry(&temp_config);
 
         // Filter models for this provider.
-        let mut models: Vec<_> = temp_registry
+        let models: Vec<_> = temp_registry
             .list_models()
             .iter()
             .filter(|m| {
@@ -2577,261 +2577,42 @@ impl ProviderSetupService for LiveProviderSetupService {
         info!(
             provider = %validation_provider_name,
             model_count = models.len(),
-            "provider validation discovered candidate models for probing"
+            "provider validation discovered candidate models"
         );
-        self.emit_validation_progress(
-            &validation_provider_name,
-            request_id.as_deref(),
-            "candidates_discovered",
-            progress_payload(serde_json::json!({
-                "modelCount": models.len(),
-                "message": format!("Discovered {} candidate models.", models.len()),
-            })),
-        )
-        .await;
 
-        const VALIDATION_MAX_MODEL_PROBES: usize = 8;
-        // With a 30 s per-probe timeout, a single timeout is enough to
-        // decide the endpoint is unreachable — keeps worst-case at ~30 s.
-        const VALIDATION_MAX_TIMEOUTS: usize = 1;
-        // Local LLM servers may need 10-20+ seconds to load a model before
-        // responding.  30 s gives them room while still failing reasonably
-        // fast when the endpoint is genuinely unreachable.
-        const VALIDATION_PROBE_TIMEOUT_SECS: u64 = 30;
-
-        reorder_models_for_validation(&mut models);
-
-        let total_probe_attempts = models.len().min(VALIDATION_MAX_MODEL_PROBES);
-
-        let mut probe_attempted = false;
-        let mut unsupported_errors = Vec::new();
-        let mut last_error: Option<String> = None;
-        let mut probe_succeeded = false;
-        let mut timeout_count = 0usize;
-
-        // Try multiple models because provider catalogs can include endpoint-
-        // incompatible IDs. We only need one successful probe to validate creds.
-        for (attempt, probe_model) in models.iter().take(VALIDATION_MAX_MODEL_PROBES).enumerate() {
-            let Some(llm_provider) = temp_registry.get(&probe_model.id) else {
-                continue;
-            };
-
-            probe_attempted = true;
-            let probe_started = std::time::Instant::now();
-            info!(
-                provider = %validation_provider_name,
-                model = %probe_model.id,
-                attempt = attempt + 1,
-                total_models = models.len(),
-                "provider validation model probe started"
-            );
-            self.emit_validation_progress(
-                &validation_provider_name,
-                request_id.as_deref(),
-                "probe_started",
-                progress_payload(serde_json::json!({
-                    "modelId": probe_model.id,
-                    "attempt": attempt + 1,
-                    "totalAttempts": total_probe_attempts,
-                    "message": format!(
-                        "Probing model {} of {}.",
-                        attempt + 1,
-                        total_probe_attempts
-                    ),
-                })),
-            )
-            .await;
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(VALIDATION_PROBE_TIMEOUT_SECS),
-                llm_provider.probe(),
-            )
-            .await;
-
-            match result {
-                Ok(Ok(_)) => {
-                    let elapsed_ms = probe_started.elapsed().as_millis();
-                    info!(
-                        provider = %validation_provider_name,
-                        model = %probe_model.id,
-                        elapsed_ms,
-                        "provider validation model probe succeeded"
-                    );
-                    self.emit_validation_progress(
-                        &validation_provider_name,
-                        request_id.as_deref(),
-                        "probe_succeeded",
-                        progress_payload(serde_json::json!({
-                            "modelId": probe_model.id,
-                            "elapsedMs": elapsed_ms,
-                            "attempt": attempt + 1,
-                            "totalAttempts": total_probe_attempts,
-                            "message": "Model probe succeeded.",
-                        })),
-                    )
-                    .await;
-                    probe_succeeded = true;
-                    break;
-                },
-                Ok(Err(err)) => {
-                    let error_text = err.to_string();
-                    let error_obj =
-                        (self.error_parser)(&error_text, Some(&validation_provider_name));
-                    let detail = error_obj
-                        .get("detail")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&error_text)
-                        .to_string();
-                    let is_unsupported =
-                        error_obj.get("type").and_then(|v| v.as_str()) == Some("unsupported_model");
-                    let elapsed_ms = probe_started.elapsed().as_millis();
-                    info!(
-                        provider = %validation_provider_name,
-                        model = %probe_model.id,
-                        elapsed_ms,
-                        unsupported = is_unsupported,
-                        "provider validation model probe failed"
-                    );
-                    self.emit_validation_progress(
-                        &validation_provider_name,
-                        request_id.as_deref(),
-                        "probe_failed",
-                        progress_payload(serde_json::json!({
-                            "modelId": probe_model.id,
-                            "elapsedMs": elapsed_ms,
-                            "attempt": attempt + 1,
-                            "totalAttempts": total_probe_attempts,
-                            "unsupported": is_unsupported,
-                            "message": detail.clone(),
-                        })),
-                    )
-                    .await;
-                    if is_unsupported {
-                        unsupported_errors.push(detail);
-                        continue;
-                    }
-                    last_error = Some(detail);
-                    break;
-                },
-                Err(_) => {
-                    timeout_count += 1;
-                    let elapsed_ms = probe_started.elapsed().as_millis();
-                    warn!(
-                        provider = %validation_provider_name,
-                        model = %probe_model.id,
-                        timeout_count,
-                        max_timeouts = VALIDATION_MAX_TIMEOUTS,
-                        elapsed_ms,
-                        "provider validation model probe timed out"
-                    );
-                    self.emit_validation_progress(
-                        &validation_provider_name,
-                        request_id.as_deref(),
-                        "probe_timeout",
-                        progress_payload(serde_json::json!({
-                            "modelId": probe_model.id,
-                            "elapsedMs": elapsed_ms,
-                            "attempt": attempt + 1,
-                            "totalAttempts": total_probe_attempts,
-                            "timeoutCount": timeout_count,
-                            "maxTimeouts": VALIDATION_MAX_TIMEOUTS,
-                            "message": format!(
-                                "Timed out probing model after {VALIDATION_PROBE_TIMEOUT_SECS} seconds."
-                            ),
-                        })),
-                    )
-                    .await;
-                    if timeout_count >= VALIDATION_MAX_TIMEOUTS {
-                        last_error = Some(format!(
-                            "Connection timed out after {VALIDATION_PROBE_TIMEOUT_SECS} seconds while validating models. Check your endpoint URL and try again."
-                        ));
-                        break;
-                    }
-                    continue;
-                },
-            }
-        }
-
-        if probe_succeeded {
-            // Build model list for the frontend, excluding non-chat models.
-            let model_list: Vec<Value> = models
-                .iter()
-                .filter(|m| moltis_providers::is_chat_capable_model(&m.id))
-                .map(|m| {
-                    let supports_tools =
-                        temp_registry.get(&m.id).is_some_and(|p| p.supports_tools());
-                    serde_json::json!({
-                        "id": m.id,
-                        "displayName": m.display_name,
-                        "provider": m.provider,
-                        "supportsTools": supports_tools,
-                    })
+        // Skip probing — the model list endpoint already proves the endpoint
+        // is reachable and any API key is valid.  Probing each model via a
+        // chat completion forces local LLM servers (Ollama, LemonadeSDK, …)
+        // to load/unload every model, causing enormous I/O for large model
+        // sets.  Errors will surface at chat time with actionable messages.
+        // Users can manually test individual models from the Providers page.
+        let model_list: Vec<Value> = models
+            .iter()
+            .filter(|m| moltis_providers::is_chat_capable_model(&m.id))
+            .map(|m| {
+                let supports_tools = temp_registry.get(&m.id).is_some_and(|p| p.supports_tools());
+                serde_json::json!({
+                    "id": m.id,
+                    "displayName": m.display_name,
+                    "provider": m.provider,
+                    "supportsTools": supports_tools,
                 })
-                .collect();
+            })
+            .collect();
 
-            self.emit_validation_progress(
-                &validation_provider_name,
-                request_id.as_deref(),
-                "complete",
-                progress_payload(serde_json::json!({
-                    "message": "Validation complete.",
-                    "modelCount": model_list.len(),
-                })),
-            )
-            .await;
-            return Ok(serde_json::json!({
-                "valid": true,
-                "models": model_list,
-            }));
-        }
-
-        if !probe_attempted {
-            let error = "Could not instantiate provider for probing.";
-            self.emit_validation_progress(
-                &validation_provider_name,
-                request_id.as_deref(),
-                "error",
-                progress_payload(serde_json::json!({
-                    "message": error,
-                })),
-            )
-            .await;
-            return Ok(serde_json::json!({
-                "valid": false,
-                "error": error,
-            }));
-        }
-
-        if let Some(error) = last_error {
-            self.emit_validation_progress(
-                &validation_provider_name,
-                request_id.as_deref(),
-                "error",
-                progress_payload(serde_json::json!({
-                    "message": error,
-                })),
-            )
-            .await;
-            return Ok(serde_json::json!({
-                "valid": false,
-                "error": error,
-            }));
-        }
-
-        let unsupported_error = unsupported_errors.into_iter().next().unwrap_or_else(|| {
-            "No supported chat models were found for this provider.".to_string()
-        });
         self.emit_validation_progress(
             &validation_provider_name,
             request_id.as_deref(),
-            "error",
+            "complete",
             progress_payload(serde_json::json!({
-                "message": unsupported_error.clone(),
+                "message": "Validation complete.",
+                "modelCount": model_list.len(),
             })),
         )
         .await;
         Ok(serde_json::json!({
-            "valid": false,
-            "error": unsupported_error,
+            "valid": true,
+            "models": model_list,
         }))
     }
 
@@ -3002,53 +2783,6 @@ impl ProviderSetupService for LiveProviderSetupService {
             "displayName": display_name,
         }))
     }
-}
-
-// ── Validation probe ordering ────────────────────────────────────────────────
-
-/// Reorder models so that known-fast, reliable models appear first for
-/// validation probing.  We only need *one* successful response to prove the
-/// API key works, so prefer the cheapest/fastest endpoints.
-fn reorder_models_for_validation(models: &mut [moltis_providers::ModelInfo]) {
-    /// Known-fast model substrings, ordered by preference.
-    /// These are small/cheap models that respond quickly on every major provider.
-    const FAST_PATTERNS: &[&str] = &[
-        "highspeed",
-        "gpt-4o-mini",
-        "gpt-4.1-mini",
-        "gpt-4.1-nano",
-        "claude-3-haiku",
-        "claude-3.5-haiku",
-        "gemini-2.0-flash",
-        "gemini-flash",
-        "llama-3",
-        "mistral-small",
-        "deepseek-chat",
-    ];
-
-    /// Known-slow or experimental model substrings to deprioritize.
-    const SLOW_PATTERNS: &[&str] = &["search-preview", "seed-", "preview", "experimental"];
-
-    models.sort_by(|a, b| {
-        let a_rank = probe_priority_rank(&a.id, FAST_PATTERNS, SLOW_PATTERNS);
-        let b_rank = probe_priority_rank(&b.id, FAST_PATTERNS, SLOW_PATTERNS);
-        a_rank.cmp(&b_rank)
-    });
-}
-
-fn probe_priority_rank(model_id: &str, fast: &[&str], slow: &[&str]) -> u8 {
-    let raw = raw_model_id(model_id);
-    for pattern in fast {
-        if raw.contains(pattern) {
-            return 0; // probe first
-        }
-    }
-    for pattern in slow {
-        if raw.contains(pattern) {
-            return 2; // probe last
-        }
-    }
-    1 // default: middle tier
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -4624,7 +4358,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_key_ollama_model_probe_uses_v1_endpoint() {
+    async fn validate_key_ollama_with_model_returns_model_list() {
         use axum::{
             Json, Router,
             routing::{get, post},
@@ -4882,135 +4616,6 @@ mod tests {
         assert_eq!(models, vec!["gpt-5.2", "anthropic/claude-sonnet-4-5"]);
     }
 
-    fn make_model(id: &str) -> moltis_providers::ModelInfo {
-        moltis_providers::ModelInfo {
-            id: id.to_string(),
-            provider: "test".to_string(),
-            display_name: id.to_string(),
-            created_at: None,
-            recommended: false,
-            capabilities: moltis_providers::ModelCapabilities::default(),
-        }
-    }
-
-    #[test]
-    fn reorder_models_for_validation_fast_first_slow_last() {
-        let mut models = vec![
-            make_model("bytedance-seed/seed-2.0-mini"),
-            make_model("some-regular-model"),
-            make_model("gpt-4o-mini"),
-            make_model("gpt-4o-search-preview"),
-            make_model("claude-3.5-haiku-20241022"),
-            make_model("experimental-model-v1"),
-            make_model("deepseek-chat"),
-        ];
-
-        reorder_models_for_validation(&mut models);
-        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-
-        // Fast models should be at the front
-        assert!(
-            ids.iter().position(|id| *id == "gpt-4o-mini").unwrap()
-                < ids
-                    .iter()
-                    .position(|id| *id == "some-regular-model")
-                    .unwrap(),
-            "fast model gpt-4o-mini should come before regular model, got: {ids:?}"
-        );
-        assert!(
-            ids.iter()
-                .position(|id| *id == "claude-3.5-haiku-20241022")
-                .unwrap()
-                < ids
-                    .iter()
-                    .position(|id| *id == "some-regular-model")
-                    .unwrap(),
-            "fast model claude-3.5-haiku should come before regular model, got: {ids:?}"
-        );
-        assert!(
-            ids.iter().position(|id| *id == "deepseek-chat").unwrap()
-                < ids
-                    .iter()
-                    .position(|id| *id == "some-regular-model")
-                    .unwrap(),
-            "fast model deepseek-chat should come before regular model, got: {ids:?}"
-        );
-
-        // Slow models should be at the end
-        assert!(
-            ids.iter()
-                .position(|id| *id == "some-regular-model")
-                .unwrap()
-                < ids
-                    .iter()
-                    .position(|id| *id == "gpt-4o-search-preview")
-                    .unwrap(),
-            "regular model should come before slow model search-preview, got: {ids:?}"
-        );
-        assert!(
-            ids.iter()
-                .position(|id| *id == "some-regular-model")
-                .unwrap()
-                < ids
-                    .iter()
-                    .position(|id| *id == "bytedance-seed/seed-2.0-mini")
-                    .unwrap(),
-            "regular model should come before slow model seed-, got: {ids:?}"
-        );
-        assert!(
-            ids.iter()
-                .position(|id| *id == "some-regular-model")
-                .unwrap()
-                < ids
-                    .iter()
-                    .position(|id| *id == "experimental-model-v1")
-                    .unwrap(),
-            "regular model should come before slow model experimental, got: {ids:?}"
-        );
-    }
-
-    #[test]
-    fn reorder_models_for_validation_with_namespaced_ids() {
-        let mut models = vec![
-            make_model("openrouter::gpt-4o-search-preview"),
-            make_model("openrouter::gpt-4o-mini"),
-            make_model("openrouter::some-model"),
-        ];
-
-        reorder_models_for_validation(&mut models);
-        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-
-        assert_eq!(
-            ids[0], "openrouter::gpt-4o-mini",
-            "fast namespaced model should be first, got: {ids:?}"
-        );
-        assert_eq!(
-            ids[1], "openrouter::some-model",
-            "regular model should be middle, got: {ids:?}"
-        );
-        assert_eq!(
-            ids[2], "openrouter::gpt-4o-search-preview",
-            "slow namespaced model should be last, got: {ids:?}"
-        );
-    }
-
-    #[test]
-    fn reorder_models_for_validation_prefers_highspeed_variants() {
-        let mut models = vec![
-            make_model("minimax::MiniMax-M2.7"),
-            make_model("minimax::MiniMax-M2.7-highspeed"),
-            make_model("minimax::MiniMax-M2.5"),
-        ];
-
-        reorder_models_for_validation(&mut models);
-        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-
-        assert_eq!(
-            ids[0], "minimax::MiniMax-M2.7-highspeed",
-            "highspeed variant should probe first, got: {ids:?}"
-        );
-    }
-
     #[tokio::test]
     async fn validate_key_custom_provider_without_model_returns_discovered_models() {
         use axum::{Json, Router, routing::get};
@@ -5174,7 +4779,7 @@ mod tests {
     /// model and timed out. The discovery path must return the model list
     /// directly without ever hitting the chat completions endpoint.
     #[tokio::test]
-    async fn validate_key_custom_provider_does_not_probe_when_model_unset() {
+    async fn validate_key_custom_provider_returns_discovered_models_without_probing() {
         use {
             axum::{
                 Json, Router,

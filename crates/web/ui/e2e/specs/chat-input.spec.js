@@ -20,11 +20,15 @@ function isNoProvidersConfiguredResponse(response) {
 	);
 }
 
+function ignoreWaitError() {
+	return "ignored";
+}
+
 async function sendRpcFromPage(page, method, params) {
 	let lastResponse = null;
 	for (let attempt = 0; attempt < 30; attempt++) {
 		if (attempt > 0) {
-			await waitForWsConnected(page, 5_000).catch(() => {});
+			await waitForWsConnected(page, 5_000).catch(ignoreWaitError);
 		}
 		lastResponse = await page
 			.evaluate(
@@ -50,7 +54,7 @@ async function sendRpcFromPage(page, method, params) {
 }
 
 async function waitForWsConnectedIfPossible(page) {
-	await waitForWsConnected(page, 5_000).catch(() => {});
+	await waitForWsConnected(page, 5_000).catch(ignoreWaitError);
 }
 
 async function mockFullContextRpc(page) {
@@ -66,32 +70,71 @@ async function mockFullContextRpc(page) {
 		if (!window.__origFullContextWsSend) {
 			window.__origFullContextWsSend = ws.send.bind(ws);
 		}
+		window.__mockPromptMemoryRefreshCount = 0;
+		window.__mockPromptMemoryVersion = 1;
+
+		function mockPromptMemory() {
+			return {
+				mode: "frozen-at-session-start",
+				snapshotActive: true,
+				present: true,
+				chars: window.__mockPromptMemoryVersion === 1 ? 12 : 24,
+				path: window.__mockPromptMemoryVersion === 1 ? "/tmp/MEMORY-v1.md" : "/tmp/MEMORY-v2.md",
+				fileSource: "root_workspace",
+			};
+		}
+
+		function resolvePending(id, payload) {
+			var resolver = stateModule.pending?.[id];
+			if (typeof resolver !== "function") return false;
+			delete stateModule.pending[id];
+			resolver({ ok: true, payload });
+			return true;
+		}
+
+		function handleMockPromptMemoryRpc(parsed) {
+			if (parsed?.method === "chat.context") {
+				return resolvePending(parsed.id, {
+					session: { key: "main", messageCount: 2, model: "demo-model" },
+					supportsTools: true,
+					promptMemory: mockPromptMemory(),
+				});
+			}
+			if (parsed?.method === "chat.full_context") {
+				return resolvePending(parsed.id, {
+					messageCount: 2,
+					systemPromptChars: 42,
+					totalChars: 128,
+					promptMemory: mockPromptMemory(),
+					messages: [
+						{ role: "user", content: "How are you?" },
+						{
+							role: "assistant",
+							content: "Doing fine.",
+							tool_calls: [{ function: { name: "demo_tool", arguments: '{"hello":"world"}' } }],
+						},
+					],
+					llmOutputs: [{ text: "assistant raw output" }],
+				});
+			}
+			if (parsed?.method === "chat.prompt_memory.refresh") {
+				window.__mockPromptMemoryRefreshCount += 1;
+				window.__mockPromptMemoryVersion = 2;
+				return resolvePending(parsed.id, {
+					ok: true,
+					sessionKey: "main",
+					agentId: "main",
+					snapshotCleared: true,
+					promptMemory: mockPromptMemory(),
+				});
+			}
+			return false;
+		}
 
 		ws.send = (payload) => {
 			try {
 				var parsed = JSON.parse(payload);
-				if (parsed?.method === "chat.full_context") {
-					var resolver = stateModule.pending?.[parsed.id];
-					if (typeof resolver === "function") {
-						delete stateModule.pending[parsed.id];
-						resolver({
-							ok: true,
-							payload: {
-								messageCount: 2,
-								systemPromptChars: 42,
-								totalChars: 128,
-								messages: [
-									{ role: "user", content: "How are you?" },
-									{
-										role: "assistant",
-										content: "Doing fine.",
-										tool_calls: [{ function: { name: "demo_tool", arguments: '{"hello":"world"}' } }],
-									},
-								],
-								llmOutputs: [{ text: "assistant raw output" }],
-							},
-						});
-					}
+				if (handleMockPromptMemoryRpc(parsed)) {
 					return;
 				}
 			} catch (_err) {
@@ -100,6 +143,10 @@ async function mockFullContextRpc(page) {
 			return window.__origFullContextWsSend(payload);
 		};
 	});
+}
+
+async function getMockPromptMemoryRefreshCount(page) {
+	return await page.evaluate(() => window.__mockPromptMemoryRefreshCount || 0);
 }
 
 async function waitForChatInputReady(page) {
@@ -131,6 +178,23 @@ async function getChatSeq(page) {
 	});
 }
 
+async function closeFullContextIfOpen(page, modal) {
+	if (!(await modal.isVisible().catch(() => false))) return;
+	await page.locator("#fullContextModalCloseBtn").click();
+	await expect(modal).toBeHidden({ timeout: 8_000 });
+}
+
+async function fullContextPanelState(copyBtn, copiedBtn, downloadBtn, llmOutputBtn, failedMsg) {
+	if ((await copyBtn.isVisible().catch(() => false)) || (await copiedBtn.isVisible().catch(() => false))) {
+		return "controls";
+	}
+	if ((await downloadBtn.isVisible().catch(() => false)) && (await llmOutputBtn.isVisible().catch(() => false))) {
+		return "controls";
+	}
+	if (await failedMsg.isVisible().catch(() => false)) return "failed";
+	return "loading";
+}
+
 async function openFullContextWithRetry(page) {
 	const chatMoreModal = page.locator("#chatMoreModal");
 	const fullContextModal = page.locator("#fullContextModal");
@@ -144,11 +208,7 @@ async function openFullContextWithRetry(page) {
 
 	for (let attempt = 0; attempt < 5; attempt++) {
 		await waitForWsConnectedIfPossible(page);
-
-		if (await fullContextModal.isVisible().catch(() => false)) {
-			await page.locator("#fullContextModalCloseBtn").click();
-			await expect(fullContextModal).toBeHidden({ timeout: 8_000 });
-		}
+		await closeFullContextIfOpen(page, fullContextModal);
 
 		await openChatMoreModal(page);
 		await expect(toggleBtn).toBeVisible({ timeout: 8_000 });
@@ -158,20 +218,9 @@ async function openFullContextWithRetry(page) {
 		await expect(panel).toBeVisible();
 
 		const result = await expect
-			.poll(
-				async () => {
-					if (
-						(await copyBtn.isVisible().catch(() => false)) ||
-						(await copiedBtn.isVisible().catch(() => false)) ||
-						((await downloadBtn.isVisible().catch(() => false)) && (await llmOutputBtn.isVisible().catch(() => false)))
-					) {
-						return "controls";
-					}
-					if (await failedMsg.isVisible().catch(() => false)) return "failed";
-					return "loading";
-				},
-				{ timeout: 12_000 },
-			)
+			.poll(async () => await fullContextPanelState(copyBtn, copiedBtn, downloadBtn, llmOutputBtn, failedMsg), {
+				timeout: 12_000,
+			})
 			.toBe("controls")
 			.then(() => "controls")
 			.catch(() => "failed");
@@ -268,6 +317,50 @@ test.describe("Chat input and slash commands", () => {
 				content: originalContent,
 			});
 		}
+	});
+
+	test("full context modal shows prompt memory status and can refresh frozen snapshots", async ({ page }) => {
+		await mockFullContextRpc(page);
+
+		const triggerBtn = await openFullContextWithRetry(page);
+		expect(triggerBtn).not.toBe(false);
+		if (triggerBtn === null) {
+			return;
+		}
+
+		const panel = page.locator("#fullContextPanel");
+		await expect(panel).toContainText("Prompt memory: Frozen at session start", { timeout: 10_000 });
+		await expect(panel).toContainText("/tmp/MEMORY-v1.md", { timeout: 10_000 });
+
+		const refreshBtn = panel.getByRole("button", { name: "Refresh memory", exact: true });
+		await expect(refreshBtn).toBeVisible();
+		await refreshBtn.click();
+
+		await expect.poll(async () => await getMockPromptMemoryRefreshCount(page), { timeout: 10_000 }).toBe(1);
+		await expect(panel).toContainText("/tmp/MEMORY-v2.md", { timeout: 10_000 });
+	});
+
+	test("toolbar prompt memory controls show status and refresh frozen snapshots", async ({ page }) => {
+		await mockFullContextRpc(page);
+
+		const statusBtn = page.locator("#promptMemoryStatusBtn");
+		const refreshBtn = page.locator("#promptMemoryRefreshBtn");
+		const fullContextModal = page.locator("#fullContextModal");
+		await expect(statusBtn).toBeVisible({ timeout: 10_000 });
+		await statusBtn.click();
+		await expect(page.locator("#fullContextPanel")).toContainText("Prompt memory: Frozen at session start", {
+			timeout: 10_000,
+		});
+		await expect(statusBtn).toContainText("Memory frozen");
+		await expect(refreshBtn).toBeVisible();
+		await expect(statusBtn).toHaveAttribute("title", /MEMORY-v1\.md/);
+		await page.locator("#fullContextModalCloseBtn").click();
+		await expect(fullContextModal).toBeHidden({ timeout: 10_000 });
+
+		await refreshBtn.click();
+
+		await expect.poll(async () => await getMockPromptMemoryRefreshCount(page), { timeout: 10_000 }).toBe(1);
+		await expect(statusBtn).toHaveAttribute("title", /MEMORY-v2\.md/);
 	});
 
 	test('typing "/" shows slash command menu', async ({ page }) => {

@@ -23,6 +23,7 @@
   - [Anthropic OAuth (FAQ)](anthropic-oauth.md)
 - [MCP Servers](mcp.md)
 - [Memory](memory.md)
+  - [Memory Surfaces](memory-surfaces.md)
   - [Moltis vs OpenClaw](memory-comparison.md)
 - [Hooks](hooks.md)
 - [Local LLMs](local-llm.md)
@@ -42,6 +43,7 @@
 - [Session State](session-state.md)
 - [Session Branching](session-branching.md)
 - [Checkpoints](checkpoints.md)
+- [Compaction](compaction.md)
 - [Scheduling (Cron Jobs)](scheduling.md)
 - [Webhooks](webhooks.md)
 - [Skill Self-Extension](skill-tools.md)
@@ -78,6 +80,7 @@
 - [SQLite Migrations](sqlite-migration.md)
 - [Metrics & Tracing](metrics-and-tracing.md)
 - [Tool Registry](tool-registry.md)
+- [Tool Policy](tool-policy.md)
 - [Agent Presets](agent-presets.md)
 - [Session Tools](session-tools.md)
 

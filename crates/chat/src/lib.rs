@@ -21,7 +21,10 @@ use {
     tracing::{debug, info, warn},
 };
 
-use moltis_config::{MessageQueueMode, ToolMode};
+use moltis_config::{
+    AgentMemoryWriteMode, LoadedWorkspaceMarkdown, MemoryStyle, MessageQueueMode, PromptMemoryMode,
+    ToolMode,
+};
 
 use {
     moltis_agents::{
@@ -42,11 +45,15 @@ use {
         ContentBlock, MessageContent, PersistedMessage,
         message::{PersistedFunction, PersistedToolCall},
         metadata::{SessionEntry, SqliteSessionMetadata},
+        state_store::SessionStateStore,
         store::SessionStore,
     },
     moltis_skills::discover::SkillDiscoverer,
-    moltis_tools::policy::{ToolPolicy, profile_tools},
+    moltis_tools::policy::{PolicyContext, ToolPolicy, resolve_effective_policy},
 };
+
+mod compaction;
+mod compaction_run;
 
 pub mod chat_error;
 pub mod error;
@@ -169,6 +176,64 @@ fn to_user_content(mc: &MessageContent) -> UserContent {
                 "to_user_content: converted multimodal content"
             );
             UserContent::Multimodal(parts)
+        },
+    }
+}
+
+fn rewrite_multimodal_text_blocks(blocks: &[ContentBlock], new_text: &str) -> Vec<ContentBlock> {
+    let mut rewritten = Vec::with_capacity(blocks.len().max(1));
+    let mut inserted_text = false;
+
+    for block in blocks {
+        match block {
+            ContentBlock::Text { .. } if !inserted_text => {
+                rewritten.push(ContentBlock::Text {
+                    text: new_text.to_string(),
+                });
+                inserted_text = true;
+            },
+            ContentBlock::Text { .. } => {},
+            _ => rewritten.push(block.clone()),
+        }
+    }
+
+    if !inserted_text {
+        rewritten.insert(0, ContentBlock::Text {
+            text: new_text.to_string(),
+        });
+    }
+
+    rewritten
+}
+
+fn apply_message_received_rewrite(
+    message_content: &mut MessageContent,
+    params: &mut Value,
+    new_text: &str,
+) {
+    match message_content {
+        MessageContent::Text(text) => {
+            *text = new_text.to_string();
+            if let Some(params_obj) = params.as_object_mut() {
+                params_obj.insert("text".to_string(), serde_json::json!(new_text));
+                params_obj.remove("content");
+            }
+        },
+        MessageContent::Multimodal(blocks) => {
+            let rewritten_blocks = rewrite_multimodal_text_blocks(blocks, new_text);
+            match serde_json::to_value(&rewritten_blocks) {
+                Ok(content_value) => {
+                    *blocks = rewritten_blocks;
+                    if let Some(params_obj) = params.as_object_mut() {
+                        params_obj.insert("content".to_string(), content_value);
+                        params_obj.remove("text");
+                        params_obj.remove("message");
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, "failed to serialize rewritten multimodal content");
+                },
+            }
         },
     }
 }
@@ -334,6 +399,20 @@ fn estimate_text_tokens(text: &str) -> u64 {
     }
     let bytes = trimmed.len() as u64;
     bytes.div_ceil(4).max(1)
+}
+
+/// Compute the auto-compact trigger threshold for a given context window
+/// and user-configured `chat.compaction.threshold_percent`.
+///
+/// The returned value is the number of estimated next-request input
+/// tokens at or above which `send()` fires a pre-emptive compaction.
+/// The fraction is clamped to `[0.1, 0.95]` so a typo'd config can't
+/// disable auto-compact or spam it on every message, and the result is
+/// floored at `1` so zero-context windows still get a non-zero check.
+#[must_use]
+fn compute_auto_compact_threshold(context_window_tokens: u64, threshold_percent: f32) -> u64 {
+    let fraction = f64::from(threshold_percent.clamp(0.1, 0.95));
+    ((context_window_tokens as f64) * fraction).round().max(1.0) as u64
 }
 
 fn now_ms() -> u64 {
@@ -981,6 +1060,36 @@ fn compress_summary(text: &str) -> String {
     result.join("\n")
 }
 
+/// Apply [`compress_summary`] to any `[Conversation Summary]` or
+/// `[Conversation Compacted]` message in a compacted history.
+///
+/// Walks each message, detects the summary prefix, compresses the body, and
+/// replaces the content in place. Non-summary messages are passed through
+/// unchanged, preserving the head/tail structure of modes like
+/// `recency_preserving`.
+fn compress_summary_in_history(mut history: Vec<Value>) -> Vec<Value> {
+    for msg in &mut history {
+        let Some(content) = msg.get("content").and_then(Value::as_str).map(String::from) else {
+            continue;
+        };
+        for prefix in ["[Conversation Summary]\n\n", "[Conversation Compacted]\n\n"] {
+            if let Some(body) = content.strip_prefix(prefix) {
+                let compressed = compress_summary(body);
+                if compressed.len() < body.len() {
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.insert(
+                            "content".into(),
+                            Value::String(format!("{prefix}{compressed}")),
+                        );
+                    }
+                }
+                break;
+            }
+        }
+    }
+    history
+}
+
 fn shell_reply_text_from_exec_result(result: &Value) -> String {
     let stdout = result
         .get("stdout")
@@ -1148,6 +1257,127 @@ struct PromptPersona {
     agents_text: Option<String>,
     tools_text: Option<String>,
     memory_text: Option<String>,
+    memory_status: PromptMemoryStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptMemoryStatus {
+    style: MemoryStyle,
+    mode: PromptMemoryMode,
+    write_mode: AgentMemoryWriteMode,
+    snapshot_active: bool,
+    present: bool,
+    chars: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_source: Option<moltis_config::WorkspaceMarkdownSource>,
+}
+
+const PROMPT_MEMORY_NAMESPACE: &str = "__prompt_memory";
+
+fn prompt_memory_snapshot_key(agent_id: &str) -> String {
+    format!("snapshot:{agent_id}")
+}
+
+async fn clear_prompt_memory_snapshot(
+    session_key: &str,
+    agent_id: &str,
+    state_store: Option<&SessionStateStore>,
+) -> bool {
+    let Some(store) = state_store else {
+        return false;
+    };
+    let key = prompt_memory_snapshot_key(agent_id);
+    match store
+        .delete(session_key, PROMPT_MEMORY_NAMESPACE, &key)
+        .await
+    {
+        Ok(deleted) => deleted,
+        Err(error) => {
+            warn!(
+                session = %session_key,
+                agent_id,
+                error = %error,
+                "failed to clear prompt memory snapshot"
+            );
+            false
+        },
+    }
+}
+
+fn prompt_memory_status(
+    style: MemoryStyle,
+    mode: PromptMemoryMode,
+    write_mode: AgentMemoryWriteMode,
+    snapshot_active: bool,
+    memory: Option<&LoadedWorkspaceMarkdown>,
+) -> PromptMemoryStatus {
+    PromptMemoryStatus {
+        style,
+        mode,
+        write_mode,
+        snapshot_active,
+        present: memory.is_some(),
+        chars: memory.map_or(0, |entry| entry.content.chars().count()),
+        path: memory.map(|entry| entry.path.to_string_lossy().into_owned()),
+        file_source: memory.map(|entry| entry.source),
+    }
+}
+
+fn memory_write_mode_allows_save(mode: AgentMemoryWriteMode) -> bool {
+    !matches!(mode, AgentMemoryWriteMode::Off)
+}
+
+fn default_agent_memory_file_for_mode(mode: AgentMemoryWriteMode) -> &'static str {
+    match mode {
+        AgentMemoryWriteMode::SearchOnly => "memory/notes.md",
+        AgentMemoryWriteMode::Hybrid
+        | AgentMemoryWriteMode::PromptOnly
+        | AgentMemoryWriteMode::Off => "MEMORY.md",
+    }
+}
+
+fn is_prompt_memory_file(file: &str) -> bool {
+    matches!(file.trim(), "MEMORY.md" | "memory.md")
+}
+
+fn validate_agent_memory_target_for_mode(
+    mode: AgentMemoryWriteMode,
+    file: &str,
+) -> anyhow::Result<()> {
+    match mode {
+        AgentMemoryWriteMode::Hybrid => Ok(()),
+        AgentMemoryWriteMode::PromptOnly => {
+            if is_prompt_memory_file(file) {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "memory.agent_write_mode = \"prompt-only\" only allows MEMORY.md writes"
+                );
+            }
+        },
+        AgentMemoryWriteMode::SearchOnly => {
+            if is_prompt_memory_file(file) {
+                anyhow::bail!(
+                    "memory.agent_write_mode = \"search-only\" only allows memory/<name>.md writes"
+                );
+            }
+            Ok(())
+        },
+        AgentMemoryWriteMode::Off => {
+            anyhow::bail!("agent-authored memory writes are disabled by memory.agent_write_mode");
+        },
+    }
+}
+
+fn memory_style_allows_prompt(style: MemoryStyle) -> bool {
+    matches!(style, MemoryStyle::Hybrid | MemoryStyle::PromptOnly)
+}
+
+fn memory_style_allows_tools(style: MemoryStyle) -> bool {
+    matches!(style, MemoryStyle::Hybrid | MemoryStyle::SearchOnly)
 }
 
 fn resolve_prompt_agent_id(session_entry: Option<&SessionEntry>) -> String {
@@ -1177,11 +1407,11 @@ fn resolve_prompt_agent_id(session_entry: Option<&SessionEntry>) -> String {
 }
 
 /// Load identity, user profile, soul, and workspace text for one agent.
-///
-/// Both `run_with_tools` and `run_streaming` need the same persona data;
-/// this function avoids duplicating the merge logic.
-fn load_prompt_persona_for_agent(agent_id: &str) -> PromptPersona {
+fn load_prompt_persona_base_for_agent(agent_id: &str) -> PromptPersona {
     let config = moltis_config::discover_and_load();
+    let prompt_memory_mode = config.chat.prompt_memory_mode;
+    let agent_write_mode = config.memory.agent_write_mode;
+    let memory_style = config.memory.style;
     let mut identity = config.identity.clone();
     if let Some(file_identity) = moltis_config::load_identity_for_agent(agent_id) {
         if file_identity.name.is_some() {
@@ -1194,15 +1424,7 @@ fn load_prompt_persona_for_agent(agent_id: &str) -> PromptPersona {
             identity.theme = file_identity.theme;
         }
     }
-    let mut user = config.user.clone();
-    if let Some(file_user) = moltis_config::load_user() {
-        if file_user.name.is_some() {
-            user.name = file_user.name;
-        }
-        if file_user.timezone.is_some() {
-            user.timezone = file_user.timezone;
-        }
-    }
+    let user = moltis_config::resolve_user_profile_from_config(&config);
     PromptPersona {
         config,
         identity,
@@ -1211,13 +1433,116 @@ fn load_prompt_persona_for_agent(agent_id: &str) -> PromptPersona {
         boot_text: moltis_config::load_boot_md_for_agent(agent_id),
         agents_text: moltis_config::load_agents_md_for_agent(agent_id),
         tools_text: moltis_config::load_tools_md_for_agent(agent_id),
-        memory_text: moltis_config::load_memory_md_for_agent(agent_id),
+        memory_text: None,
+        memory_status: prompt_memory_status(
+            memory_style,
+            prompt_memory_mode,
+            agent_write_mode,
+            false,
+            None,
+        ),
     }
 }
 
-fn load_prompt_persona_for_session(session_entry: Option<&SessionEntry>) -> PromptPersona {
+fn load_prompt_persona_for_agent(agent_id: &str) -> PromptPersona {
+    let mut persona = load_prompt_persona_base_for_agent(agent_id);
+    let style = persona.config.memory.style;
+    let mode = persona.config.chat.prompt_memory_mode;
+    let write_mode = persona.config.memory.agent_write_mode;
+    let memory = if memory_style_allows_prompt(style) {
+        moltis_config::load_memory_md_for_agent_with_source(agent_id)
+    } else {
+        None
+    };
+    persona.memory_text = memory.as_ref().map(|entry| entry.content.clone());
+    persona.memory_status = prompt_memory_status(style, mode, write_mode, false, memory.as_ref());
+    persona
+}
+
+async fn load_prompt_memory_for_session(
+    session_key: &str,
+    agent_id: &str,
+    mode: PromptMemoryMode,
+    state_store: Option<&SessionStateStore>,
+) -> (Option<LoadedWorkspaceMarkdown>, bool) {
+    let live_memory = || moltis_config::load_memory_md_for_agent_with_source(agent_id);
+
+    if !matches!(mode, PromptMemoryMode::FrozenAtSessionStart) {
+        return (live_memory(), false);
+    }
+
+    let Some(store) = state_store else {
+        return (live_memory(), false);
+    };
+
+    let key = prompt_memory_snapshot_key(agent_id);
+    match store.get(session_key, PROMPT_MEMORY_NAMESPACE, &key).await {
+        Ok(Some(raw)) => match serde_json::from_str::<Option<LoadedWorkspaceMarkdown>>(&raw) {
+            Ok(snapshot) => return (snapshot, true),
+            Err(error) => warn!(
+                session = %session_key,
+                agent_id,
+                error = %error,
+                "failed to deserialize prompt memory snapshot, rebuilding"
+            ),
+        },
+        Ok(None) => {},
+        Err(error) => warn!(
+            session = %session_key,
+            agent_id,
+            error = %error,
+            "failed to read prompt memory snapshot, falling back to live memory"
+        ),
+    }
+
+    let memory = live_memory();
+    match serde_json::to_string(&memory) {
+        Ok(serialized) => {
+            if let Err(error) = store
+                .set(session_key, PROMPT_MEMORY_NAMESPACE, &key, &serialized)
+                .await
+            {
+                warn!(
+                    session = %session_key,
+                    agent_id,
+                    error = %error,
+                    "failed to persist prompt memory snapshot"
+                );
+                return (memory, false);
+            }
+            (memory, true)
+        },
+        Err(error) => {
+            warn!(
+                session = %session_key,
+                agent_id,
+                error = %error,
+                "failed to serialize prompt memory snapshot"
+            );
+            (memory, false)
+        },
+    }
+}
+
+async fn load_prompt_persona_for_session(
+    session_key: &str,
+    session_entry: Option<&SessionEntry>,
+    state_store: Option<&SessionStateStore>,
+) -> PromptPersona {
     let agent_id = resolve_prompt_agent_id(session_entry);
-    load_prompt_persona_for_agent(&agent_id)
+    let mut persona = load_prompt_persona_base_for_agent(&agent_id);
+    let style = persona.config.memory.style;
+    let mode = persona.config.chat.prompt_memory_mode;
+    let write_mode = persona.config.memory.agent_write_mode;
+    let (memory, snapshot_active) = if memory_style_allows_prompt(style) {
+        load_prompt_memory_for_session(session_key, &agent_id, mode, state_store).await
+    } else {
+        (None, false)
+    };
+    persona.memory_text = memory.as_ref().map(|entry| entry.content.clone());
+    persona.memory_status =
+        prompt_memory_status(style, mode, write_mode, snapshot_active, memory.as_ref());
+    persona
 }
 
 fn prompt_build_limits_from_config(config: &moltis_config::MoltisConfig) -> PromptBuildLimits {
@@ -1226,70 +1551,85 @@ fn prompt_build_limits_from_config(config: &moltis_config::MoltisConfig) -> Prom
     }
 }
 
-#[derive(Default)]
-struct ChannelRuntimeContext {
-    surface: Option<String>,
-    session_kind: Option<String>,
-    channel_type: Option<String>,
-    channel_account_id: Option<String>,
-    channel_chat_id: Option<String>,
-    channel_chat_type: Option<String>,
-}
-
-fn infer_channel_chat_type(channel_type: &str, chat_id: &str) -> Option<String> {
-    if channel_type.eq_ignore_ascii_case("telegram") {
-        if chat_id.starts_with("-100") {
-            return Some("channel_or_supergroup".to_string());
-        }
-        if chat_id.starts_with('-') {
-            return Some("group".to_string());
-        }
-        return Some("private".to_string());
+/// Discover skills from the default filesystem paths, honoring `[skills] enabled`.
+///
+/// Returns an empty list when `config.skills.enabled` is `false`, so callers can
+/// unconditionally feed the result into prompt building / tool filtering without
+/// injecting skills into the LLM context when the operator has disabled them.
+async fn discover_skills_if_enabled(
+    config: &moltis_config::MoltisConfig,
+) -> Vec<moltis_skills::types::SkillMetadata> {
+    if !config.skills.enabled {
+        return Vec::new();
     }
-    None
+    let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
+    let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
+    match discoverer.discover().await {
+        Ok(skills) => skills,
+        Err(e) => {
+            warn!("failed to discover skills: {e}");
+            Vec::new()
+        },
+    }
 }
 
 fn resolve_channel_runtime_context(
     session_key: &str,
     session_entry: Option<&SessionEntry>,
-) -> ChannelRuntimeContext {
-    if session_key == "cron:heartbeat" {
-        return ChannelRuntimeContext {
-            surface: Some("heartbeat".to_string()),
-            session_kind: Some("cron".to_string()),
-            ..Default::default()
-        };
+) -> moltis_common::hooks::ChannelBinding {
+    match moltis_channels::resolve_session_channel_binding(
+        session_key,
+        session_entry.and_then(|entry| entry.channel_binding.as_deref()),
+    ) {
+        Ok(binding) => binding,
+        Err(error) => {
+            warn!(
+                error = %error,
+                session = %session_key,
+                "failed to parse channel_binding JSON; falling back to web"
+            );
+            moltis_channels::web_session_channel_binding()
+        },
     }
+}
 
-    if session_key.starts_with("cron:") {
-        return ChannelRuntimeContext {
-            surface: Some("cron".to_string()),
-            session_kind: Some("cron".to_string()),
-            ..Default::default()
-        };
-    }
+fn channel_binding_from_runtime_context(
+    runtime_context: Option<&PromptRuntimeContext>,
+) -> Option<moltis_common::hooks::ChannelBinding> {
+    let host = &runtime_context?.host;
+    let binding = moltis_common::hooks::ChannelBinding {
+        surface: host.surface.clone(),
+        session_kind: host.session_kind.clone(),
+        channel_type: host.channel_type.clone(),
+        account_id: host.channel_account_id.clone(),
+        chat_id: host.channel_chat_id.clone(),
+        chat_type: host.channel_chat_type.clone(),
+        sender_id: host.channel_sender_id.clone(),
+    };
+    (!binding.is_empty()).then_some(binding)
+}
 
-    if let Some(binding_json) = session_entry.and_then(|entry| entry.channel_binding.as_deref())
-        && let Ok(binding) =
-            serde_json::from_str::<moltis_channels::ChannelReplyTarget>(binding_json)
+fn build_tool_context(
+    session_key: &str,
+    accept_language: Option<&str>,
+    conn_id: Option<&str>,
+    runtime_context: Option<&PromptRuntimeContext>,
+) -> Value {
+    let mut tool_context = serde_json::json!({
+        "_session_key": session_key,
+    });
+    if let Some(channel_binding) = channel_binding_from_runtime_context(runtime_context)
+        && let Ok(channel_value) = serde_json::to_value(channel_binding)
     {
-        let channel_type = binding.channel_type.as_str().to_string();
-        let chat_id = binding.chat_id;
-        return ChannelRuntimeContext {
-            surface: Some(channel_type.clone()),
-            session_kind: Some("channel".to_string()),
-            channel_chat_type: infer_channel_chat_type(&channel_type, &chat_id),
-            channel_type: Some(channel_type),
-            channel_account_id: Some(binding.account_id),
-            channel_chat_id: Some(chat_id),
-        };
+        tool_context["_channel"] = channel_value;
     }
-
-    ChannelRuntimeContext {
-        surface: Some("web".to_string()),
-        session_kind: Some("web".to_string()),
-        ..Default::default()
+    if let Some(lang) = accept_language {
+        tool_context["_accept_language"] = serde_json::json!(lang);
     }
+    if let Some(cid) = conn_id {
+        tool_context["_conn_id"] = serde_json::json!(cid);
+    }
+    tool_context
 }
 
 async fn build_prompt_runtime_context(
@@ -1361,9 +1701,9 @@ async fn build_prompt_runtime_context(
         surface: channel_context.surface,
         session_kind: channel_context.session_kind,
         channel_type: channel_context.channel_type,
-        channel_account_id: channel_context.channel_account_id,
-        channel_chat_id: channel_context.channel_chat_id,
-        channel_chat_type: channel_context.channel_chat_type,
+        channel_account_id: channel_context.account_id,
+        channel_chat_id: channel_context.chat_id,
+        channel_chat_type: channel_context.chat_type,
         data_dir: Some(data_dir_display),
         sudo_non_interactive,
         sudo_status,
@@ -1483,8 +1823,8 @@ fn normalized_iana_timezone(timezone: Option<&str>) -> Option<String> {
 }
 
 fn default_user_prompt_timezone() -> Option<String> {
-    let user = moltis_config::load_user()?;
-    user.timezone
+    moltis_config::resolve_user_profile()
+        .timezone
         .as_ref()
         .map(|timezone| timezone.name().to_string())
         .and_then(|timezone| normalized_iana_timezone(Some(&timezone)))
@@ -1499,6 +1839,15 @@ fn apply_request_runtime_context(host: &mut PromptHostRuntimeContext, params: &V
         .get("_remote_ip")
         .and_then(|v| v.as_str())
         .map(String::from);
+
+    // Extract sender_id from channel metadata (set by channel handlers).
+    if host.channel_sender_id.is_none() {
+        host.channel_sender_id = params
+            .get("channel")
+            .and_then(|ch| ch.get("sender_id"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+    }
 
     if let Some(timezone) =
         normalized_iana_timezone(params.get("_timezone").and_then(|v| v.as_str()))
@@ -1520,25 +1869,12 @@ fn prompt_sandbox_no_network_state(backend: &str, configured_no_network: bool) -
     }
 }
 
-fn effective_tool_policy(config: &moltis_config::MoltisConfig) -> ToolPolicy {
-    let mut effective = ToolPolicy::default();
-    if let Some(profile) = config.tools.policy.profile.as_deref()
-        && !profile.is_empty()
-    {
-        effective = effective.merge_with(&profile_tools(profile));
-    }
-    let configured = ToolPolicy {
-        allow: config.tools.policy.allow.clone(),
-        deny: config.tools.policy.deny.clone(),
-    };
-    effective.merge_with(&configured)
-}
-
 fn apply_runtime_tool_filters(
     base: &ToolRegistry,
     config: &moltis_config::MoltisConfig,
     _skills: &[moltis_skills::types::SkillMetadata],
     mcp_disabled: bool,
+    policy_context: &PolicyContext,
 ) -> ToolRegistry {
     let base_registry = if mcp_disabled {
         base.clone_without_mcp()
@@ -1546,13 +1882,42 @@ fn apply_runtime_tool_filters(
         base.clone_without(&[])
     };
 
-    let policy = effective_tool_policy(config);
+    let policy = resolve_effective_policy(config, policy_context);
     // NOTE: Do not globally restrict tools by discovered skill `allowed_tools`.
     // Skills are always discovered for prompt injection; applying those lists at
     // runtime can unintentionally remove unrelated tools (for example, leaving
     // only `web_fetch` and preventing `create_skill` from being called).
     // Tool availability here is controlled by configured runtime policy.
     base_registry.clone_allowed_by(|name| policy.is_allowed(name))
+}
+
+/// Build a `PolicyContext` from runtime context and request parameters.
+fn build_policy_context(
+    agent_id: &str,
+    runtime_context: Option<&PromptRuntimeContext>,
+    params: Option<&Value>,
+) -> PolicyContext {
+    let host = runtime_context.map(|rc| &rc.host);
+    // sender_id: prefer params["channel"]["sender_id"] (fresh from channel
+    // dispatch), fall back to host.channel_sender_id (set by
+    // apply_request_runtime_context earlier in the call chain).
+    let sender_id = params
+        .and_then(|p| p.get("channel"))
+        .and_then(|ch| ch.get("sender_id"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| host.and_then(|h| h.channel_sender_id.clone()));
+    PolicyContext {
+        agent_id: agent_id.to_string(),
+        provider: host.and_then(|h| h.provider.clone()),
+        channel: host.and_then(|h| h.channel_type.clone()),
+        channel_account_id: host.and_then(|h| h.channel_account_id.clone()),
+        group_id: host.and_then(|h| h.channel_chat_type.clone()),
+        sender_id,
+        sandboxed: runtime_context
+            .and_then(|rc| rc.sandbox.as_ref())
+            .is_some_and(|s| s.exec_sandboxed),
+    }
 }
 
 // ── Disabled Models Store ────────────────────────────────────────────────────
@@ -2718,6 +3083,7 @@ pub struct LiveChatService {
     tool_registry: Arc<RwLock<ToolRegistry>>,
     session_store: Arc<SessionStore>,
     session_metadata: Arc<SqliteSessionMetadata>,
+    session_state_store: Option<Arc<SessionStateStore>>,
     hook_registry: Option<Arc<moltis_common::hooks::HookRegistry>>,
     /// Per-session semaphore ensuring only one agent run executes per session at a time.
     session_locks: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
@@ -2759,6 +3125,7 @@ impl LiveChatService {
             tool_registry: Arc::new(RwLock::new(ToolRegistry::new())),
             session_store,
             session_metadata,
+            session_state_store: None,
             hook_registry: None,
             session_locks: Arc::new(RwLock::new(HashMap::new())),
             message_queue: Arc::new(RwLock::new(HashMap::new())),
@@ -2778,6 +3145,11 @@ impl LiveChatService {
 
     pub fn with_tools(mut self, registry: Arc<RwLock<ToolRegistry>>) -> Self {
         self.tool_registry = registry;
+        self
+    }
+
+    pub fn with_session_state_store(mut self, store: Arc<SessionStateStore>) -> Self {
+        self.session_state_store = Some(store);
         self
     }
 
@@ -3068,7 +3440,11 @@ impl ChatService for LiveChatService {
         // Support both text-only and multimodal content.
         // - "text": string → plain text message
         // - "content": array → multimodal content (text + images)
-        let (text, message_content) = if let Some(content) = params.get("content") {
+        //
+        // Note: `text` and `message_content` are `mut` because a
+        // `MessageReceived` hook may return `ModifyPayload` to rewrite the
+        // inbound message before the turn begins (see GH #639).
+        let (mut text, mut message_content) = if let Some(content) = params.get("content") {
             // Multimodal content - extract text for logging/hooks, parse into typed blocks
             let text_part = content
                 .as_array()
@@ -3585,42 +3961,8 @@ impl ChatService for LiveChatService {
             .resolve_project_context(&session_key, conn_id.as_deref())
             .await;
 
-        // Dispatch MessageReceived hook (read-only).
-        if let Some(ref hooks) = self.hook_registry {
-            let channel = params
-                .get("channel")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let payload = moltis_common::hooks::HookPayload::MessageReceived {
-                session_key: session_key.clone(),
-                content: text.clone(),
-                channel,
-            };
-            if let Err(e) = hooks.dispatch(&payload).await {
-                warn!(session = %session_key, error = %e, "MessageReceived hook failed");
-            }
-        }
-
         // Generate run_id early so we can link the user message to its agent run.
         let run_id = uuid::Uuid::new_v4().to_string();
-
-        // Convert session-crate content to agents-crate content for the LLM.
-        // Must happen before `message_content` is moved into `user_msg`.
-        let user_content = to_user_content(&message_content);
-
-        // Build the user message for later persistence (deferred until we
-        // know the message won't be queued — avoids double-persist when a
-        // queued message is replayed via send()).
-        let channel_meta = params.get("channel").cloned();
-        let user_audio = user_audio_path_from_params(&params, &session_key);
-        let user_msg = PersistedMessage::User {
-            content: message_content,
-            created_at: Some(now_ms()),
-            audio: user_audio,
-            channel: channel_meta,
-            seq: client_seq,
-            run_id: Some(run_id.clone()),
-        };
 
         // Load conversation history (the current user message is NOT yet
         // persisted — run_streaming / run_agent_loop add it themselves).
@@ -3696,21 +4038,144 @@ impl ChatService for LiveChatService {
                     }
                 });
 
-        // Discover enabled skills/plugins for prompt injection.
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let discovered_skills = match discoverer.discover().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("failed to discover skills: {e}");
-                Vec::new()
-            },
+        // Dispatch the `MessageReceived` hook before the turn starts. The
+        // hook can:
+        //   - return `Continue` → proceed normally;
+        //   - return `ModifyPayload({"content": "..."})` → rewrite the
+        //     inbound text before it is persisted or sent to the model;
+        //   - return `Block(reason)` → abort this turn entirely. The user
+        //     message is NOT persisted, no run is started, and the reason
+        //     is surfaced to the channel/web sender.
+        //
+        // Hook errors are treated as fail-open: a broken hook must not be
+        // able to wedge every inbound message. See GH #639.
+        if let Some(ref hooks) = self.hook_registry {
+            let session_entry = self.session_metadata.get(&session_key).await;
+            let channel = params
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let channel_binding = Some(resolve_channel_runtime_context(
+                &session_key,
+                session_entry.as_ref(),
+            ))
+            .filter(|binding| !binding.is_empty());
+            let payload = moltis_common::hooks::HookPayload::MessageReceived {
+                session_key: session_key.clone(),
+                content: text.clone(),
+                channel,
+                channel_binding,
+            };
+            match hooks.dispatch(&payload).await {
+                Ok(moltis_common::hooks::HookAction::Continue) => {},
+                Ok(moltis_common::hooks::HookAction::ModifyPayload(new_payload)) => {
+                    match new_payload.get("content").and_then(|v| v.as_str()) {
+                        Some(new_text) => {
+                            info!(
+                                session = %session_key,
+                                "MessageReceived hook rewrote inbound content"
+                            );
+                            text = new_text.to_string();
+                            apply_message_received_rewrite(
+                                &mut message_content,
+                                &mut params,
+                                new_text,
+                            );
+                        },
+                        None => {
+                            warn!(
+                                session = %session_key,
+                                "MessageReceived hook ModifyPayload ignored: expected object with `content` string"
+                            );
+                        },
+                    }
+                },
+                Ok(moltis_common::hooks::HookAction::Block(reason)) => {
+                    info!(
+                        session = %session_key,
+                        reason = %reason,
+                        "MessageReceived hook blocked inbound message"
+                    );
+
+                    // Surface the rejection to channel senders via the
+                    // existing channel-error delivery path. If the caller
+                    // attached a reply target (web-UI-on-bound-session or an
+                    // inbound channel message), re-register it so
+                    // `deliver_channel_error` has a destination to drain.
+                    if let Some(target) = deferred_channel_target.clone() {
+                        self.state.push_channel_reply(&session_key, target).await;
+                        let error_obj = serde_json::json!({
+                            "type": "message_rejected",
+                            "message": reason,
+                        });
+                        deliver_channel_error(&self.state, &session_key, &error_obj).await;
+                    }
+
+                    // Broadcast a rejection event so web UI clients see it.
+                    broadcast(
+                        &self.state,
+                        "chat",
+                        serde_json::json!({
+                            "state": "rejected",
+                            "sessionKey": session_key,
+                            "reason": reason,
+                        }),
+                        BroadcastOpts::default(),
+                    )
+                    .await;
+
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "rejected": true,
+                        "reason": reason,
+                    }));
+                },
+                Err(e) => {
+                    warn!(
+                        session = %session_key,
+                        error = %e,
+                        "MessageReceived hook failed; proceeding fail-open"
+                    );
+                },
+            }
+        }
+
+        // Convert session-crate content to agents-crate content for the LLM.
+        // Must happen before `message_content` is moved into `user_msg`, and
+        // must happen AFTER the MessageReceived hook dispatch so a
+        // `ModifyPayload` rewrite is reflected in both `user_content` (what
+        // the LLM sees) and `user_msg` (what gets persisted).
+        let user_content = to_user_content(&message_content);
+
+        // Build the user message for later persistence (deferred until we
+        // know the message won't be queued — avoids double-persist when a
+        // queued message is replayed via send()).
+        let channel_meta = params.get("channel").cloned();
+        let user_audio = user_audio_path_from_params(&params, &session_key);
+        let user_msg = PersistedMessage::User {
+            content: message_content,
+            created_at: Some(now_ms()),
+            audio: user_audio,
+            channel: channel_meta,
+            seq: client_seq,
+            run_id: Some(run_id.clone()),
         };
+
+        // Discover enabled skills/plugins for prompt injection (gated on
+        // `[skills] enabled` — see #655).
+        let discovered_skills =
+            discover_skills_if_enabled(&moltis_config::discover_and_load()).await;
 
         // Check if MCP tools are disabled for this session and capture
         // per-session sandbox override details for prompt runtime context.
         let session_entry = self.session_metadata.get(&session_key).await;
         let session_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
+        let persona = load_prompt_persona_for_session(
+            &session_key,
+            session_entry.as_ref(),
+            self.session_state_store.as_deref(),
+        )
+        .await;
         let mcp_disabled = session_entry
             .as_ref()
             .and_then(|entry| entry.mcp_disabled)
@@ -3772,14 +4237,23 @@ impl ChatService for LiveChatService {
             .get("_accept_language")
             .and_then(|v| v.as_str())
             .map(String::from);
-        // Auto-compact when the next request is likely to exceed 95% of the
-        // model context window.
+        // Auto-compact when the next request is likely to exceed
+        // `chat.compaction.threshold_percent` of the model context window.
+        // The value is clamped to the 0.1–0.95 range in case config
+        // validation missed a typo; the default (0.95) is loaded via
+        // load_prompt_persona_for_agent for the session's agent and
+        // matches the pre-PR-#653 hardcoded trigger.
+        let compaction_cfg = &load_prompt_persona_for_agent(&session_agent_id)
+            .config
+            .chat
+            .compaction;
         let context_window = provider.context_window() as u64;
         let token_usage = session_token_usage_from_messages(&history);
         let estimated_next_input = token_usage
             .current_request_input_tokens
             .saturating_add(estimate_text_tokens(&text));
-        let compact_threshold = (context_window * 95) / 100;
+        let compact_threshold =
+            compute_auto_compact_threshold(context_window, compaction_cfg.threshold_percent);
 
         if estimated_next_input >= compact_threshold {
             let pre_compact_msg_count = history.len();
@@ -3791,7 +4265,9 @@ impl ChatService for LiveChatService {
                 session = %session_key,
                 estimated_next_input,
                 context_window,
-                "auto-compact triggered (estimated next request over 95% threshold)"
+                threshold_percent = compaction_cfg.threshold_percent,
+                compact_threshold,
+                "auto-compact triggered (estimated next request over chat.compaction.threshold_percent)"
             );
             broadcast(
                 &self.state,
@@ -3822,6 +4298,18 @@ impl ChatService for LiveChatService {
                         .read(&session_key)
                         .await
                         .unwrap_or_default();
+                    // This `auto_compact done` event is a lifecycle
+                    // signal for subscribers that pre-emptive
+                    // auto-compact finished. The mode/token metadata
+                    // lives on the `chat.compact done` event that
+                    // `self.compact()` broadcasts from the inside —
+                    // the `compactBroadcastPath: "inner"` marker below
+                    // lets hook / webhook consumers detect that and
+                    // subscribe to that event instead. The parallel
+                    // `run_with_tools` context-overflow path emits a
+                    // self-contained `auto_compact done` (with
+                    // `compactBroadcastPath: "wrapper"`) that carries
+                    // the metadata directly.
                     broadcast(
                         &self.state,
                         "chat",
@@ -3832,6 +4320,7 @@ impl ChatService for LiveChatService {
                             "messageCount": pre_compact_msg_count,
                             "totalTokens": pre_compact_total,
                             "contextWindow": context_window,
+                            "compactBroadcastPath": "inner",
                         }),
                         BroadcastOpts::default(),
                     )
@@ -3960,6 +4449,7 @@ impl ChatService for LiveChatService {
             let agent_fut = async {
                 if stream_only {
                     run_streaming(
+                        persona,
                         &state,
                         &model_store,
                         &run_id_clone,
@@ -3983,6 +4473,7 @@ impl ChatService for LiveChatService {
                     .await
                 } else {
                     run_with_tools(
+                        persona,
                         &state,
                         &model_store,
                         &run_id_clone,
@@ -4267,6 +4758,12 @@ impl ChatService for LiveChatService {
 
         let session_entry = self.session_metadata.get(&session_key).await;
         let session_agent_id = resolve_prompt_agent_id(session_entry.as_ref());
+        let persona = load_prompt_persona_for_session(
+            &session_key,
+            session_entry.as_ref(),
+            self.session_state_store.as_deref(),
+        )
+        .await;
         let mut runtime_context = build_prompt_runtime_context(
             &self.state,
             &provider,
@@ -4332,6 +4829,7 @@ impl ChatService for LiveChatService {
         let terminal_runs = Arc::new(RwLock::new(HashSet::new()));
         let result = if stream_only {
             run_streaming(
+                persona,
                 &state,
                 &model_store,
                 &run_id,
@@ -4355,6 +4853,7 @@ impl ChatService for LiveChatService {
             .await
         } else {
             run_with_tools(
+                persona,
                 &state,
                 &model_store,
                 &run_id,
@@ -4622,100 +5121,144 @@ impl ChatService for LiveChatService {
         if let Some(mm) = self.state.memory_manager()
             && let Ok(provider) = self.resolve_provider(&session_key, &history).await
         {
-            let chat_history_for_memory = values_to_chat_messages(&history);
-            let writer: Arc<dyn moltis_agents::memory_writer::MemoryWriter> = Arc::new(
-                AgentScopedMemoryWriter::new(Arc::clone(mm), session_agent_id.clone()),
-            );
-            match moltis_agents::silent_turn::run_silent_memory_turn(
-                provider,
-                &chat_history_for_memory,
-                writer,
-            )
-            .await
-            {
-                Ok(paths) => {
-                    if !paths.is_empty() {
-                        info!(
-                            files = paths.len(),
-                            "compact: silent memory turn wrote files"
-                        );
-                    }
-                },
-                Err(e) => warn!(error = %e, "compact: silent memory turn failed"),
+            let write_mode = moltis_config::discover_and_load().memory.agent_write_mode;
+            if !memory_write_mode_allows_save(write_mode) {
+                debug!(
+                    "compact: agent-authored memory writes disabled, skipping silent memory turn"
+                );
+            } else {
+                let chat_history_for_memory = values_to_chat_messages(&history);
+                let writer: Arc<dyn moltis_agents::memory_writer::MemoryWriter> =
+                    Arc::new(AgentScopedMemoryWriter::new(
+                        Arc::clone(mm),
+                        session_agent_id.clone(),
+                        write_mode,
+                    ));
+                match moltis_agents::silent_turn::run_silent_memory_turn(
+                    provider,
+                    &chat_history_for_memory,
+                    writer,
+                )
+                .await
+                {
+                    Ok(paths) => {
+                        if !paths.is_empty() {
+                            info!(
+                                files = paths.len(),
+                                "compact: silent memory turn wrote files"
+                            );
+                        }
+                    },
+                    Err(e) => warn!(error = %e, "compact: silent memory turn failed"),
+                }
             }
         }
 
-        // Build a summary prompt from the conversation using structured messages.
-        // We pass the typed ChatMessage objects directly so role boundaries are
-        // maintained via the API's message structure, preventing prompt injection
-        // where user content could mimic role prefixes in concatenated text.
-        let mut summary_messages = vec![ChatMessage::system(
-            "You are a conversation summarizer. The messages that follow are a conversation you must summarize. Preserve all key facts, decisions, and context. After the conversation, you will receive a final instruction.",
-        )];
-        summary_messages.extend(values_to_chat_messages(&history));
-        summary_messages.push(ChatMessage::user(
-            "Summarize the conversation above into a concise form. Output only the summary, no preamble.",
-        ));
+        // Resolve the session persona so we can pick up the compaction config
+        // and provide a provider to LLM-backed compaction modes. Agent-scoped
+        // config falls back through `load_prompt_persona_for_agent`'s default
+        // path, so this is safe even when the session has no custom preset.
+        let persona = load_prompt_persona_for_agent(&session_agent_id);
+        let compaction_config = &persona.config.chat.compaction;
 
-        // Use the session's model if available, otherwise fall back to the model
-        // from the last assistant message, then to the first registered provider.
-        let provider = self
-            .resolve_provider(&session_key, &history)
-            .await
-            .map_err(ServiceError::message)?;
+        // LLM-backed modes need a resolved provider. Deterministic mode
+        // ignores it, so resolution failures are only fatal for the other
+        // modes — and `run_compaction` returns a clear ProviderRequired
+        // error in that case.
+        let provider_arc = self.resolve_provider(&session_key, &history).await.ok();
 
-        info!(session = %session_key, messages = history.len(), "chat.compact: summarizing");
+        let outcome =
+            compaction_run::run_compaction(&history, compaction_config, provider_arc.as_deref())
+                .await
+                .map_err(|e| ServiceError::message(e.to_string()))?;
 
-        let mut stream = provider.stream(summary_messages);
-        let mut summary = String::new();
-        while let Some(event) = stream.next().await {
-            match event {
-                StreamEvent::Delta(delta) => summary.push_str(&delta),
-                StreamEvent::Done(_) => break,
-                StreamEvent::Error(e) => {
-                    return Err(format!("compact summarization failed: {e}").into());
-                },
-                // Tool events not expected in summarization stream.
-                StreamEvent::ToolCallStart { .. }
-                | StreamEvent::ToolCallArgumentsDelta { .. }
-                | StreamEvent::ToolCallComplete { .. }
-                // Provider raw payloads are debug metadata, not summary text.
-                | StreamEvent::ProviderRaw(_)
-                // Ignore provider reasoning blocks; summary body should only
-                // include final answer text.
-                | StreamEvent::ReasoningDelta(_) => {},
-            }
-        }
+        let compacted = outcome.history.clone();
 
-        if summary.is_empty() {
-            return Err("compact produced empty summary".into());
-        }
+        // Keep a plain-text copy of the summary so the memory-file snapshot
+        // below can still record what we compacted to. The helper walks the
+        // compacted history because recency_preserving / structured modes
+        // splice head and tail messages around the summary — it isn't
+        // necessarily compacted[0].
+        let summary_for_memory = compaction_run::extract_summary_body(&compacted);
 
-        // Enforce summary budget discipline: max 1,200 chars, 24 lines, 160 chars/line.
-        summary = compress_summary(&summary);
+        info!(
+            session = %session_key,
+            requested_mode = ?compaction_config.mode,
+            effective_mode = ?outcome.effective_mode,
+            input_tokens = outcome.input_tokens,
+            output_tokens = outcome.output_tokens,
+            messages = history.len(),
+            "chat.compact: strategy dispatched"
+        );
 
-        // Replace history with a single user message containing the summary.
-        // Using the user role (not assistant) avoids breaking providers like
-        // llama.cpp that require every assistant message to follow a user message,
-        // and ensures the summary stays in the conversation turn array for
-        // providers using the Responses API (which promotes system messages to
-        // instructions).
-        let compacted_msg = PersistedMessage::User {
-            content: MessageContent::Text(format!("[Conversation Summary]\n\n{summary}")),
-            created_at: Some(now_ms()),
-            audio: None,
-            channel: None,
-            seq: None,
-            run_id: None,
-        };
-        let compacted = vec![compacted_msg.to_value()];
+        // Enforce summary budget discipline: max 1,200 chars, 24 lines,
+        // 160 chars/line.  Mutate the compacted history in place so the
+        // compressed text is what gets persisted and broadcast.
+        let compacted = compress_summary_in_history(compacted);
 
+        // Replace the session history BEFORE broadcasting or notifying
+        // channels. If we did it the other way around, a concurrent
+        // `send()` RPC that landed between the broadcast and the store
+        // update would see the stale history and the client UI would
+        // already believe compaction had finished — a narrow but real
+        // race window flagged by Greptile on commit 0714de07.
         self.session_store
             .replace_history(&session_key, compacted.clone())
             .await
             .map_err(ServiceError::message)?;
 
         self.session_metadata.touch(&session_key, 1).await;
+
+        // Broadcast a chat.compact-scoped "done" event so UI consumers see
+        // the effective mode and token usage even when compaction is
+        // triggered manually via the RPC (the auto-compact path broadcasts
+        // separately around `send()`). The settings hint is included only
+        // when the user hasn't opted out via chat.compaction.show_settings_hint.
+        //
+        // Include `totalTokens` / `contextWindow` on this payload so the
+        // web UI's compact card can render a full "Before compact"
+        // section even when this event fires first in `send()`'s
+        // pre-emptive auto-compact path. Without these fields the card
+        // was rendering without the "Total tokens" and "Context usage"
+        // rows on that path.
+        let show_hint = compaction_config.show_settings_hint;
+        let pre_compact_total_tokens: u32 = history
+            .iter()
+            .filter_map(|m| m.get("content").and_then(Value::as_str))
+            .map(|text| u32::try_from(estimate_text_tokens(text)).unwrap_or(u32::MAX))
+            .sum();
+        let context_window = provider_arc.as_deref().map(|p| p.context_window());
+        let mut compact_payload = serde_json::json!({
+            "sessionKey": session_key,
+            "state": "compact",
+            "phase": "done",
+            "messageCount": history.len(),
+            "totalTokens": pre_compact_total_tokens,
+        });
+        if let Some(window) = context_window
+            && let Some(obj) = compact_payload.as_object_mut()
+        {
+            obj.insert("contextWindow".to_string(), serde_json::json!(window));
+        }
+        if let (Some(obj), Some(meta)) = (
+            compact_payload.as_object_mut(),
+            outcome.broadcast_metadata(show_hint).as_object().cloned(),
+        ) {
+            obj.extend(meta);
+        }
+        broadcast(
+            &self.state,
+            "chat",
+            compact_payload,
+            BroadcastOpts::default(),
+        )
+        .await;
+
+        // Notify any channel (Telegram, Discord, Matrix, WhatsApp, etc.)
+        // that has pending reply targets on this session, so channel
+        // users see "Conversation compacted (mode, tokens, hint)"
+        // alongside the web UI's compact card.
+        notify_channels_of_compaction(&self.state, &session_key, &outcome, show_hint).await;
 
         // Save compaction summary to memory file and trigger sync.
         if let Some(mm) = self.state.memory_manager() {
@@ -4730,7 +5273,7 @@ impl ChatService for LiveChatService {
                 let filename = format!("compaction-{}-{ts}.md", session_key);
                 let path = memory_dir.join(&filename);
                 let content = format!(
-                    "# Compaction Summary\n\n- **Session**: {session_key}\n- **Timestamp**: {ts}\n\n{summary}"
+                    "# Compaction Summary\n\n- **Session**: {session_key}\n- **Timestamp**: {ts}\n\n{summary_for_memory}"
                 );
                 if let Err(e) = tokio::fs::write(&path, &content).await {
                     warn!(error = %e, "compact: failed to write memory file");
@@ -4749,7 +5292,7 @@ impl ChatService for LiveChatService {
         if let Some(ref hooks) = self.hook_registry {
             let payload = moltis_common::hooks::HookPayload::AfterCompaction {
                 session_key: session_key.clone(),
-                summary_len: summary.len(),
+                summary_len: summary_for_memory.len(),
             };
             if let Err(e) = hooks.dispatch(&payload).await {
                 warn!(session = %session_key, error = %e, "AfterCompaction hook failed");
@@ -4766,6 +5309,12 @@ impl ChatService for LiveChatService {
         // Session info
         let message_count = self.session_store.count(&session_key).await.unwrap_or(0);
         let session_entry = self.session_metadata.get(&session_key).await;
+        let prompt_persona = load_prompt_persona_for_session(
+            &session_key,
+            session_entry.as_ref(),
+            self.session_state_store.as_deref(),
+        )
+        .await;
         let (provider_name, supports_tools) = {
             let reg = self.providers.read().await;
             let session_model = session_entry.as_ref().and_then(|e| e.model.as_deref());
@@ -4852,8 +5401,12 @@ impl ChatService for LiveChatService {
         let config = moltis_config::discover_and_load();
         let tools: Vec<Value> = if supports_tools {
             let registry_guard = self.tool_registry.read().await;
+            let list_ctx = PolicyContext {
+                agent_id: "main".into(),
+                ..Default::default()
+            };
             let effective_registry =
-                apply_runtime_tool_filters(&registry_guard, &config, &[], mcp_disabled);
+                apply_runtime_tool_filters(&registry_guard, &config, &[], mcp_disabled, &list_ctx);
             effective_registry
                 .list_schemas()
                 .iter()
@@ -4950,23 +5503,20 @@ impl ChatService for LiveChatService {
             "promptSymbol": exec_prompt_symbol,
         });
 
-        // Discover enabled skills/plugins (only if provider supports tools)
+        // Discover enabled skills/plugins (only if provider supports tools and
+        // `[skills] enabled` is true — see #655).
         let skills_list: Vec<Value> = if supports_tools {
-            let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-            let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-            match discoverer.discover().await {
-                Ok(s) => s
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "name": s.name,
-                            "description": s.description,
-                            "source": s.source,
-                        })
+            discover_skills_if_enabled(&config)
+                .await
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "description": s.description,
+                        "source": s.source,
                     })
-                    .collect(),
-                Err(_) => vec![],
-            }
+                })
+                .collect()
         } else {
             vec![]
         };
@@ -4991,6 +5541,7 @@ impl ChatService for LiveChatService {
             "mcpDisabled": mcp_disabled,
             "sandbox": sandbox_info,
             "execution": execution_info,
+            "promptMemory": prompt_persona.memory_status,
             "supportsTools": supports_tools,
             "tokenUsage": {
                 "inputTokens": usage.session_input_tokens,
@@ -5029,7 +5580,12 @@ impl ChatService for LiveChatService {
 
         // Build runtime context.
         let session_entry = self.session_metadata.get(&session_key).await;
-        let persona = load_prompt_persona_for_session(session_entry.as_ref());
+        let persona = load_prompt_persona_for_session(
+            &session_key,
+            session_entry.as_ref(),
+            self.session_state_store.as_deref(),
+        )
+        .await;
         let mut runtime_context = build_prompt_runtime_context(
             &self.state,
             &provider,
@@ -5044,16 +5600,8 @@ impl ChatService for LiveChatService {
             .resolve_project_context(&session_key, conn_id.as_deref())
             .await;
 
-        // Discover skills.
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let discovered_skills = match discoverer.discover().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("failed to discover skills: {e}");
-                Vec::new()
-            },
-        };
+        // Discover skills (gated on `[skills] enabled` — see #655).
+        let discovered_skills = discover_skills_if_enabled(&persona.config).await;
 
         // Check MCP disabled.
         let mcp_disabled = session_entry
@@ -5062,6 +5610,7 @@ impl ChatService for LiveChatService {
             .unwrap_or(false);
 
         // Build filtered tool registry.
+        let policy_ctx = build_policy_context("main", Some(&runtime_context), Some(&params));
         let filtered_registry = {
             let registry_guard = self.tool_registry.read().await;
             if tools_enabled {
@@ -5070,6 +5619,7 @@ impl ChatService for LiveChatService {
                     &persona.config,
                     &discovered_skills,
                     mcp_disabled,
+                    &policy_ctx,
                 )
             } else {
                 registry_guard.clone_without(&[])
@@ -5121,6 +5671,7 @@ impl ChatService for LiveChatService {
             "charCount": char_count,
             "truncated": truncated,
             "workspaceFiles": workspace_files,
+            "promptMemory": persona.memory_status,
             "native_tools": native_tools,
             "tools_enabled": tools_enabled,
             "tool_mode": format!("{:?}", tool_mode),
@@ -5154,7 +5705,12 @@ impl ChatService for LiveChatService {
 
         // Build runtime context.
         let session_entry = self.session_metadata.get(&session_key).await;
-        let persona = load_prompt_persona_for_session(session_entry.as_ref());
+        let persona = load_prompt_persona_for_session(
+            &session_key,
+            session_entry.as_ref(),
+            self.session_state_store.as_deref(),
+        )
+        .await;
         let mut runtime_context = build_prompt_runtime_context(
             &self.state,
             &provider,
@@ -5169,16 +5725,8 @@ impl ChatService for LiveChatService {
             .resolve_project_context(&session_key, conn_id.as_deref())
             .await;
 
-        // Discover skills.
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let discovered_skills = match discoverer.discover().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("failed to discover skills: {e}");
-                Vec::new()
-            },
-        };
+        // Discover skills (gated on `[skills] enabled` — see #655).
+        let discovered_skills = discover_skills_if_enabled(&persona.config).await;
 
         // Check MCP disabled.
         let mcp_disabled = session_entry
@@ -5187,6 +5735,7 @@ impl ChatService for LiveChatService {
             .unwrap_or(false);
 
         // Build filtered tool registry.
+        let policy_ctx = build_policy_context("main", Some(&runtime_context), Some(&params));
         let filtered_registry = {
             let registry_guard = self.tool_registry.read().await;
             if tools_enabled {
@@ -5195,6 +5744,7 @@ impl ChatService for LiveChatService {
                     &persona.config,
                     &discovered_skills,
                     mcp_disabled,
+                    &policy_ctx,
                 )
             } else {
                 registry_guard.clone_without(&[])
@@ -5268,6 +5818,33 @@ impl ChatService for LiveChatService {
             "totalChars": total_chars,
             "truncated": truncated,
             "workspaceFiles": workspace_files,
+            "promptMemory": persona.memory_status,
+        }))
+    }
+
+    async fn refresh_prompt_memory(&self, params: Value) -> ServiceResult {
+        let session_key = self.resolve_session_key_from_params(&params).await;
+        let session_entry = self.session_metadata.get(&session_key).await;
+        let agent_id = resolve_prompt_agent_id(session_entry.as_ref());
+        let snapshot_cleared = clear_prompt_memory_snapshot(
+            &session_key,
+            &agent_id,
+            self.session_state_store.as_deref(),
+        )
+        .await;
+        let persona = load_prompt_persona_for_session(
+            &session_key,
+            session_entry.as_ref(),
+            self.session_state_store.as_deref(),
+        )
+        .await;
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "sessionKey": session_key,
+            "agentId": agent_id,
+            "snapshotCleared": snapshot_cleared,
+            "promptMemory": persona.memory_status,
         }))
     }
 
@@ -5894,16 +6471,22 @@ fn is_path_in_agent_memory_scope(path: &Path, agent_id: &str) -> bool {
 }
 
 struct AgentScopedMemoryWriter {
-    manager: Arc<moltis_memory::manager::MemoryManager>,
+    manager: moltis_memory::runtime::DynMemoryRuntime,
     agent_id: String,
+    write_mode: AgentMemoryWriteMode,
     checkpoints: moltis_tools::checkpoints::CheckpointManager,
 }
 
 impl AgentScopedMemoryWriter {
-    fn new(manager: Arc<moltis_memory::manager::MemoryManager>, agent_id: String) -> Self {
+    fn new(
+        manager: moltis_memory::runtime::DynMemoryRuntime,
+        agent_id: String,
+        write_mode: AgentMemoryWriteMode,
+    ) -> Self {
         Self {
             manager,
             agent_id,
+            write_mode,
             checkpoints: moltis_tools::checkpoints::CheckpointManager::new(
                 moltis_config::data_dir(),
             ),
@@ -5927,6 +6510,7 @@ impl moltis_agents::memory_writer::MemoryWriter for AgentScopedMemoryWriter {
             );
         }
 
+        validate_agent_memory_target_for_mode(self.write_mode, file)?;
         let path = resolve_agent_memory_target_path(&self.agent_id, file)?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -5958,12 +6542,12 @@ impl moltis_agents::memory_writer::MemoryWriter for AgentScopedMemoryWriter {
 }
 
 struct AgentScopedMemorySearchTool {
-    manager: Arc<moltis_memory::manager::MemoryManager>,
+    manager: moltis_memory::runtime::DynMemoryRuntime,
     agent_id: String,
 }
 
 impl AgentScopedMemorySearchTool {
-    fn new(manager: Arc<moltis_memory::manager::MemoryManager>, agent_id: String) -> Self {
+    fn new(manager: moltis_memory::runtime::DynMemoryRuntime, agent_id: String) -> Self {
         Self { manager, agent_id }
     }
 }
@@ -6050,12 +6634,12 @@ impl AgentTool for AgentScopedMemorySearchTool {
 }
 
 struct AgentScopedMemoryGetTool {
-    manager: Arc<moltis_memory::manager::MemoryManager>,
+    manager: moltis_memory::runtime::DynMemoryRuntime,
     agent_id: String,
 }
 
 impl AgentScopedMemoryGetTool {
-    fn new(manager: Arc<moltis_memory::manager::MemoryManager>, agent_id: String) -> Self {
+    fn new(manager: moltis_memory::runtime::DynMemoryRuntime, agent_id: String) -> Self {
         Self { manager, agent_id }
     }
 }
@@ -6112,12 +6696,18 @@ impl AgentTool for AgentScopedMemoryGetTool {
 
 struct AgentScopedMemorySaveTool {
     writer: AgentScopedMemoryWriter,
+    write_mode: AgentMemoryWriteMode,
 }
 
 impl AgentScopedMemorySaveTool {
-    fn new(manager: Arc<moltis_memory::manager::MemoryManager>, agent_id: String) -> Self {
+    fn new(
+        manager: moltis_memory::runtime::DynMemoryRuntime,
+        agent_id: String,
+        write_mode: AgentMemoryWriteMode,
+    ) -> Self {
         Self {
-            writer: AgentScopedMemoryWriter::new(manager, agent_id),
+            writer: AgentScopedMemoryWriter::new(manager, agent_id, write_mode),
+            write_mode,
         }
     }
 }
@@ -6163,7 +6753,7 @@ impl AgentTool for AgentScopedMemorySaveTool {
         let file = params
             .get("file")
             .and_then(Value::as_str)
-            .unwrap_or("MEMORY.md");
+            .unwrap_or_else(|| default_agent_memory_file_for_mode(self.write_mode));
         let append = params
             .get("append")
             .and_then(Value::as_bool)
@@ -6183,12 +6773,18 @@ impl AgentTool for AgentScopedMemorySaveTool {
 
 fn install_agent_scoped_memory_tools(
     registry: &mut ToolRegistry,
-    manager: &Arc<moltis_memory::manager::MemoryManager>,
+    manager: &moltis_memory::runtime::DynMemoryRuntime,
     agent_id: &str,
+    style: MemoryStyle,
+    write_mode: AgentMemoryWriteMode,
 ) {
     let had_search = registry.unregister("memory_search");
     let had_get = registry.unregister("memory_get");
     let had_save = registry.unregister("memory_save");
+
+    if !memory_style_allows_tools(style) {
+        return;
+    }
 
     let agent_id_owned = agent_id.to_string();
     if had_search {
@@ -6203,10 +6799,11 @@ fn install_agent_scoped_memory_tools(
             agent_id_owned.clone(),
         )));
     }
-    if had_save {
+    if had_save && memory_write_mode_allows_save(write_mode) {
         registry.register(Box::new(AgentScopedMemorySaveTool::new(
             Arc::clone(manager),
             agent_id_owned,
+            write_mode,
         )));
     }
 }
@@ -6234,6 +6831,7 @@ fn effective_tool_mode(provider: &dyn moltis_agents::model::LlmProvider) -> Tool
 }
 
 async fn run_with_tools(
+    persona: PromptPersona,
     state: &Arc<dyn ChatRuntime>,
     model_store: &Arc<RwLock<DisabledModelsStore>>,
     run_id: &str,
@@ -6263,22 +6861,34 @@ async fn run_with_tools(
     terminal_runs: &Arc<RwLock<HashSet<String>>>,
 ) -> Option<AssistantTurnOutput> {
     let run_started = Instant::now();
-    let persona = load_prompt_persona_for_agent(agent_id);
 
     let tool_mode = effective_tool_mode(&*provider);
     let native_tools = matches!(tool_mode, ToolMode::Native);
     let tools_enabled = !matches!(tool_mode, ToolMode::Off);
 
+    let policy_ctx = build_policy_context(agent_id, runtime_context, None);
     let mut filtered_registry = {
         let registry_guard = tool_registry.read().await;
         if tools_enabled {
-            apply_runtime_tool_filters(&registry_guard, &persona.config, skills, mcp_disabled)
+            apply_runtime_tool_filters(
+                &registry_guard,
+                &persona.config,
+                skills,
+                mcp_disabled,
+                &policy_ctx,
+            )
         } else {
             registry_guard.clone_without(&[])
         }
     };
     if tools_enabled && let Some(manager) = state.memory_manager() {
-        install_agent_scoped_memory_tools(&mut filtered_registry, manager, agent_id);
+        install_agent_scoped_memory_tools(
+            &mut filtered_registry,
+            manager,
+            agent_id,
+            persona.config.memory.style,
+            persona.config.memory.agent_write_mode,
+        );
     }
     if tools_enabled
         && matches!(
@@ -6859,6 +7469,54 @@ async fn run_with_tools(
                         "seq": seq,
                     })
                 },
+                RunnerEvent::ToolCallRejected {
+                    id,
+                    name,
+                    arguments,
+                    error,
+                } => {
+                    // Pre-dispatch validation failure — the tool's `execute`
+                    // method never ran. Emit as a terminal tool_call_end with
+                    // a `rejected: true` marker so the UI can render it
+                    // distinctly from a normal execution failure (issue #658).
+                    if let Some(ref map) = active_tool_calls {
+                        let mut guard = map.write().await;
+                        if let Some(calls) = guard.get_mut(&sk) {
+                            calls.retain(|tc| tc.id != id);
+                            if calls.is_empty() {
+                                guard.remove(&sk);
+                            }
+                        }
+                    }
+                    serde_json::json!({
+                        "runId": run_id,
+                        "sessionKey": sk,
+                        "state": "tool_call_end",
+                        "toolCallId": id,
+                        "toolName": name,
+                        "arguments": arguments,
+                        "success": false,
+                        "rejected": true,
+                        "error": parse_chat_error(&error, None),
+                        "seq": seq,
+                    })
+                },
+                RunnerEvent::LoopInterventionFired { stage, tool_name } => {
+                    serde_json::json!({
+                        "runId": run_id,
+                        "sessionKey": sk,
+                        "state": "notice",
+                        "title": "Loop detected",
+                        "message": format!(
+                            "Detected repeated failed calls to `{}`. \
+                             Intervening (stage {}) to break the loop.",
+                            tool_name, stage
+                        ),
+                        "loopInterventionStage": stage,
+                        "stuckTool": tool_name,
+                        "seq": seq,
+                    })
+                },
             };
             broadcast(&state, "chat", payload, BroadcastOpts::default()).await;
         }
@@ -6887,15 +7545,12 @@ async fn run_with_tools(
 
     // Inject session key and accept-language into tool call params so tools can
     // resolve per-session state and forward the user's locale to web requests.
-    let mut tool_context = serde_json::json!({
-        "_session_key": session_key,
-    });
-    if let Some(lang) = accept_language.as_deref() {
-        tool_context["_accept_language"] = serde_json::json!(lang);
-    }
-    if let Some(cid) = conn_id.as_deref() {
-        tool_context["_conn_id"] = serde_json::json!(cid);
-    }
+    let tool_context = build_tool_context(
+        session_key,
+        accept_language.as_deref(),
+        conn_id.as_deref(),
+        runtime_context,
+    );
 
     let provider_ref = provider.clone();
     let first_result = run_agent_loop_streaming(
@@ -6935,22 +7590,55 @@ async fn run_with_tools(
             )
             .await;
 
-            // Inline compaction: summarize history, replace in store.
-            match compact_session(store, session_key, &provider_ref).await {
-                Ok(()) => {
-                    broadcast(
-                        state,
-                        "chat",
-                        serde_json::json!({
-                            "runId": run_id,
-                            "sessionKey": session_key,
-                            "state": "auto_compact",
-                            "phase": "done",
-                            "reason": "context_window_exceeded",
-                        }),
-                        BroadcastOpts::default(),
-                    )
-                    .await;
+            // Inline compaction: run the configured strategy, replace in store.
+            // Forward the session provider so LLM-backed modes (llm_replace
+            // / structured) have a client to summarise with.
+            match compact_session(
+                store,
+                session_key,
+                &persona.config.chat.compaction,
+                Some(&*provider_ref),
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    // Merge the compaction metadata (mode, tokens, settings
+                    // hint) into the broadcast so the UI can show a toast
+                    // like "Compacted via Structured mode (1,234 tokens)".
+                    // Respect chat.compaction.show_settings_hint so the
+                    // hint is omitted when the user has opted out.
+                    //
+                    // `compactBroadcastPath: "wrapper"` marks this as
+                    // the self-contained auto_compact event with the
+                    // metadata inline. The parallel pre-emptive path
+                    // in `send()` emits `compactBroadcastPath: "inner"`
+                    // instead, where the metadata lives on the separate
+                    // `chat.compact done` event fired from within
+                    // `self.compact()`. Hook consumers that only care
+                    // about metadata can subscribe to whichever path
+                    // matches their use case.
+                    let show_hint = persona.config.chat.compaction.show_settings_hint;
+                    let mut payload = serde_json::json!({
+                        "runId": run_id,
+                        "sessionKey": session_key,
+                        "state": "auto_compact",
+                        "phase": "done",
+                        "reason": "context_window_exceeded",
+                        "compactBroadcastPath": "wrapper",
+                    });
+                    if let (Some(obj), Some(meta)) = (
+                        payload.as_object_mut(),
+                        outcome.broadcast_metadata(show_hint).as_object().cloned(),
+                    ) {
+                        obj.extend(meta);
+                    }
+                    broadcast(state, "chat", payload, BroadcastOpts::default()).await;
+
+                    // Notify any channel (Telegram, Discord, Matrix,
+                    // WhatsApp, etc.) that has pending reply targets on
+                    // this session so channel users see the same mode +
+                    // token info as the web UI.
+                    notify_channels_of_compaction(state, session_key, &outcome, show_hint).await;
 
                     // Reload compacted history and retry.
                     let compacted_history_raw = store.read(session_key).await.unwrap_or_default();
@@ -7190,83 +7878,44 @@ async fn run_with_tools(
 ///
 /// This is a standalone helper so `run_with_tools` can call it without
 /// requiring `&self` on `LiveChatService`.
+/// Compact a session using the configured [`moltis_config::CompactionMode`].
+///
+/// Thin wrapper around [`compaction_run::run_compaction`] that owns the
+/// session-store read/write pair. `provider` is forwarded to LLM-backed
+/// modes; `None` is accepted for deterministic compaction but causes
+/// `llm_replace` / `structured` to return a [`ProviderRequired`] error.
+///
+/// Returns the full [`compaction_run::CompactionOutcome`] so the caller
+/// can surface the effective mode and token usage in its broadcast
+/// event. This is a standalone helper so `run_with_tools` can call it
+/// without requiring `&self` on `LiveChatService`.
+///
+/// [`ProviderRequired`]: compaction_run::CompactionRunError::ProviderRequired
 async fn compact_session(
     store: &Arc<SessionStore>,
     session_key: &str,
-    provider: &Arc<dyn moltis_agents::model::LlmProvider>,
-) -> error::Result<()> {
+    config: &moltis_config::CompactionConfig,
+    provider: Option<&dyn moltis_agents::model::LlmProvider>,
+) -> error::Result<compaction_run::CompactionOutcome> {
     let history = store
         .read(session_key)
         .await
         .map_err(|source| error::Error::external("failed to read session history", source))?;
-    if history.is_empty() {
-        return Err(error::Error::message("nothing to compact"));
-    }
 
-    // Use structured ChatMessage objects so role boundaries are maintained via
-    // the API's message structure, preventing prompt injection where user content
-    // could mimic role prefixes in concatenated text.
-    let mut summary_messages = vec![ChatMessage::system(
-        "You are a conversation summarizer. The messages that follow are a conversation you must summarize. Preserve all key facts, decisions, and context. After the conversation, you will receive a final instruction.",
-    )];
-    summary_messages.extend(values_to_chat_messages(&history));
-    summary_messages.push(ChatMessage::user(
-        "Summarize the conversation above into a concise form. Output only the summary, no preamble.",
-    ));
+    let mut outcome = compaction_run::run_compaction(&history, config, provider)
+        .await
+        .map_err(|e| error::Error::message(e.to_string()))?;
 
-    let mut stream = provider.stream(summary_messages);
-    let mut summary = String::new();
-    while let Some(event) = stream.next().await {
-        match event {
-            StreamEvent::Delta(delta) => summary.push_str(&delta),
-            StreamEvent::Done(_) => break,
-            StreamEvent::Error(e) => {
-                return Err(error::Error::message(format!(
-                    "compact summarization failed: {e}"
-                )));
-            },
-            // Tool events not expected in summarization stream.
-            StreamEvent::ToolCallStart { .. }
-            | StreamEvent::ToolCallArgumentsDelta { .. }
-            | StreamEvent::ToolCallComplete { .. }
-            // Provider raw payloads are debug metadata, not summary text.
-            | StreamEvent::ProviderRaw(_)
-            // Ignore provider reasoning blocks; summary body should only
-            // include final answer text.
-            | StreamEvent::ReasoningDelta(_) => {},
-        }
-    }
-
-    if summary.is_empty() {
-        return Err(error::Error::message("compact produced empty summary"));
-    }
-
-    // Enforce summary budget discipline: max 1,200 chars, 24 lines, 160 chars/line.
-    summary = compress_summary(&summary);
-
-    // Use user role so strict providers (e.g. llama.cpp) don't reject the
-    // history for having an assistant message without a preceding user message.
-    // User role also keeps the summary in the conversation turn array for
-    // providers using the Responses API (system messages get promoted to
-    // instructions and disappear from turns).
-    let compacted_msg = PersistedMessage::User {
-        content: MessageContent::Text(format!("[Conversation Summary]\n\n{summary}")),
-        created_at: Some(now_ms()),
-        audio: None,
-        channel: None,
-        seq: None,
-        run_id: None,
-    };
-    let compacted = vec![compacted_msg.to_value()];
+    // Enforce summary budget discipline on the compacted history.
+    outcome.history = compress_summary_in_history(outcome.history);
 
     store
-        .replace_history(session_key, compacted)
+        .replace_history(session_key, outcome.history.clone())
         .await
         .map_err(|source| error::Error::external("failed to replace compacted history", source))?;
 
-    Ok(())
+    Ok(outcome)
 }
-
 // ── Streaming mode (no tools) ───────────────────────────────────────────────
 
 const STREAM_RETRYABLE_SERVER_PATTERNS: &[&str] = &[
@@ -7340,6 +7989,7 @@ fn next_stream_retry_delay_ms(
 }
 
 async fn run_streaming(
+    persona: PromptPersona,
     state: &Arc<dyn ChatRuntime>,
     model_store: &Arc<RwLock<DisabledModelsStore>>,
     run_id: &str,
@@ -7349,7 +7999,7 @@ async fn run_streaming(
     provider_name: &str,
     history_raw: &[Value],
     session_key: &str,
-    agent_id: &str,
+    _agent_id: &str,
     desired_reply_medium: ReplyMedium,
     project_context: Option<&str>,
     user_message_index: usize,
@@ -7361,7 +8011,6 @@ async fn run_streaming(
     terminal_runs: &Arc<RwLock<HashSet<String>>>,
 ) -> Option<AssistantTurnOutput> {
     let run_started = Instant::now();
-    let persona = load_prompt_persona_for_agent(agent_id);
 
     let system_prompt = build_system_prompt_minimal_runtime_details(
         project_context,
@@ -7937,12 +8586,120 @@ fn format_channel_error_message(error_obj: &Value) -> String {
     let title = error_obj
         .get("title")
         .and_then(|v| v.as_str())
+        .or_else(|| match error_obj.get("type").and_then(|v| v.as_str()) {
+            Some("message_rejected") => Some("Message rejected"),
+            _ => None,
+        })
         .unwrap_or("Request failed");
     let detail = error_obj
         .get("detail")
         .and_then(|v| v.as_str())
+        .or_else(|| error_obj.get("message").and_then(|v| v.as_str()))
         .unwrap_or("Please try again.");
     format!("⚠️ {title}: {detail}")
+}
+
+/// Format a user-facing notice announcing that a session was compacted.
+///
+/// Shown verbatim to channel users (Telegram, Discord, WhatsApp, etc.) and
+/// kept short so small mobile clients don't wrap the whole thing.
+///
+/// When `include_settings_hint` is false, the "Change chat.compaction.mode…"
+/// footer is omitted so users who have set
+/// `chat.compaction.show_settings_hint = false` don't see the repetitive
+/// hint on every compaction. Mode + token lines are always included.
+/// The LLM retry path never sees this text regardless.
+fn format_channel_compaction_notice(
+    outcome: &compaction_run::CompactionOutcome,
+    include_settings_hint: bool,
+) -> String {
+    let mode_label = match outcome.effective_mode {
+        moltis_config::CompactionMode::Deterministic => "Deterministic",
+        moltis_config::CompactionMode::RecencyPreserving => "Recency preserving",
+        moltis_config::CompactionMode::Structured => "Structured",
+        moltis_config::CompactionMode::LlmReplace => "LLM replace",
+    };
+    let total = outcome.total_tokens();
+    let token_line = if total == 0 {
+        // Any strategy that made no LLM calls ends up here: Deterministic,
+        // RecencyPreserving, or a Structured run that fell back to
+        // recency_preserving before the LLM call landed. Report the
+        // actual effective mode so users don't see "deterministic
+        // strategy" when they picked recency_preserving.
+        format!(
+            "No LLM tokens used ({} strategy)",
+            mode_label.to_lowercase()
+        )
+    } else {
+        format!(
+            "Used {total} tokens ({input} in + {output} out)",
+            total = total,
+            input = outcome.input_tokens,
+            output = outcome.output_tokens,
+        )
+    };
+    let body = format!(
+        "🧹 Conversation compacted\n\
+         Mode: {mode_label}\n\
+         {token_line}",
+    );
+    if include_settings_hint {
+        format!("{body}\n{hint}", hint = compaction_run::SETTINGS_HINT)
+    } else {
+        body
+    }
+}
+
+/// Send a silent "session compacted" notice to pending channel targets
+/// without draining them.
+///
+/// Mirrors [`send_retry_status_to_channels`]: the targets are *peeked*,
+/// not drained, so the in-flight agent run can still deliver its final
+/// reply to them afterward. Uses `send_text_silent` so the channel
+/// integration doesn't count it toward user-visible interactive replies
+/// (no TTS, no delivery receipts beyond the channel's own).
+async fn notify_channels_of_compaction(
+    state: &Arc<dyn ChatRuntime>,
+    session_key: &str,
+    outcome: &compaction_run::CompactionOutcome,
+    include_settings_hint: bool,
+) {
+    let targets = state.peek_channel_replies(session_key).await;
+    if targets.is_empty() {
+        return;
+    }
+
+    let Some(outbound) = state.channel_outbound() else {
+        return;
+    };
+
+    let message = format_channel_compaction_notice(outcome, include_settings_hint);
+    let mut tasks = Vec::with_capacity(targets.len());
+    for target in targets {
+        let outbound = Arc::clone(&outbound);
+        let message = message.clone();
+        let to = target.outbound_to().into_owned();
+        tasks.push(tokio::spawn(async move {
+            let reply_to = target.message_id.as_deref();
+            if let Err(e) = outbound
+                .send_text_silent(&target.account_id, &to, &message, reply_to)
+                .await
+            {
+                warn!(
+                    account_id = target.account_id,
+                    chat_id = target.chat_id,
+                    thread_id = target.thread_id.as_deref().unwrap_or("-"),
+                    "failed to send compaction notice to channel: {e}"
+                );
+            }
+        }));
+    }
+
+    for task in tasks {
+        if let Err(e) = task.await {
+            warn!(error = %e, "channel compaction notice task join failed");
+        }
+    }
 }
 
 /// Send a short retry status update to pending channel targets without draining
@@ -8913,10 +9670,13 @@ mod tests {
         anyhow::Result,
         moltis_agents::{model::LlmProvider, tool_registry::AgentTool},
         moltis_common::types::ReplyPayload,
+        moltis_memory::{
+            config::MemoryConfig, schema::run_migrations, store_sqlite::SqliteMemoryStore,
+        },
         std::{
             pin::Pin,
             sync::{
-                Arc,
+                Arc, Mutex as StdMutex,
                 atomic::{AtomicUsize, Ordering},
             },
             time::{Duration, Instant},
@@ -8924,6 +9684,8 @@ mod tests {
         tokio::sync::Notify,
         tokio_stream::Stream,
     };
+
+    static DATA_DIR_TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
     struct DummyTool {
         name: String,
@@ -8937,7 +9699,7 @@ mod tests {
     struct AbortThenContinueProvider {
         call_count: AtomicUsize,
         first_delta_processed: Arc<Notify>,
-        seen_messages: Arc<std::sync::Mutex<Vec<Vec<ChatMessage>>>>,
+        seen_messages: Arc<StdMutex<Vec<Vec<ChatMessage>>>>,
     }
 
     impl AbortThenContinueProvider {
@@ -8945,7 +9707,7 @@ mod tests {
             Self {
                 call_count: AtomicUsize::new(0),
                 first_delta_processed: Arc::new(Notify::new()),
-                seen_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
+                seen_messages: Arc::new(StdMutex::new(Vec::new())),
             }
         }
     }
@@ -9180,6 +9942,8 @@ mod tests {
     struct RecordingChannelOutbound {
         text_calls: Arc<AtomicUsize>,
         suffix_calls: Arc<AtomicUsize>,
+        text_payloads: Arc<Mutex<Vec<String>>>,
+        text_with_suffix_payloads: Arc<Mutex<Vec<(String, String)>>>,
         html_payloads: Arc<Mutex<Vec<String>>>,
     }
 
@@ -9194,6 +9958,7 @@ mod tests {
     struct MockChatRuntime {
         channel_replies: Mutex<HashMap<String, Vec<moltis_channels::ChannelReplyTarget>>>,
         channel_status_log: Mutex<HashMap<String, Vec<String>>>,
+        broadcasts: Mutex<Vec<(String, Value)>>,
         channel_outbound: Option<Arc<dyn moltis_channels::ChannelOutbound>>,
         channel_stream_outbound: Option<Arc<dyn moltis_channels::ChannelStreamOutbound>>,
         active_sessions: HashMap<String, String>,
@@ -9207,6 +9972,7 @@ mod tests {
             Self {
                 channel_replies: Mutex::new(HashMap::new()),
                 channel_status_log: Mutex::new(HashMap::new()),
+                broadcasts: Mutex::new(Vec::new()),
                 channel_outbound: None,
                 channel_stream_outbound: None,
                 active_sessions: HashMap::new(),
@@ -9241,7 +10007,12 @@ mod tests {
 
     #[async_trait]
     impl ChatRuntime for MockChatRuntime {
-        async fn broadcast(&self, _topic: &str, _payload: Value) {}
+        async fn broadcast(&self, topic: &str, payload: Value) {
+            self.broadcasts
+                .lock()
+                .await
+                .push((topic.to_string(), payload));
+        }
 
         async fn push_channel_reply(
             &self,
@@ -9314,7 +10085,7 @@ mod tests {
             None
         }
 
-        fn memory_manager(&self) -> Option<&Arc<moltis_memory::manager::MemoryManager>> {
+        fn memory_manager(&self) -> Option<&moltis_memory::runtime::DynMemoryRuntime> {
             None
         }
 
@@ -9385,7 +10156,7 @@ mod tests {
 
     struct MockExecTool {
         calls: Arc<AtomicUsize>,
-        commands: Arc<std::sync::Mutex<Vec<String>>>,
+        commands: Arc<StdMutex<Vec<String>>>,
     }
 
     #[test]
@@ -9555,9 +10326,9 @@ mod tests {
         assert_eq!(context.surface.as_deref(), Some("telegram"));
         assert_eq!(context.session_kind.as_deref(), Some("channel"));
         assert_eq!(context.channel_type.as_deref(), Some("telegram"));
-        assert_eq!(context.channel_account_id.as_deref(), Some("bot-main"));
-        assert_eq!(context.channel_chat_id.as_deref(), Some("123456"));
-        assert_eq!(context.channel_chat_type.as_deref(), Some("private"));
+        assert_eq!(context.account_id.as_deref(), Some("bot-main"));
+        assert_eq!(context.chat_id.as_deref(), Some("123456"));
+        assert_eq!(context.chat_type.as_deref(), Some("private"));
     }
 
     #[test]
@@ -9566,8 +10337,64 @@ mod tests {
         assert_eq!(context.surface.as_deref(), Some("web"));
         assert_eq!(context.session_kind.as_deref(), Some("web"));
         assert_eq!(context.channel_type, None);
-        assert_eq!(context.channel_account_id, None);
-        assert_eq!(context.channel_chat_id, None);
+        assert_eq!(context.account_id, None);
+        assert_eq!(context.chat_id, None);
+    }
+
+    #[test]
+    fn resolve_channel_runtime_context_falls_back_to_web_when_binding_is_invalid() {
+        let entry = make_session_entry_with_binding(Some("{not-json".to_string()));
+        let context = resolve_channel_runtime_context("telegram:bot-main:123456", Some(&entry));
+        assert_eq!(context.surface.as_deref(), Some("web"));
+        assert_eq!(context.session_kind.as_deref(), Some("web"));
+        assert!(context.channel_type.is_none());
+        assert!(context.account_id.is_none());
+        assert!(context.chat_id.is_none());
+    }
+
+    #[test]
+    fn build_tool_context_includes_channel_binding() {
+        let runtime_context = PromptRuntimeContext {
+            host: PromptHostRuntimeContext {
+                surface: Some("telegram".to_string()),
+                session_kind: Some("channel".to_string()),
+                channel_type: Some("telegram".to_string()),
+                channel_account_id: Some("bot-main".to_string()),
+                channel_chat_id: Some("-100123".to_string()),
+                channel_chat_type: Some("channel_or_supergroup".to_string()),
+                channel_sender_id: Some("42".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let tool_context = build_tool_context(
+            "telegram:bot-main:-100123",
+            Some("en-US"),
+            Some("conn-1"),
+            Some(&runtime_context),
+        );
+
+        assert_eq!(tool_context["_session_key"], "telegram:bot-main:-100123");
+        assert_eq!(tool_context["_accept_language"], "en-US");
+        assert_eq!(tool_context["_conn_id"], "conn-1");
+        assert_eq!(tool_context["_channel"]["channel_type"], "telegram");
+        assert_eq!(tool_context["_channel"]["account_id"], "bot-main");
+        assert_eq!(
+            tool_context["_channel"]["chat_type"],
+            "channel_or_supergroup"
+        );
+        assert_eq!(tool_context["_channel"]["sender_id"], "42");
+    }
+
+    #[test]
+    fn build_tool_context_omits_channel_binding_without_runtime_context() {
+        let tool_context = build_tool_context("main", None, None, None);
+
+        assert_eq!(tool_context["_session_key"], "main");
+        assert!(tool_context.get("_channel").is_none());
+        assert!(tool_context.get("_accept_language").is_none());
+        assert!(tool_context.get("_conn_id").is_none());
     }
 
     #[test]
@@ -9707,10 +10534,11 @@ mod tests {
             &self,
             _account_id: &str,
             _to: &str,
-            _text: &str,
+            text: &str,
             _reply_to: Option<&str>,
         ) -> moltis_channels::Result<()> {
             self.text_calls.fetch_add(1, Ordering::SeqCst);
+            self.text_payloads.lock().await.push(text.to_string());
             Ok(())
         }
 
@@ -9728,11 +10556,15 @@ mod tests {
             &self,
             _account_id: &str,
             _to: &str,
-            _text: &str,
-            _suffix_html: &str,
+            text: &str,
+            suffix_html: &str,
             _reply_to: Option<&str>,
         ) -> moltis_channels::Result<()> {
             self.suffix_calls.fetch_add(1, Ordering::SeqCst);
+            self.text_with_suffix_payloads
+                .lock()
+                .await
+                .push((text.to_string(), suffix_html.to_string()));
             Ok(())
         }
 
@@ -9790,6 +10622,9 @@ mod tests {
         moltis_projects::run_migrations(&pool)
             .await
             .expect("projects migrations");
+        moltis_sessions::run_migrations(&pool)
+            .await
+            .expect("sessions migrations");
         SqliteSessionMetadata::init(&pool)
             .await
             .expect("session metadata migrations");
@@ -9931,6 +10766,8 @@ mod tests {
         let outbound_impl = Arc::new(RecordingChannelOutbound {
             text_calls: Arc::clone(&text_calls),
             suffix_calls: Arc::clone(&suffix_calls),
+            text_payloads: Arc::new(Mutex::new(Vec::new())),
+            text_with_suffix_payloads: Arc::new(Mutex::new(Vec::new())),
             html_payloads: Arc::clone(&html_payloads),
         });
         let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = outbound_impl;
@@ -9981,6 +10818,8 @@ mod tests {
         let outbound_impl = Arc::new(RecordingChannelOutbound {
             text_calls: Arc::clone(&text_calls),
             suffix_calls: Arc::clone(&suffix_calls),
+            text_payloads: Arc::new(Mutex::new(Vec::new())),
+            text_with_suffix_payloads: Arc::new(Mutex::new(Vec::new())),
             html_payloads: Arc::clone(&html_payloads),
         });
         let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = outbound_impl;
@@ -10028,6 +10867,8 @@ mod tests {
         let outbound_impl = Arc::new(RecordingChannelOutbound {
             text_calls: Arc::clone(&text_calls),
             suffix_calls: Arc::clone(&suffix_calls),
+            text_payloads: Arc::new(Mutex::new(Vec::new())),
+            text_with_suffix_payloads: Arc::new(Mutex::new(Vec::new())),
             html_payloads: Arc::clone(&html_payloads),
         });
         let outbound: Arc<dyn moltis_channels::plugin::ChannelOutbound> = outbound_impl;
@@ -10258,6 +11099,540 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_message_received_hook_block_rejects_without_persisting_or_running() {
+        struct BlockMessageReceivedHook;
+
+        #[async_trait]
+        impl moltis_common::hooks::HookHandler for BlockMessageReceivedHook {
+            fn name(&self) -> &str {
+                "block-message-received"
+            }
+
+            fn events(&self) -> &[moltis_common::hooks::HookEvent] {
+                &[moltis_common::hooks::HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: moltis_common::hooks::HookEvent,
+                _payload: &moltis_common::hooks::HookPayload,
+            ) -> moltis_common::error::Result<moltis_common::hooks::HookAction> {
+                Ok(moltis_common::hooks::HookAction::Block(
+                    "rejected by hook".to_string(),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let runtime = Arc::new(MockChatRuntime::new());
+        let state: Arc<dyn ChatRuntime> = runtime.clone();
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "block-test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Block Test Model".to_string(),
+                created_at: None,
+                recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
+            },
+            Arc::new(StaticProvider {
+                name: "test".to_string(),
+                id: "block-test-model".to_string(),
+            }),
+        );
+
+        let mut hooks = moltis_common::hooks::HookRegistry::new();
+        hooks.register(Arc::new(BlockMessageReceivedHook));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_hooks(hooks);
+
+        let result = chat
+            .send(serde_json::json!({ "text": "please reject this" }))
+            .await
+            .expect("chat.send should return a rejection payload");
+
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["rejected"], true);
+        assert_eq!(result["reason"], "rejected by hook");
+        assert!(
+            chat.active_runs.read().await.is_empty(),
+            "blocked messages must not spawn runs"
+        );
+        assert!(
+            chat.active_runs_by_session.read().await.is_empty(),
+            "blocked messages must not reserve a session run slot"
+        );
+        assert!(
+            store.read("main").await.unwrap_or_default().is_empty(),
+            "blocked messages must not be persisted"
+        );
+        let broadcasts = runtime.broadcasts.lock().await.clone();
+        assert_eq!(
+            broadcasts.len(),
+            1,
+            "blocked messages should broadcast a rejection"
+        );
+        assert_eq!(broadcasts[0].0, "chat");
+        assert_eq!(
+            broadcasts[0].1,
+            serde_json::json!({
+                "state": "rejected",
+                "sessionKey": "main",
+                "reason": "rejected by hook",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_received_hook_modify_rewrites_persisted_and_provider_input() {
+        struct RewriteMessageReceivedHook;
+
+        #[async_trait]
+        impl moltis_common::hooks::HookHandler for RewriteMessageReceivedHook {
+            fn name(&self) -> &str {
+                "rewrite-message-received"
+            }
+
+            fn events(&self) -> &[moltis_common::hooks::HookEvent] {
+                &[moltis_common::hooks::HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: moltis_common::hooks::HookEvent,
+                _payload: &moltis_common::hooks::HookPayload,
+            ) -> moltis_common::error::Result<moltis_common::hooks::HookAction> {
+                Ok(moltis_common::hooks::HookAction::ModifyPayload(
+                    serde_json::json!({ "content": "sanitized prompt" }),
+                ))
+            }
+        }
+
+        struct RecordingReplyProvider {
+            seen_messages: Arc<std::sync::Mutex<Vec<Vec<ChatMessage>>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for RecordingReplyProvider {
+            fn name(&self) -> &str {
+                "recording"
+            }
+
+            fn id(&self) -> &str {
+                "recording::rewrite"
+            }
+
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[Value],
+            ) -> Result<moltis_agents::model::CompletionResponse> {
+                anyhow::bail!("not implemented for test")
+            }
+
+            fn stream(
+                &self,
+                messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                self.seen_messages
+                    .lock()
+                    .expect("recording provider seen_messages mutex poisoned")
+                    .push(messages);
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta("hook reply".to_string()),
+                    StreamEvent::Done(moltis_agents::model::Usage::default()),
+                ]))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let state: Arc<dyn ChatRuntime> = Arc::new(MockChatRuntime::new());
+        let seen_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "recording::rewrite".to_string(),
+                provider: "recording".to_string(),
+                display_name: "Recording Rewrite Test".to_string(),
+                created_at: None,
+                recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
+            },
+            Arc::new(RecordingReplyProvider {
+                seen_messages: Arc::clone(&seen_messages),
+            }),
+        );
+
+        let mut hooks = moltis_common::hooks::HookRegistry::new();
+        hooks.register(Arc::new(RewriteMessageReceivedHook));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_hooks(hooks);
+
+        let send_result = chat
+            .send(serde_json::json!({ "text": "original prompt" }))
+            .await
+            .expect("chat.send should succeed");
+        assert!(
+            send_result
+                .get("runId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        );
+
+        let history = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let messages = store.read("main").await.unwrap_or_default();
+                let has_user = messages.iter().any(|msg| {
+                    msg.get("role").and_then(Value::as_str) == Some("user")
+                        && msg.get("content").and_then(Value::as_str) == Some("sanitized prompt")
+                });
+                let has_assistant = messages.iter().any(|msg| {
+                    msg.get("role").and_then(Value::as_str) == Some("assistant")
+                        && msg.get("content").and_then(Value::as_str) == Some("hook reply")
+                });
+                if has_user && has_assistant {
+                    return messages;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rewritten user and assistant messages should be persisted");
+
+        assert!(
+            history.iter().any(|msg| {
+                msg.get("role").and_then(Value::as_str) == Some("user")
+                    && msg.get("content").and_then(Value::as_str) == Some("sanitized prompt")
+            }),
+            "session history must persist the rewritten user text"
+        );
+        assert!(
+            !history.iter().any(|msg| {
+                msg.get("role").and_then(Value::as_str) == Some("user")
+                    && msg.get("content").and_then(Value::as_str) == Some("original prompt")
+            }),
+            "original user text must not survive after hook rewrite"
+        );
+
+        let provider_messages = seen_messages
+            .lock()
+            .expect("recording provider seen_messages mutex poisoned")
+            .clone();
+        assert_eq!(
+            provider_messages.len(),
+            1,
+            "provider should receive one turn"
+        );
+        assert!(
+            provider_messages[0].iter().any(|msg| matches!(
+                msg,
+                ChatMessage::User {
+                    content: UserContent::Text(text),
+                } if text == "sanitized prompt"
+            )),
+            "provider input must use the rewritten user text"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_received_hook_modify_preserves_multimodal_images() {
+        struct RewriteMessageReceivedHook;
+
+        #[async_trait]
+        impl moltis_common::hooks::HookHandler for RewriteMessageReceivedHook {
+            fn name(&self) -> &str {
+                "rewrite-message-received"
+            }
+
+            fn events(&self) -> &[moltis_common::hooks::HookEvent] {
+                &[moltis_common::hooks::HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: moltis_common::hooks::HookEvent,
+                _payload: &moltis_common::hooks::HookPayload,
+            ) -> moltis_common::error::Result<moltis_common::hooks::HookAction> {
+                Ok(moltis_common::hooks::HookAction::ModifyPayload(
+                    serde_json::json!({ "content": "sanitized prompt" }),
+                ))
+            }
+        }
+
+        struct RecordingReplyProvider {
+            seen_messages: Arc<std::sync::Mutex<Vec<Vec<ChatMessage>>>>,
+        }
+
+        #[async_trait]
+        impl LlmProvider for RecordingReplyProvider {
+            fn name(&self) -> &str {
+                "recording"
+            }
+
+            fn id(&self) -> &str {
+                "recording::rewrite:multimodal"
+            }
+
+            async fn complete(
+                &self,
+                _messages: &[ChatMessage],
+                _tools: &[Value],
+            ) -> Result<moltis_agents::model::CompletionResponse> {
+                anyhow::bail!("not implemented for test")
+            }
+
+            fn stream(
+                &self,
+                messages: Vec<ChatMessage>,
+            ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+                self.seen_messages
+                    .lock()
+                    .expect("recording provider seen_messages mutex poisoned")
+                    .push(messages);
+                Box::pin(tokio_stream::iter(vec![
+                    StreamEvent::Delta("hook reply".to_string()),
+                    StreamEvent::Done(moltis_agents::model::Usage::default()),
+                ]))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let state: Arc<dyn ChatRuntime> = Arc::new(MockChatRuntime::new());
+        let seen_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "recording::rewrite:multimodal".to_string(),
+                provider: "recording".to_string(),
+                display_name: "Recording Rewrite Test Multimodal".to_string(),
+                created_at: None,
+                recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
+            },
+            Arc::new(RecordingReplyProvider {
+                seen_messages: Arc::clone(&seen_messages),
+            }),
+        );
+
+        let mut hooks = moltis_common::hooks::HookRegistry::new();
+        hooks.register(Arc::new(RewriteMessageReceivedHook));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_hooks(hooks);
+
+        let send_result = chat
+            .send(serde_json::json!({
+                "content": [
+                    { "type": "text", "text": "original prompt" },
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+                ]
+            }))
+            .await
+            .expect("chat.send should succeed");
+        assert!(
+            send_result
+                .get("runId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+        );
+
+        let history = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let messages = store.read("main").await.unwrap_or_default();
+                let user_msg = messages
+                    .iter()
+                    .find(|msg| msg.get("role").and_then(Value::as_str) == Some("user"));
+                let has_assistant = messages.iter().any(|msg| {
+                    msg.get("role").and_then(Value::as_str) == Some("assistant")
+                        && msg.get("content").and_then(Value::as_str) == Some("hook reply")
+                });
+                if let Some(user_msg) = user_msg
+                    && user_msg
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|content| content.len() == 2)
+                    && has_assistant
+                {
+                    return messages;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rewritten multimodal user and assistant messages should be persisted");
+
+        let user_msg = history
+            .iter()
+            .find(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
+            .expect("expected persisted user message");
+        let content = user_msg["content"]
+            .as_array()
+            .expect("expected multimodal user content");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "sanitized prompt");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+
+        let provider_messages = seen_messages
+            .lock()
+            .expect("recording provider seen_messages mutex poisoned")
+            .clone();
+        assert_eq!(
+            provider_messages.len(),
+            1,
+            "provider should receive one multimodal turn"
+        );
+        assert!(
+            provider_messages[0].iter().any(|msg| matches!(
+                msg,
+                ChatMessage::User {
+                    content: UserContent::Multimodal(parts),
+                } if parts.len() == 2
+                    && matches!(&parts[0], ContentPart::Text(text) if text == "sanitized prompt")
+                    && matches!(&parts[1], ContentPart::Image { media_type, data } if media_type == "image/png" && data == "AAAA")
+            )),
+            "provider input must preserve the image while rewriting the text block"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_received_hook_block_delivers_reason_to_channel_sender() {
+        struct BlockMessageReceivedHook;
+
+        #[async_trait]
+        impl moltis_common::hooks::HookHandler for BlockMessageReceivedHook {
+            fn name(&self) -> &str {
+                "block-message-received"
+            }
+
+            fn events(&self) -> &[moltis_common::hooks::HookEvent] {
+                &[moltis_common::hooks::HookEvent::MessageReceived]
+            }
+
+            async fn handle(
+                &self,
+                _event: moltis_common::hooks::HookEvent,
+                _payload: &moltis_common::hooks::HookPayload,
+            ) -> moltis_common::error::Result<moltis_common::hooks::HookAction> {
+                Ok(moltis_common::hooks::HookAction::Block(
+                    "rejected by hook".to_string(),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
+        let pool = sqlite_pool().await;
+        let metadata = Arc::new(SqliteSessionMetadata::new(pool));
+
+        let text_calls = Arc::new(AtomicUsize::new(0));
+        let suffix_calls = Arc::new(AtomicUsize::new(0));
+        let text_payloads = Arc::new(Mutex::new(Vec::new()));
+        let text_with_suffix_payloads = Arc::new(Mutex::new(Vec::new()));
+        let html_payloads = Arc::new(Mutex::new(Vec::new()));
+        let outbound_impl = Arc::new(RecordingChannelOutbound {
+            text_calls: Arc::clone(&text_calls),
+            suffix_calls: Arc::clone(&suffix_calls),
+            text_payloads: Arc::clone(&text_payloads),
+            text_with_suffix_payloads: Arc::clone(&text_with_suffix_payloads),
+            html_payloads: Arc::clone(&html_payloads),
+        });
+        let runtime = Arc::new(MockChatRuntime::new().with_channel_outbound(outbound_impl));
+        let state: Arc<dyn ChatRuntime> = runtime.clone();
+
+        let mut providers = ProviderRegistry::empty();
+        providers.register(
+            moltis_providers::ModelInfo {
+                id: "block-test-model".to_string(),
+                provider: "test".to_string(),
+                display_name: "Block Test Model".to_string(),
+                created_at: None,
+                recommended: false,
+                capabilities: moltis_providers::ModelCapabilities::default(),
+            },
+            Arc::new(StaticProvider {
+                name: "test".to_string(),
+                id: "block-test-model".to_string(),
+            }),
+        );
+
+        let mut hooks = moltis_common::hooks::HookRegistry::new();
+        hooks.register(Arc::new(BlockMessageReceivedHook));
+
+        let chat = LiveChatService::new(
+            Arc::new(RwLock::new(providers)),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            state,
+            Arc::clone(&store),
+            metadata,
+        )
+        .with_hooks(hooks);
+
+        let target = moltis_channels::ChannelReplyTarget {
+            channel_type: moltis_channels::ChannelType::Telegram,
+            account_id: "acct".to_string(),
+            chat_id: "123".to_string(),
+            message_id: Some("42".to_string()),
+            thread_id: None,
+        };
+
+        let result = chat
+            .send(serde_json::json!({
+                "text": "please reject this",
+                "_channel_reply_target": serde_json::to_value(&target).expect("serialize reply target"),
+            }))
+            .await
+            .expect("chat.send should return a rejection payload");
+
+        assert_eq!(result["ok"], false);
+        assert_eq!(text_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(suffix_calls.load(Ordering::SeqCst), 0);
+        assert!(html_payloads.lock().await.is_empty());
+        assert!(text_with_suffix_payloads.lock().await.is_empty());
+        assert_eq!(text_payloads.lock().await.clone(), vec![
+            "⚠️ Message rejected: rejected by hook".to_string()
+        ]);
+        assert!(
+            runtime.peek_channel_replies("main").await.is_empty(),
+            "channel targets should be drained after delivering the rejection"
+        );
+    }
+
+    #[tokio::test]
     async fn explicit_sh_bypasses_provider_and_executes_directly() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(SessionStore::new(dir.path().to_path_buf()));
@@ -10270,7 +11645,7 @@ mod tests {
         let providers = Arc::new(RwLock::new(ProviderRegistry::empty()));
         let disabled = Arc::new(RwLock::new(DisabledModelsStore::default()));
         let calls = Arc::new(AtomicUsize::new(0));
-        let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let commands = Arc::new(StdMutex::new(Vec::new()));
 
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(MockExecTool {
@@ -10409,7 +11784,7 @@ mod tests {
             history[0]
                 .get("content")
                 .and_then(Value::as_str)
-                .is_some_and(|content| content.starts_with("[Conversation Summary]\n\nsummary"))
+                .is_some_and(|content| content.starts_with("[Conversation Summary]\n\n"))
         );
         assert_eq!(history[1].get("role").and_then(Value::as_str), Some("user"));
         assert_eq!(
@@ -10453,10 +11828,8 @@ mod tests {
             .await
             .expect("seed assistant msg");
 
-        let provider: Arc<dyn LlmProvider> = Arc::new(AutoCompactRegressionProvider {
-            context_window: 100,
-        });
-        compact_session(&store, session_key, &provider)
+        let compaction_config = moltis_config::CompactionConfig::default();
+        compact_session(&store, session_key, &compaction_config, None)
             .await
             .expect("compact_session should succeed");
 
@@ -10507,6 +11880,128 @@ mod tests {
         });
         let msg = format_channel_error_message(&error_obj);
         assert_eq!(msg, "⚠️ Rate limited: Please wait and try again.");
+    }
+
+    #[test]
+    fn compute_auto_compact_threshold_honors_configured_fraction() {
+        // Default: 0.95 × 200K = 190K. Matches the pre-PR-#653 trigger.
+        assert_eq!(compute_auto_compact_threshold(200_000, 0.95), 190_000);
+        // Aggressive: 0.5 × 200K = 100K, catching auto-compact earlier.
+        assert_eq!(compute_auto_compact_threshold(200_000, 0.5), 100_000);
+    }
+
+    #[test]
+    fn compute_auto_compact_threshold_clamps_out_of_range_values() {
+        // Below 0.1 clamps to 0.1 so a typo like 0.01 doesn't drown the
+        // session in compactions on every single message.
+        assert_eq!(compute_auto_compact_threshold(100_000, 0.01), 10_000);
+        // Above 0.95 clamps to 0.95 so auto-compact can never be silently
+        // disabled by `threshold_percent = 1.0`.
+        assert_eq!(compute_auto_compact_threshold(100_000, 1.0), 95_000);
+    }
+
+    #[test]
+    fn compute_auto_compact_threshold_floors_at_one_for_zero_context_window() {
+        // A zero-token context window (shouldn't happen in practice) must
+        // still produce a non-zero threshold so the `>=` check in send()
+        // doesn't trigger on every message, or on none.
+        assert_eq!(compute_auto_compact_threshold(0, 0.75), 1);
+    }
+
+    #[test]
+    fn format_channel_error_message_falls_back_to_message_rejected_shape() {
+        let error_obj = serde_json::json!({
+            "type": "message_rejected",
+            "message": "rejected by hook",
+        });
+        let msg = format_channel_error_message(&error_obj);
+        assert_eq!(msg, "⚠️ Message rejected: rejected by hook");
+    }
+
+    #[test]
+    fn format_channel_compaction_notice_zero_tokens_for_deterministic_mode() {
+        let outcome = compaction_run::CompactionOutcome {
+            history: vec![],
+            effective_mode: moltis_config::CompactionMode::Deterministic,
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        let msg = format_channel_compaction_notice(&outcome, true);
+        assert!(msg.contains("🧹 Conversation compacted"));
+        assert!(msg.contains("Mode: Deterministic"));
+        assert!(msg.contains("No LLM tokens used"));
+        assert!(msg.contains("chat.compaction.mode"));
+    }
+
+    #[test]
+    fn format_channel_compaction_notice_shows_token_breakdown_for_llm_modes() {
+        let outcome = compaction_run::CompactionOutcome {
+            history: vec![],
+            effective_mode: moltis_config::CompactionMode::Structured,
+            input_tokens: 1_234,
+            output_tokens: 567,
+        };
+        let msg = format_channel_compaction_notice(&outcome, true);
+        assert!(msg.contains("Mode: Structured"));
+        assert!(
+            msg.contains("Used 1801 tokens (1234 in + 567 out)"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_channel_compaction_notice_surfaces_recency_preserving_fallback_honestly() {
+        // When Structured falls back to RecencyPreserving, the outcome's
+        // effective_mode reports what actually ran. The channel notice
+        // should show that the user's requested strategy didn't run AND
+        // label the zero-token line with the actual mode, not a
+        // hardcoded "deterministic strategy" string.
+        let outcome = compaction_run::CompactionOutcome {
+            history: vec![],
+            effective_mode: moltis_config::CompactionMode::RecencyPreserving,
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        let msg = format_channel_compaction_notice(&outcome, true);
+        assert!(msg.contains("Mode: Recency preserving"));
+        assert!(
+            msg.contains("No LLM tokens used (recency preserving strategy)"),
+            "token line should name the effective mode, got: {msg}"
+        );
+        assert!(
+            !msg.contains("deterministic strategy"),
+            "token line must not hardcode 'deterministic strategy', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_channel_compaction_notice_omits_settings_hint_when_disabled() {
+        // Users who have set `chat.compaction.show_settings_hint = false`
+        // should still see the mode and token info but not the repetitive
+        // "Change chat.compaction.mode in moltis.toml…" footer.
+        let outcome = compaction_run::CompactionOutcome {
+            history: vec![],
+            effective_mode: moltis_config::CompactionMode::Structured,
+            input_tokens: 1_000,
+            output_tokens: 500,
+        };
+        let msg = format_channel_compaction_notice(&outcome, false);
+        assert!(
+            msg.contains("Mode: Structured"),
+            "mode still present: {msg}"
+        );
+        assert!(
+            msg.contains("Used 1500 tokens"),
+            "token line still present: {msg}"
+        );
+        assert!(
+            !msg.contains("chat.compaction.mode"),
+            "settings hint must be stripped, got: {msg}"
+        );
+        assert!(
+            !msg.contains("docs.moltis.org"),
+            "docs URL must be stripped too, got: {msg}"
+        );
     }
 
     #[test]
@@ -11190,7 +12685,11 @@ mod tests {
         cfg.tools.policy.profile = Some("full".into());
         cfg.tools.policy.deny = vec!["exec".into()];
 
-        let policy = effective_tool_policy(&cfg);
+        let ctx = PolicyContext {
+            agent_id: "main".into(),
+            ..Default::default()
+        };
+        let policy = resolve_effective_policy(&cfg, &ctx);
         assert!(!policy.is_allowed("exec"));
         assert!(policy.is_allowed("web_fetch"));
     }
@@ -11221,7 +12720,11 @@ mod tests {
             ..Default::default()
         }];
 
-        let filtered = apply_runtime_tool_filters(&registry, &cfg, &skills, false);
+        let ctx = PolicyContext {
+            agent_id: "main".into(),
+            ..Default::default()
+        };
+        let filtered = apply_runtime_tool_filters(&registry, &cfg, &skills, false, &ctx);
         assert!(filtered.get("exec").is_some());
         assert!(filtered.get("web_fetch").is_some());
         assert!(filtered.get("create_skill").is_some());
@@ -11248,7 +12751,11 @@ mod tests {
             ..Default::default()
         }];
 
-        let filtered = apply_runtime_tool_filters(&registry, &cfg, &skills, false);
+        let ctx = PolicyContext {
+            agent_id: "main".into(),
+            ..Default::default()
+        };
+        let filtered = apply_runtime_tool_filters(&registry, &cfg, &skills, false, &ctx);
         assert!(filtered.get("create_skill").is_some());
         assert!(filtered.get("web_fetch").is_some());
     }
@@ -12261,6 +13768,107 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rewrite_multimodal_text_blocks_inserts_text_when_missing() {
+        use moltis_sessions::message::{ContentBlock, ImageUrl as SessionImageUrl};
+
+        let blocks = vec![ContentBlock::ImageUrl {
+            image_url: SessionImageUrl {
+                url: "data:image/png;base64,AAAA".to_string(),
+            },
+        }];
+
+        let rewritten = rewrite_multimodal_text_blocks(&blocks, "sanitized");
+        assert_eq!(rewritten.len(), 2);
+        assert!(matches!(
+            &rewritten[0],
+            ContentBlock::Text { text } if text == "sanitized"
+        ));
+        assert!(matches!(&rewritten[1], ContentBlock::ImageUrl { .. }));
+    }
+
+    #[test]
+    fn rewrite_multimodal_text_blocks_replaces_first_and_drops_extra_text_blocks() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "original".to_string(),
+            },
+            ContentBlock::Text {
+                text: "extra".to_string(),
+            },
+        ];
+
+        let rewritten = rewrite_multimodal_text_blocks(&blocks, "sanitized");
+        assert_eq!(rewritten.len(), 1);
+        assert!(matches!(
+            &rewritten[0],
+            ContentBlock::Text { text } if text == "sanitized"
+        ));
+    }
+
+    #[test]
+    fn apply_message_received_rewrite_updates_text_params() {
+        let mut content = MessageContent::Text("original".to_string());
+        let mut params = serde_json::json!({
+            "text": "original",
+            "content": [{ "type": "text", "text": "stale" }]
+        });
+
+        apply_message_received_rewrite(&mut content, &mut params, "sanitized");
+
+        assert!(matches!(content, MessageContent::Text(ref text) if text == "sanitized"));
+        assert_eq!(params["text"], "sanitized");
+        assert!(params.get("content").is_none());
+    }
+
+    #[test]
+    fn apply_message_received_rewrite_updates_multimodal_params() {
+        use moltis_sessions::message::{ContentBlock, ImageUrl as SessionImageUrl};
+
+        let mut content = MessageContent::Multimodal(vec![
+            ContentBlock::Text {
+                text: "original".to_string(),
+            },
+            ContentBlock::ImageUrl {
+                image_url: SessionImageUrl {
+                    url: "data:image/png;base64,AAAA".to_string(),
+                },
+            },
+        ]);
+        let mut params = serde_json::json!({
+            "text": "original",
+            "message": "legacy",
+            "content": [
+                { "type": "text", "text": "original" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+            ]
+        });
+
+        apply_message_received_rewrite(&mut content, &mut params, "sanitized");
+
+        match content {
+            MessageContent::Multimodal(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                assert!(matches!(
+                    &blocks[0],
+                    ContentBlock::Text { text } if text == "sanitized"
+                ));
+                assert!(matches!(&blocks[1], ContentBlock::ImageUrl { .. }));
+            },
+            _ => panic!("expected multimodal content"),
+        }
+        assert!(params.get("text").is_none());
+        assert!(params.get("message").is_none());
+        let content_blocks = params["content"]
+            .as_array()
+            .expect("expected serialized multimodal content");
+        assert_eq!(content_blocks[0]["text"], "sanitized");
+        assert_eq!(
+            content_blocks[1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
+    }
+
     // ── Logbook formatting tests ─────────────────────────────────────────
 
     #[test]
@@ -12440,6 +14048,35 @@ mod tests {
     }
 
     #[test]
+    fn validate_agent_memory_target_for_mode_rejects_disallowed_paths() {
+        assert!(
+            validate_agent_memory_target_for_mode(AgentMemoryWriteMode::PromptOnly, "MEMORY.md")
+                .is_ok()
+        );
+        assert!(
+            validate_agent_memory_target_for_mode(
+                AgentMemoryWriteMode::PromptOnly,
+                "memory/daily.md"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_agent_memory_target_for_mode(
+                AgentMemoryWriteMode::SearchOnly,
+                "memory/daily.md"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_agent_memory_target_for_mode(AgentMemoryWriteMode::SearchOnly, "MEMORY.md")
+                .is_err()
+        );
+        assert!(
+            validate_agent_memory_target_for_mode(AgentMemoryWriteMode::Off, "MEMORY.md").is_err()
+        );
+    }
+
+    #[test]
     fn path_in_agent_memory_scope_is_isolated_per_agent() {
         let ops_workspace = moltis_config::agent_workspace_dir("ops");
         let ops_memory = ops_workspace.join("memory").join("daily.md");
@@ -12449,6 +14086,672 @@ mod tests {
         let root_memory = moltis_config::data_dir().join("memory").join("root.md");
         assert!(is_path_in_agent_memory_scope(&root_memory, "main"));
         assert!(!is_path_in_agent_memory_scope(&root_memory, "ops"));
+    }
+
+    #[test]
+    fn load_prompt_persona_for_agent_uses_agent_scoped_memory_files() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+
+        std::fs::write(dir.path().join("MEMORY.md"), "root memory").unwrap();
+        let ops_dir = dir.path().join("agents").join("ops");
+        std::fs::create_dir_all(&ops_dir).unwrap();
+        std::fs::write(ops_dir.join("MEMORY.md"), "ops memory").unwrap();
+
+        let main_persona = load_prompt_persona_for_agent("main");
+        assert_eq!(main_persona.memory_text.as_deref(), Some("root memory"));
+        assert_eq!(
+            main_persona.memory_status.mode,
+            PromptMemoryMode::LiveReload
+        );
+        assert_eq!(
+            main_persona.memory_status.file_source,
+            Some(moltis_config::WorkspaceMarkdownSource::RootWorkspace)
+        );
+
+        let ops_persona = load_prompt_persona_for_agent("ops");
+        assert_eq!(ops_persona.memory_text.as_deref(), Some("ops memory"));
+        assert_eq!(
+            ops_persona.memory_status.file_source,
+            Some(moltis_config::WorkspaceMarkdownSource::AgentWorkspace)
+        );
+
+        moltis_config::clear_data_dir();
+        moltis_config::clear_config_dir();
+    }
+
+    #[test]
+    fn load_prompt_persona_for_agent_reloads_memory_between_calls() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+
+        std::fs::write(dir.path().join("MEMORY.md"), "first memory").unwrap();
+        let first = load_prompt_persona_for_agent("main");
+        assert_eq!(first.memory_text.as_deref(), Some("first memory"));
+
+        std::fs::write(dir.path().join("MEMORY.md"), "second memory").unwrap();
+        let second = load_prompt_persona_for_agent("main");
+        assert_eq!(second.memory_text.as_deref(), Some("second memory"));
+
+        moltis_config::clear_data_dir();
+        moltis_config::clear_config_dir();
+    }
+
+    #[test]
+    fn load_prompt_persona_for_agent_prompt_only_keeps_prompt_memory() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(config_dir.path(), Some("prompt-only"), None);
+
+        std::fs::write(dir.path().join("MEMORY.md"), "prompt memory").unwrap();
+
+        let persona = load_prompt_persona_for_agent("main");
+        assert_eq!(persona.memory_text.as_deref(), Some("prompt memory"));
+        assert_eq!(persona.memory_status.style, MemoryStyle::PromptOnly);
+        assert!(persona.memory_status.present);
+
+        moltis_config::clear_data_dir();
+        moltis_config::clear_config_dir();
+    }
+
+    #[test]
+    fn load_prompt_persona_for_agent_search_only_omits_prompt_memory() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(config_dir.path(), Some("search-only"), None);
+
+        std::fs::write(dir.path().join("MEMORY.md"), "hidden memory").unwrap();
+
+        let persona = load_prompt_persona_for_agent("main");
+        assert_eq!(persona.memory_text, None);
+        assert_eq!(persona.memory_status.style, MemoryStyle::SearchOnly);
+        assert!(!persona.memory_status.present);
+
+        moltis_config::clear_data_dir();
+        moltis_config::clear_config_dir();
+    }
+
+    #[test]
+    fn load_prompt_persona_for_agent_off_omits_prompt_memory() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(config_dir.path(), Some("off"), None);
+
+        std::fs::write(dir.path().join("MEMORY.md"), "hidden memory").unwrap();
+
+        let persona = load_prompt_persona_for_agent("main");
+        assert_eq!(persona.memory_text, None);
+        assert_eq!(persona.memory_status.style, MemoryStyle::Off);
+        assert!(!persona.memory_status.present);
+
+        moltis_config::clear_data_dir();
+        moltis_config::clear_config_dir();
+    }
+
+    #[tokio::test]
+    async fn install_agent_scoped_memory_tools_respects_memory_style() {
+        let manager = test_memory_manager().await;
+        let runtime: moltis_memory::runtime::DynMemoryRuntime = manager;
+
+        for (style, expected_tools) in [
+            (MemoryStyle::Hybrid, vec![
+                "memory_get",
+                "memory_save",
+                "memory_search",
+            ]),
+            (MemoryStyle::SearchOnly, vec![
+                "memory_get",
+                "memory_save",
+                "memory_search",
+            ]),
+            (MemoryStyle::PromptOnly, Vec::new()),
+            (MemoryStyle::Off, Vec::new()),
+        ] {
+            let mut registry = ToolRegistry::new();
+            registry.register(Box::new(DummyTool {
+                name: "memory_search".to_string(),
+            }));
+            registry.register(Box::new(DummyTool {
+                name: "memory_get".to_string(),
+            }));
+            registry.register(Box::new(DummyTool {
+                name: "memory_save".to_string(),
+            }));
+            registry.register(Box::new(DummyTool {
+                name: "echo_tool".to_string(),
+            }));
+
+            install_agent_scoped_memory_tools(
+                &mut registry,
+                &runtime,
+                "ops",
+                style,
+                AgentMemoryWriteMode::Hybrid,
+            );
+
+            assert_eq!(registry.list_names(), {
+                let mut names = expected_tools
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                names.push("echo_tool".to_string());
+                names.sort();
+                names
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn install_agent_scoped_memory_tools_hides_save_when_write_mode_is_off() {
+        let manager = test_memory_manager().await;
+        let runtime: moltis_memory::runtime::DynMemoryRuntime = manager;
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(DummyTool {
+            name: "memory_search".to_string(),
+        }));
+        registry.register(Box::new(DummyTool {
+            name: "memory_get".to_string(),
+        }));
+        registry.register(Box::new(DummyTool {
+            name: "memory_save".to_string(),
+        }));
+
+        install_agent_scoped_memory_tools(
+            &mut registry,
+            &runtime,
+            "ops",
+            MemoryStyle::Hybrid,
+            AgentMemoryWriteMode::Off,
+        );
+
+        assert_eq!(registry.list_names(), vec![
+            "memory_get".to_string(),
+            "memory_search".to_string()
+        ]);
+    }
+
+    fn session_entry_for_agent(session_key: &str, agent_id: &str) -> SessionEntry {
+        let mut entry = make_session_entry_with_binding(None);
+        entry.key = session_key.to_string();
+        entry.agent_id = Some(agent_id.to_string());
+        entry
+    }
+
+    fn write_prompt_memory_config(config_dir: &Path, style: Option<&str>, mode: Option<&str>) {
+        write_memory_behavior_config(config_dir, style, mode, None);
+    }
+
+    fn write_memory_behavior_config(
+        config_dir: &Path,
+        style: Option<&str>,
+        mode: Option<&str>,
+        agent_write_mode: Option<&str>,
+    ) {
+        std::fs::create_dir_all(config_dir).expect("config dir");
+        let mut config = String::new();
+        if let Some(mode) = mode {
+            config.push_str("[chat]\n");
+            config.push_str(&format!("prompt_memory_mode = \"{mode}\"\n"));
+        }
+        if style.is_some() || agent_write_mode.is_some() {
+            if !config.is_empty() {
+                config.push('\n');
+            }
+            config.push_str("[memory]\n");
+            if let Some(style) = style {
+                config.push_str(&format!("style = \"{style}\"\n"));
+            }
+            if let Some(agent_write_mode) = agent_write_mode {
+                config.push_str(&format!("agent_write_mode = \"{agent_write_mode}\"\n"));
+            }
+        }
+        std::fs::write(config_dir.join("moltis.toml"), config).expect("write config");
+    }
+
+    async fn test_memory_manager() -> Arc<moltis_memory::manager::MemoryManager> {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connect memory db");
+        run_migrations(&pool).await.expect("run memory migrations");
+        Arc::new(moltis_memory::manager::MemoryManager::keyword_only(
+            MemoryConfig::default(),
+            Box::new(SqliteMemoryStore::new(pool)),
+        ))
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_prompt_persona_for_session_freezes_memory_at_session_start() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(config_dir.path(), None, Some("frozen-at-session-start"));
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "first memory").unwrap();
+
+        let state_store = SessionStateStore::new(sqlite_pool().await);
+        let entry = session_entry_for_agent("session-a", "main");
+        let first =
+            load_prompt_persona_for_session("session-a", Some(&entry), Some(&state_store)).await;
+        assert_eq!(first.memory_text.as_deref(), Some("first memory"));
+        assert_eq!(
+            first.memory_status.mode,
+            PromptMemoryMode::FrozenAtSessionStart
+        );
+        assert!(first.memory_status.snapshot_active);
+        let expected_path = data_dir
+            .path()
+            .join("MEMORY.md")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            first.memory_status.path.as_deref(),
+            Some(expected_path.as_str())
+        );
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "second memory").unwrap();
+        let second =
+            load_prompt_persona_for_session("session-a", Some(&entry), Some(&state_store)).await;
+        assert_eq!(second.memory_text.as_deref(), Some("first memory"));
+        assert!(second.memory_status.snapshot_active);
+
+        moltis_config::clear_config_dir();
+        moltis_config::clear_data_dir();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_prompt_persona_for_session_frozen_mode_isolated_between_sessions() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(config_dir.path(), None, Some("frozen-at-session-start"));
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "first memory").unwrap();
+
+        let state_store = SessionStateStore::new(sqlite_pool().await);
+        let session_a = session_entry_for_agent("session-a", "main");
+        let first =
+            load_prompt_persona_for_session("session-a", Some(&session_a), Some(&state_store))
+                .await;
+        assert_eq!(first.memory_text.as_deref(), Some("first memory"));
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "second memory").unwrap();
+        let session_b = session_entry_for_agent("session-b", "main");
+        let second =
+            load_prompt_persona_for_session("session-b", Some(&session_b), Some(&state_store))
+                .await;
+        assert_eq!(second.memory_text.as_deref(), Some("second memory"));
+
+        moltis_config::clear_config_dir();
+        moltis_config::clear_data_dir();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_prompt_persona_for_session_frozen_mode_scopes_snapshots_by_agent() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(config_dir.path(), None, Some("frozen-at-session-start"));
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "root memory").unwrap();
+        let ops_dir = data_dir.path().join("agents").join("ops");
+        std::fs::create_dir_all(&ops_dir).unwrap();
+        std::fs::write(ops_dir.join("MEMORY.md"), "ops memory").unwrap();
+
+        let state_store = SessionStateStore::new(sqlite_pool().await);
+        let main_entry = session_entry_for_agent("session-a", "main");
+        let ops_entry = session_entry_for_agent("session-a", "ops");
+
+        let main =
+            load_prompt_persona_for_session("session-a", Some(&main_entry), Some(&state_store))
+                .await;
+        let ops =
+            load_prompt_persona_for_session("session-a", Some(&ops_entry), Some(&state_store))
+                .await;
+        assert_eq!(main.memory_text.as_deref(), Some("root memory"));
+        assert_eq!(ops.memory_text.as_deref(), Some("ops memory"));
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "root memory v2").unwrap();
+        std::fs::write(ops_dir.join("MEMORY.md"), "ops memory v2").unwrap();
+
+        let main_again =
+            load_prompt_persona_for_session("session-a", Some(&main_entry), Some(&state_store))
+                .await;
+        let ops_again =
+            load_prompt_persona_for_session("session-a", Some(&ops_entry), Some(&state_store))
+                .await;
+        assert_eq!(main_again.memory_text.as_deref(), Some("root memory"));
+        assert_eq!(ops_again.memory_text.as_deref(), Some("ops memory"));
+
+        moltis_config::clear_config_dir();
+        moltis_config::clear_data_dir();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_prompt_persona_for_session_live_reload_reads_latest_memory() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(config_dir.path(), None, Some("live-reload"));
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "first memory").unwrap();
+
+        let state_store = SessionStateStore::new(sqlite_pool().await);
+        let entry = session_entry_for_agent("session-a", "main");
+        let first =
+            load_prompt_persona_for_session("session-a", Some(&entry), Some(&state_store)).await;
+        assert_eq!(first.memory_text.as_deref(), Some("first memory"));
+        assert_eq!(first.memory_status.mode, PromptMemoryMode::LiveReload);
+        assert!(!first.memory_status.snapshot_active);
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "second memory").unwrap();
+        let second =
+            load_prompt_persona_for_session("session-a", Some(&entry), Some(&state_store)).await;
+        assert_eq!(second.memory_text.as_deref(), Some("second memory"));
+        assert!(!second.memory_status.snapshot_active);
+        assert_eq!(
+            state_store
+                .get(
+                    "session-a",
+                    PROMPT_MEMORY_NAMESPACE,
+                    &prompt_memory_snapshot_key("main"),
+                )
+                .await
+                .unwrap(),
+            None
+        );
+
+        moltis_config::clear_config_dir();
+        moltis_config::clear_data_dir();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn load_prompt_persona_for_session_search_only_skips_frozen_snapshot() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(
+            config_dir.path(),
+            Some("search-only"),
+            Some("frozen-at-session-start"),
+        );
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "first memory").unwrap();
+
+        let state_store = SessionStateStore::new(sqlite_pool().await);
+        let entry = session_entry_for_agent("session-a", "main");
+        let persona =
+            load_prompt_persona_for_session("session-a", Some(&entry), Some(&state_store)).await;
+        assert_eq!(persona.memory_text, None);
+        assert_eq!(persona.memory_status.style, MemoryStyle::SearchOnly);
+        assert!(!persona.memory_status.present);
+        assert!(!persona.memory_status.snapshot_active);
+        assert_eq!(
+            state_store
+                .get(
+                    "session-a",
+                    PROMPT_MEMORY_NAMESPACE,
+                    &prompt_memory_snapshot_key("main"),
+                )
+                .await
+                .unwrap(),
+            None
+        );
+
+        moltis_config::clear_config_dir();
+        moltis_config::clear_data_dir();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn memory_save_defaults_to_notes_file_in_search_only_write_mode() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_memory_behavior_config(config_dir.path(), None, None, Some("search-only"));
+
+        let manager = test_memory_manager().await;
+        let runtime: moltis_memory::runtime::DynMemoryRuntime = manager;
+        let tool = AgentScopedMemorySaveTool::new(
+            runtime,
+            "ops".to_string(),
+            AgentMemoryWriteMode::SearchOnly,
+        );
+
+        let result = tool
+            .execute(serde_json::json!({ "content": "search-only memory" }))
+            .await
+            .expect("memory_save should succeed");
+        assert_eq!(result["path"].as_str(), Some("memory/notes.md"));
+        let saved =
+            std::fs::read_to_string(data_dir.path().join("agents/ops/memory/notes.md")).unwrap();
+        assert_eq!(saved, "search-only memory");
+
+        moltis_config::clear_config_dir();
+        moltis_config::clear_data_dir();
+    }
+
+    #[tokio::test]
+    async fn memory_save_rejects_memory_md_in_search_only_write_mode() {
+        let manager = test_memory_manager().await;
+        let runtime: moltis_memory::runtime::DynMemoryRuntime = manager;
+        let tool = AgentScopedMemorySaveTool::new(
+            runtime,
+            "ops".to_string(),
+            AgentMemoryWriteMode::SearchOnly,
+        );
+
+        let error = tool
+            .execute(serde_json::json!({
+                "content": "should fail",
+                "file": "MEMORY.md",
+            }))
+            .await
+            .expect_err("search-only mode should reject MEMORY.md");
+        assert!(error.to_string().contains("search-only"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn context_reports_prompt_memory_status() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(config_dir.path(), None, Some("frozen-at-session-start"));
+        std::fs::write(data_dir.path().join("MEMORY.md"), "first memory").unwrap();
+
+        let session_store = Arc::new(SessionStore::new(data_dir.path().join("sessions")));
+        let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+        let state_store = Arc::new(SessionStateStore::new(sqlite_pool().await));
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(ProviderRegistry::empty())),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new()),
+            session_store,
+            metadata,
+        )
+        .with_session_state_store(Arc::clone(&state_store));
+
+        let result = service
+            .context(serde_json::json!({ "sessionKey": "session-a" }))
+            .await
+            .expect("chat.context should succeed");
+
+        assert_eq!(
+            result["promptMemory"]["mode"].as_str(),
+            Some("frozen-at-session-start")
+        );
+        assert_eq!(result["promptMemory"]["style"].as_str(), Some("hybrid"));
+        assert_eq!(result["promptMemory"]["writeMode"].as_str(), Some("hybrid"));
+        assert_eq!(
+            result["promptMemory"]["snapshotActive"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(result["promptMemory"]["present"].as_bool(), Some(true));
+
+        moltis_config::clear_config_dir();
+        moltis_config::clear_data_dir();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn refresh_prompt_memory_rebuilds_frozen_snapshot() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(config_dir.path(), None, Some("frozen-at-session-start"));
+        std::fs::write(data_dir.path().join("MEMORY.md"), "first memory").unwrap();
+
+        let session_store = Arc::new(SessionStore::new(data_dir.path().join("sessions")));
+        let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+        let state_store = Arc::new(SessionStateStore::new(sqlite_pool().await));
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(ProviderRegistry::empty())),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new()),
+            session_store,
+            metadata,
+        )
+        .with_session_state_store(Arc::clone(&state_store));
+
+        let first_context = service
+            .context(serde_json::json!({ "sessionKey": "session-a" }))
+            .await
+            .expect("chat.context should succeed");
+        assert_eq!(
+            first_context["promptMemory"]["chars"].as_u64(),
+            Some("first memory".chars().count() as u64)
+        );
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "second memory").unwrap();
+
+        let refresh_result = service
+            .refresh_prompt_memory(serde_json::json!({ "sessionKey": "session-a" }))
+            .await
+            .expect("chat.prompt_memory.refresh should succeed");
+        assert_eq!(refresh_result["snapshotCleared"].as_bool(), Some(true));
+        assert_eq!(
+            refresh_result["promptMemory"]["chars"].as_u64(),
+            Some("second memory".chars().count() as u64)
+        );
+        assert!(
+            state_store
+                .get(
+                    "session-a",
+                    PROMPT_MEMORY_NAMESPACE,
+                    &prompt_memory_snapshot_key("main"),
+                )
+                .await
+                .unwrap()
+                .as_deref()
+                .is_some()
+        );
+
+        let second_context = service
+            .context(serde_json::json!({ "sessionKey": "session-a" }))
+            .await
+            .expect("chat.context should succeed");
+        assert_eq!(
+            second_context["promptMemory"]["chars"].as_u64(),
+            Some("second memory".chars().count() as u64)
+        );
+
+        moltis_config::clear_config_dir();
+        moltis_config::clear_data_dir();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn refresh_prompt_memory_in_live_mode_does_not_require_snapshot() {
+        let _guard = DATA_DIR_TEST_LOCK.lock().expect("data dir lock");
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        moltis_config::set_data_dir(data_dir.path().to_path_buf());
+        moltis_config::set_config_dir(config_dir.path().to_path_buf());
+        write_prompt_memory_config(config_dir.path(), None, Some("live-reload"));
+        std::fs::write(data_dir.path().join("MEMORY.md"), "first memory").unwrap();
+
+        let session_store = Arc::new(SessionStore::new(data_dir.path().join("sessions")));
+        let metadata = Arc::new(SqliteSessionMetadata::new(sqlite_pool().await));
+        let state_store = Arc::new(SessionStateStore::new(sqlite_pool().await));
+        let service = LiveChatService::new(
+            Arc::new(RwLock::new(ProviderRegistry::empty())),
+            Arc::new(RwLock::new(DisabledModelsStore::default())),
+            Arc::new(MockChatRuntime::new()),
+            session_store,
+            metadata,
+        )
+        .with_session_state_store(Arc::clone(&state_store));
+
+        let _ = service
+            .context(serde_json::json!({ "sessionKey": "session-a" }))
+            .await
+            .expect("chat.context should succeed");
+
+        std::fs::write(data_dir.path().join("MEMORY.md"), "second memory").unwrap();
+        let refresh_result = service
+            .refresh_prompt_memory(serde_json::json!({ "sessionKey": "session-a" }))
+            .await
+            .expect("chat.prompt_memory.refresh should succeed");
+        assert_eq!(refresh_result["snapshotCleared"].as_bool(), Some(false));
+        assert_eq!(
+            refresh_result["promptMemory"]["mode"].as_str(),
+            Some("live-reload")
+        );
+        assert_eq!(
+            refresh_result["promptMemory"]["chars"].as_u64(),
+            Some("second memory".chars().count() as u64)
+        );
+        assert_eq!(
+            state_store
+                .get(
+                    "session-a",
+                    PROMPT_MEMORY_NAMESPACE,
+                    &prompt_memory_snapshot_key("main"),
+                )
+                .await
+                .unwrap(),
+            None
+        );
+
+        moltis_config::clear_config_dir();
+        moltis_config::clear_data_dir();
     }
 
     // ── active_session_keys tests ───────────────────────────────────────
@@ -13350,6 +15653,80 @@ mod tests {
             result.len() <= 160,
             "single long line should be truncated, got {} chars",
             result.len()
+        );
+    }
+
+    /// Serializes tests that mutate the global `moltis_config` data_dir
+    /// override so they don't race within the chat crate's test binary.
+    /// A `Semaphore` with a single permit is used here instead of
+    /// `Mutex<()>` because CLAUDE.md forbids bare `Mutex<()>` — a mutex must
+    /// guard real state. This semaphore is a pure serialization primitive
+    /// for a separately-owned global (`moltis_config`'s data_dir override).
+    static SKILLS_TEST_DATA_DIR_LOCK: Semaphore = Semaphore::const_new(1);
+
+    /// Regression test for #655: `[skills] enabled = false` must short-circuit
+    /// skill discovery so nothing from the filesystem ends up in the LLM prompt.
+    #[tokio::test]
+    async fn discover_skills_if_enabled_short_circuits_when_disabled() {
+        let _permit = SKILLS_TEST_DATA_DIR_LOCK
+            .acquire()
+            .await
+            .expect("semaphore closed");
+
+        // Point data_dir at a temp dir containing a real SKILL.md so that if
+        // the helper *did* fall through to the discoverer, it would return a
+        // non-empty list and fail this assertion.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = tmp.path().join("skills").join("planted-skill");
+        std::fs::create_dir_all(&skills_dir).expect("mkdir");
+        std::fs::write(
+            skills_dir.join("SKILL.md"),
+            "---\nname: planted-skill\ndescription: should not appear\n---\nbody",
+        )
+        .expect("write");
+        moltis_config::set_data_dir(tmp.path().to_path_buf());
+
+        let mut cfg = moltis_config::MoltisConfig::default();
+        cfg.skills.enabled = false;
+
+        let result = discover_skills_if_enabled(&cfg).await;
+        moltis_config::clear_data_dir();
+
+        assert!(
+            result.is_empty(),
+            "disabled skills must yield no discovered skills, got: {result:?}",
+        );
+    }
+
+    /// Complement to the short-circuit test: when enabled, the helper actually
+    /// invokes the filesystem discoverer. Validates the other arm of the
+    /// `enabled` branch so we don't accidentally hard-code `Vec::new()`.
+    #[tokio::test]
+    async fn discover_skills_if_enabled_runs_discoverer_when_enabled() {
+        let _permit = SKILLS_TEST_DATA_DIR_LOCK
+            .acquire()
+            .await
+            .expect("semaphore closed");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = tmp.path().join("skills").join("live-skill");
+        std::fs::create_dir_all(&skills_dir).expect("mkdir");
+        std::fs::write(
+            skills_dir.join("SKILL.md"),
+            "---\nname: live-skill\ndescription: visible to prompt\n---\nbody",
+        )
+        .expect("write");
+        moltis_config::set_data_dir(tmp.path().to_path_buf());
+
+        let mut cfg = moltis_config::MoltisConfig::default();
+        cfg.skills.enabled = true;
+
+        let result = discover_skills_if_enabled(&cfg).await;
+        moltis_config::clear_data_dir();
+
+        assert!(
+            result.iter().any(|s| s.name == "live-skill"),
+            "enabled skills must be discovered from data_dir, got: {result:?}",
         );
     }
 }
