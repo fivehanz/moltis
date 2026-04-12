@@ -474,6 +474,125 @@ enum NativeHostWriteOutcome {
     SymlinkDenied,
 }
 
+fn path_denied_payload(file_path: &str, detail: &str) -> Value {
+    json!({
+        "kind": "path_denied",
+        "file_path": file_path,
+        "error": "target is a symbolic link; refusing to follow",
+        "detail": detail,
+    })
+}
+
+fn permission_denied_payload(file_path: &str, detail: &str) -> Value {
+    json!({
+        "kind": "permission_denied",
+        "file_path": file_path,
+        "error": "insufficient permissions to access file",
+        "detail": detail,
+    })
+}
+
+fn not_regular_file_payload(file_path: &str, detail: &str) -> Value {
+    json!({
+        "kind": "not_regular_file",
+        "file_path": file_path,
+        "error": "path is not a regular file",
+        "detail": detail,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerCopyErrorKind {
+    NotFound,
+    PermissionDenied,
+}
+
+fn classify_container_copy_error(stderr: &str) -> Option<ContainerCopyErrorKind> {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("permission denied") {
+        return Some(ContainerCopyErrorKind::PermissionDenied);
+    }
+    if lower.contains("no such file or directory")
+        || lower.contains("not found")
+        || lower.contains("could not find the file")
+    {
+        return Some(ContainerCopyErrorKind::NotFound);
+    }
+    None
+}
+
+fn container_copy_local_root(destination_dir: &Path, source_path: &str) -> PathBuf {
+    let basename = Path::new(source_path)
+        .components()
+        .rev()
+        .find_map(|component| {
+            if let std::path::Component::Normal(value) = component {
+                Some(value.to_owned())
+            } else {
+                None
+            }
+        });
+
+    match basename {
+        Some(basename) => {
+            let candidate = destination_dir.join(basename);
+            if candidate.exists() {
+                candidate
+            } else {
+                destination_dir.to_path_buf()
+            }
+        },
+        None => destination_dir.to_path_buf(),
+    }
+}
+
+async fn copy_container_path_to_host(
+    cli: &str,
+    container_name: &str,
+    container_path: &str,
+    follow_links: bool,
+    destination_dir: &Path,
+) -> Result<PathBuf> {
+    let mut args = vec!["cp".to_string()];
+    if follow_links {
+        args.push("-L".to_string());
+    }
+    args.push(format!("{container_name}:{container_path}"));
+    args.push(destination_dir.display().to_string());
+
+    let output = tokio::process::Command::new(cli)
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        if let Some(kind) = classify_container_copy_error(detail) {
+            return Err(Error::message(format!("container-copy:{kind:?}:{detail}")));
+        }
+        return Err(Error::message(format!(
+            "{cli} cp failed for '{container_path}': {detail}"
+        )));
+    }
+
+    Ok(container_copy_local_root(destination_dir, container_path))
+}
+
+fn decode_container_copy_error(error: &Error) -> Option<(ContainerCopyErrorKind, String)> {
+    let message = error.to_string();
+    let rest = message.strip_prefix("container-copy:")?;
+    let (kind, detail) = rest.split_once(':')?;
+    let kind = match kind {
+        "NotFound" => ContainerCopyErrorKind::NotFound,
+        "PermissionDenied" => ContainerCopyErrorKind::PermissionDenied,
+        _ => return None,
+    };
+    Some((kind, detail.to_string()))
+}
+
 /// Native host-backed read implementation for sandbox backends whose paths
 /// are just host paths.
 pub async fn native_host_read_file(file_path: &str, max_bytes: u64) -> Result<SandboxReadResult> {
@@ -527,12 +646,10 @@ pub async fn native_host_write_file(file_path: &str, content: &[u8]) -> Result<O
         },
     }
     if is_symlink(&path).await? {
-        return Ok(Some(json!({
-            "kind": "path_denied",
-            "file_path": file_path,
-            "error": "target is a symbolic link; refusing to follow",
-            "detail": "native host write rejects symlinks",
-        })));
+        return Ok(Some(path_denied_payload(
+            file_path,
+            "native host write rejects symlinks",
+        )));
     }
 
     let bytes = content.to_vec();
@@ -569,12 +686,10 @@ pub async fn native_host_write_file(file_path: &str, content: &[u8]) -> Result<O
 
     match outcome {
         NativeHostWriteOutcome::Written => Ok(None),
-        NativeHostWriteOutcome::SymlinkDenied => Ok(Some(json!({
-            "kind": "path_denied",
-            "file_path": file_path,
-            "error": "target is a symbolic link; refusing to follow",
-            "detail": "native host write rejects symlinks",
-        }))),
+        NativeHostWriteOutcome::SymlinkDenied => Ok(Some(path_denied_payload(
+            file_path,
+            "native host write rejects symlinks",
+        ))),
     }
 }
 
@@ -662,6 +777,281 @@ async fn is_symlink(path: &Path) -> Result<bool> {
             path.display()
         ))),
     }
+}
+
+pub fn remap_host_files_to_guest(
+    guest_root: &str,
+    host_root: &Path,
+    host_files: Vec<String>,
+) -> Result<Vec<String>> {
+    let mut guest_files = Vec::with_capacity(host_files.len());
+    for host_file in host_files {
+        let relative = Path::new(&host_file)
+            .strip_prefix(host_root)
+            .map_err(|error| {
+                Error::message(format!(
+                    "failed to relativize host path '{host_file}' against '{}': {error}",
+                    host_root.display()
+                ))
+            })?;
+        let guest_path = if relative.as_os_str().is_empty() {
+            PathBuf::from(guest_root)
+        } else {
+            Path::new(guest_root).join(relative)
+        };
+        guest_files.push(guest_path.display().to_string());
+    }
+    guest_files.sort();
+    Ok(guest_files)
+}
+
+/// Copy-based read implementation for OCI-compatible container CLIs.
+pub async fn oci_container_read_file(
+    cli: &str,
+    container_name: &str,
+    file_path: &str,
+    max_bytes: u64,
+) -> Result<SandboxReadResult> {
+    let temp_dir = tempfile::tempdir()?;
+    let local_path =
+        match copy_container_path_to_host(cli, container_name, file_path, true, temp_dir.path())
+            .await
+        {
+            Ok(local_path) => local_path,
+            Err(error) => {
+                if let Some((kind, _detail)) = decode_container_copy_error(&error) {
+                    return Ok(match kind {
+                        ContainerCopyErrorKind::NotFound => SandboxReadResult::NotFound,
+                        ContainerCopyErrorKind::PermissionDenied => {
+                            SandboxReadResult::PermissionDenied
+                        },
+                    });
+                }
+                return Err(error);
+            },
+        };
+
+    let metadata = match tokio::fs::metadata(&local_path).await {
+        Ok(metadata) => metadata,
+        Err(error) => return Ok(map_io_error_to_read_result(&error)),
+    };
+    if !metadata.is_file() {
+        return Ok(SandboxReadResult::NotRegularFile);
+    }
+
+    native_host_read_file(
+        local_path
+            .to_str()
+            .ok_or_else(|| Error::message("copied container path contains invalid UTF-8"))?,
+        max_bytes,
+    )
+    .await
+}
+
+/// Copy-based write implementation for OCI-compatible container CLIs.
+pub async fn oci_container_write_file(
+    cli: &str,
+    container_name: &str,
+    file_path: &str,
+    content: &[u8],
+) -> Result<Option<Value>> {
+    let path = Path::new(file_path);
+    let parent = path.parent().ok_or_else(|| {
+        Error::message(format!(
+            "cannot resolve parent of '{file_path}': directory does not exist in container"
+        ))
+    })?;
+
+    let target_temp_dir = tempfile::tempdir()?;
+    match copy_container_path_to_host(
+        cli,
+        container_name,
+        file_path,
+        false,
+        target_temp_dir.path(),
+    )
+    .await
+    {
+        Ok(local_target) => {
+            let metadata = tokio::fs::symlink_metadata(&local_target)
+                .await
+                .map_err(|error| {
+                    Error::message(format!(
+                        "failed to inspect copied container path '{file_path}': {error}"
+                    ))
+                })?;
+            if metadata.file_type().is_symlink() {
+                return Ok(Some(path_denied_payload(
+                    file_path,
+                    "OCI Write rejects symlinks",
+                )));
+            }
+            if !metadata.is_file() {
+                return Ok(Some(not_regular_file_payload(
+                    file_path,
+                    "OCI Write requires a regular file target",
+                )));
+            }
+        },
+        Err(error) => {
+            if let Some((kind, detail)) = decode_container_copy_error(&error) {
+                match kind {
+                    ContainerCopyErrorKind::PermissionDenied => {
+                        return Ok(Some(permission_denied_payload(file_path, &detail)));
+                    },
+                    ContainerCopyErrorKind::NotFound => {
+                        let parent_temp_dir = tempfile::tempdir()?;
+                        let parent_string = parent.display().to_string();
+                        let local_parent = match copy_container_path_to_host(
+                            cli,
+                            container_name,
+                            &parent_string,
+                            true,
+                            parent_temp_dir.path(),
+                        )
+                        .await
+                        {
+                            Ok(local_parent) => local_parent,
+                            Err(parent_error) => {
+                                if let Some((parent_kind, parent_detail)) =
+                                    decode_container_copy_error(&parent_error)
+                                {
+                                    return match parent_kind {
+                                        ContainerCopyErrorKind::NotFound => {
+                                            Err(Error::message(format!(
+                                                "cannot resolve parent of '{file_path}': directory does not exist in container"
+                                            )))
+                                        },
+                                        ContainerCopyErrorKind::PermissionDenied => Ok(Some(
+                                            permission_denied_payload(file_path, &parent_detail),
+                                        )),
+                                    };
+                                }
+                                return Err(parent_error);
+                            },
+                        };
+
+                        let parent_metadata =
+                            tokio::fs::metadata(&local_parent).await.map_err(|error| {
+                                Error::message(format!(
+                                    "failed to inspect copied container parent '{parent_string}': {error}"
+                                ))
+                            })?;
+                        if !parent_metadata.is_dir() {
+                            return Err(Error::message(format!(
+                                "cannot resolve parent of '{file_path}': parent is not a directory in container"
+                            )));
+                        }
+                    },
+                }
+            } else {
+                return Err(error);
+            }
+        },
+    }
+
+    let mut temp_file = tempfile::NamedTempFile::new()?;
+    temp_file.write_all(content)?;
+    temp_file.as_file().sync_all()?;
+
+    let args = vec![
+        "cp".to_string(),
+        temp_file.path().display().to_string(),
+        format!("{container_name}:{file_path}"),
+    ];
+    let output = tokio::process::Command::new(cli)
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await?;
+
+    if output.status.success() {
+        return Ok(None);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr.trim();
+    if let Some(kind) = classify_container_copy_error(detail) {
+        return match kind {
+            ContainerCopyErrorKind::NotFound => Err(Error::message(format!(
+                "cannot resolve parent of '{file_path}': directory does not exist in container"
+            ))),
+            ContainerCopyErrorKind::PermissionDenied => {
+                Ok(Some(permission_denied_payload(file_path, detail)))
+            },
+        };
+    }
+
+    Err(Error::message(format!(
+        "{cli} cp failed for '{file_path}': {detail}"
+    )))
+}
+
+/// Copy-based list-files implementation for OCI-compatible container CLIs.
+pub async fn oci_container_list_files(
+    cli: &str,
+    container_name: &str,
+    root: &str,
+) -> Result<Vec<String>> {
+    let temp_dir = tempfile::tempdir()?;
+    let local_root = copy_container_path_to_host(cli, container_name, root, true, temp_dir.path())
+        .await
+        .map_err(|error| {
+            if let Some((kind, detail)) = decode_container_copy_error(&error) {
+                match kind {
+                    ContainerCopyErrorKind::NotFound => {
+                        Error::message(format!("sandbox list_files '{root}' failed: {detail}"))
+                    },
+                    ContainerCopyErrorKind::PermissionDenied => {
+                        Error::message(format!("sandbox list_files '{root}' failed: {detail}"))
+                    },
+                }
+            } else {
+                error
+            }
+        })?;
+
+    let metadata = tokio::fs::metadata(&local_root).await.map_err(|error| {
+        Error::message(format!(
+            "failed to inspect copied container tree '{root}': {error}"
+        ))
+    })?;
+
+    if metadata.is_file() {
+        return Ok(vec![root.to_string()]);
+    }
+    if !metadata.is_dir() {
+        return Err(Error::message(format!(
+            "sandbox list_files '{root}' failed: copied path is not a directory"
+        )));
+    }
+
+    let local_files = native_host_list_files(
+        local_root
+            .to_str()
+            .ok_or_else(|| Error::message("copied container path contains invalid UTF-8"))?,
+    )
+    .await?;
+
+    let mut mapped_files = Vec::with_capacity(local_files.len());
+    for local_file in local_files {
+        let relative = Path::new(&local_file)
+            .strip_prefix(&local_root)
+            .map_err(|error| {
+                Error::message(format!(
+                    "failed to relativize copied container path '{local_file}': {error}"
+                ))
+            })?;
+        let mapped = if relative.as_os_str().is_empty() {
+            PathBuf::from(root)
+        } else {
+            Path::new(root).join(relative)
+        };
+        mapped_files.push(mapped.display().to_string());
+    }
+    mapped_files.sort();
+    Ok(mapped_files)
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]

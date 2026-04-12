@@ -619,6 +619,140 @@ fn test_docker_home_persistence_args_session_uses_host_data_dir_override() {
 }
 
 #[test]
+fn test_resolve_workspace_guest_path_on_host_uses_host_override() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let host_data_dir = temp_dir.path().join("moltis-data");
+    let config = SandboxConfig {
+        workspace_mount: WorkspaceMount::Rw,
+        host_data_dir: Some(host_data_dir.clone()),
+        ..Default::default()
+    };
+    let guest_file = moltis_config::data_dir().join("notes/todo.txt");
+
+    let resolved =
+        resolve_workspace_guest_path_on_host(&config, Some("docker"), &guest_file).unwrap();
+
+    assert_eq!(resolved, host_data_dir.join("notes/todo.txt"));
+}
+
+#[test]
+fn test_resolve_home_persistence_guest_path_on_host_uses_session_mount() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let host_data_dir = temp_dir.path().join("moltis-data");
+    let config = SandboxConfig {
+        home_persistence: HomePersistence::Session,
+        host_data_dir: Some(host_data_dir.clone()),
+        ..Default::default()
+    };
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "sess-1".into(),
+    };
+    let guest_file = guest_visible_sandbox_home_persistence_host_dir(&config, &id)
+        .unwrap()
+        .join("history.txt");
+
+    let resolved =
+        resolve_home_persistence_guest_path_on_host(&config, Some("docker"), &id, &guest_file)
+            .unwrap();
+
+    assert_eq!(
+        resolved,
+        host_data_dir.join("sandbox/home/session/sess-1/history.txt")
+    );
+}
+
+#[tokio::test]
+async fn test_docker_read_file_uses_mounted_workspace_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let host_data_dir = temp_dir.path().join("moltis-data");
+    let host_file = host_data_dir.join("notes/todo.txt");
+    std::fs::create_dir_all(host_file.parent().unwrap()).unwrap();
+    std::fs::write(&host_file, "docker mounted read").unwrap();
+
+    let docker = DockerSandbox::new(SandboxConfig {
+        workspace_mount: WorkspaceMount::Rw,
+        host_data_dir: Some(host_data_dir),
+        ..Default::default()
+    });
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "test-docker-read".into(),
+    };
+    let guest_file = moltis_config::data_dir().join("notes/todo.txt");
+
+    let result = docker
+        .read_file(&id, &guest_file.display().to_string(), 1024)
+        .await
+        .unwrap();
+    match result {
+        SandboxReadResult::Ok(bytes) => assert_eq!(bytes, b"docker mounted read"),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_docker_write_file_uses_mounted_workspace_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let host_data_dir = temp_dir.path().join("moltis-data");
+    let docker = DockerSandbox::new(SandboxConfig {
+        workspace_mount: WorkspaceMount::Rw,
+        host_data_dir: Some(host_data_dir.clone()),
+        ..Default::default()
+    });
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "test-docker-write".into(),
+    };
+    let guest_file = moltis_config::data_dir().join("notes/todo.txt");
+    std::fs::create_dir_all(host_data_dir.join("notes")).unwrap();
+
+    let result = docker
+        .write_file(
+            &id,
+            &guest_file.display().to_string(),
+            b"docker mounted write",
+        )
+        .await
+        .unwrap();
+    assert!(result.is_none());
+    assert_eq!(
+        std::fs::read_to_string(host_data_dir.join("notes/todo.txt")).unwrap(),
+        "docker mounted write"
+    );
+}
+
+#[tokio::test]
+async fn test_docker_list_files_remaps_mounted_workspace_paths() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let host_data_dir = temp_dir.path().join("moltis-data");
+    let host_root = host_data_dir.join("notes");
+    std::fs::create_dir_all(host_root.join("nested")).unwrap();
+    std::fs::write(host_root.join("todo.txt"), "a").unwrap();
+    std::fs::write(host_root.join("nested/done.txt"), "b").unwrap();
+
+    let docker = DockerSandbox::new(SandboxConfig {
+        workspace_mount: WorkspaceMount::Rw,
+        host_data_dir: Some(host_data_dir),
+        ..Default::default()
+    });
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "test-docker-list".into(),
+    };
+    let guest_root = moltis_config::data_dir().join("notes");
+
+    let files = docker
+        .list_files(&id, &guest_root.display().to_string())
+        .await
+        .unwrap();
+    assert_eq!(files, vec![
+        guest_root.join("nested/done.txt").display().to_string(),
+        guest_root.join("todo.txt").display().to_string(),
+    ]);
+}
+
+#[test]
 fn test_create_sandbox_off_uses_no_sandbox() {
     let config = SandboxConfig {
         mode: SandboxMode::Off,
@@ -649,6 +783,113 @@ async fn test_no_sandbox_exec() {
     let result = sandbox.exec(&id, "echo sandbox-test", &opts).await.unwrap();
     assert_eq!(result.stdout.trim(), "sandbox-test");
     assert_eq!(result.exit_code, 0);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_apple_container_home_read_uses_mounted_host_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let host_data_dir = temp_dir.path().join("moltis-data");
+    let config = SandboxConfig {
+        home_persistence: HomePersistence::Session,
+        host_data_dir: Some(host_data_dir.clone()),
+        ..Default::default()
+    };
+    let sandbox = AppleContainerSandbox::new(config.clone());
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "apple-home-read".into(),
+    };
+    let guest_file = guest_visible_sandbox_home_persistence_host_dir(&config, &id)
+        .unwrap()
+        .join("history.txt");
+    let host_file = sandbox_home_persistence_host_dir(&config, Some("container"), &id)
+        .unwrap()
+        .join("history.txt");
+    std::fs::create_dir_all(host_file.parent().unwrap()).unwrap();
+    std::fs::write(&host_file, "apple mounted read").unwrap();
+
+    let result = sandbox
+        .read_file(&id, &guest_file.display().to_string(), 1024)
+        .await
+        .unwrap();
+    match result {
+        SandboxReadResult::Ok(bytes) => assert_eq!(bytes, b"apple mounted read"),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_apple_container_home_write_uses_mounted_host_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let host_data_dir = temp_dir.path().join("moltis-data");
+    let config = SandboxConfig {
+        home_persistence: HomePersistence::Session,
+        host_data_dir: Some(host_data_dir.clone()),
+        ..Default::default()
+    };
+    let sandbox = AppleContainerSandbox::new(config.clone());
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "apple-home-write".into(),
+    };
+    let guest_file = guest_visible_sandbox_home_persistence_host_dir(&config, &id)
+        .unwrap()
+        .join("history.txt");
+    let host_file = sandbox_home_persistence_host_dir(&config, Some("container"), &id)
+        .unwrap()
+        .join("history.txt");
+    std::fs::create_dir_all(host_file.parent().unwrap()).unwrap();
+
+    let result = sandbox
+        .write_file(
+            &id,
+            &guest_file.display().to_string(),
+            b"apple mounted write",
+        )
+        .await
+        .unwrap();
+    assert!(result.is_none());
+    assert_eq!(
+        std::fs::read_to_string(host_file).unwrap(),
+        "apple mounted write"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn test_apple_container_home_list_remaps_mounted_host_paths() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let host_data_dir = temp_dir.path().join("moltis-data");
+    let config = SandboxConfig {
+        home_persistence: HomePersistence::Session,
+        host_data_dir: Some(host_data_dir.clone()),
+        ..Default::default()
+    };
+    let sandbox = AppleContainerSandbox::new(config.clone());
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "apple-home-list".into(),
+    };
+    let guest_root = guest_visible_sandbox_home_persistence_host_dir(&config, &id)
+        .unwrap()
+        .join("notes");
+    let host_root = sandbox_home_persistence_host_dir(&config, Some("container"), &id)
+        .unwrap()
+        .join("notes");
+    std::fs::create_dir_all(host_root.join("nested")).unwrap();
+    std::fs::write(host_root.join("todo.txt"), "a").unwrap();
+    std::fs::write(host_root.join("nested/done.txt"), "b").unwrap();
+
+    let files = sandbox
+        .list_files(&id, &guest_root.display().to_string())
+        .await
+        .unwrap();
+    assert_eq!(files, vec![
+        guest_root.join("nested/done.txt").display().to_string(),
+        guest_root.join("todo.txt").display().to_string(),
+    ]);
 }
 
 #[tokio::test]

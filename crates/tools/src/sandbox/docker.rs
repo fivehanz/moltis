@@ -12,7 +12,10 @@ use {
             sandbox_image_tag,
         },
         host::provision_packages,
-        paths::{ensure_sandbox_home_persistence_host_dir, host_visible_data_dir},
+        paths::{
+            ensure_sandbox_home_persistence_host_dir, host_visible_data_dir,
+            resolve_home_persistence_guest_path_on_host, resolve_workspace_guest_path_on_host,
+        },
         types::{
             BuildImageResult, DEFAULT_SANDBOX_IMAGE, NetworkPolicy, SANDBOX_HOME_DIR, Sandbox,
             SandboxConfig, SandboxId, WorkspaceMount, canonical_sandbox_packages,
@@ -24,7 +27,8 @@ use {
         exec::{ExecOpts, ExecResult},
         sandbox::file_system::{
             SandboxReadResult, native_host_list_files, native_host_read_file,
-            native_host_write_file,
+            native_host_write_file, oci_container_list_files, oci_container_read_file,
+            oci_container_write_file, remap_host_files_to_guest,
         },
     },
 };
@@ -77,6 +81,20 @@ impl DockerSandbox {
 
     fn image_repo(&self) -> &str {
         self.container_prefix()
+    }
+
+    fn mounted_host_path(&self, id: &SandboxId, guest_path: &str) -> Option<std::path::PathBuf> {
+        let guest_path = std::path::Path::new(guest_path);
+        resolve_workspace_guest_path_on_host(&self.config, Some(self.cli), guest_path).or_else(
+            || {
+                resolve_home_persistence_guest_path_on_host(
+                    &self.config,
+                    Some(self.cli),
+                    id,
+                    guest_path,
+                )
+            },
+        )
     }
 
     pub(crate) fn resource_args(&self) -> Vec<String> {
@@ -426,6 +444,61 @@ impl Sandbox for DockerSandbox {
                 )));
             },
         }
+    }
+
+    async fn read_file(
+        &self,
+        id: &SandboxId,
+        file_path: &str,
+        max_bytes: u64,
+    ) -> Result<SandboxReadResult> {
+        if let Some(host_path) = self.mounted_host_path(id, file_path) {
+            return native_host_read_file(
+                host_path
+                    .to_str()
+                    .ok_or_else(|| Error::message("mounted host path contains invalid UTF-8"))?,
+                max_bytes,
+            )
+            .await;
+        }
+
+        let container_name = self.container_name(id);
+        oci_container_read_file(self.cli, &container_name, file_path, max_bytes).await
+    }
+
+    async fn write_file(
+        &self,
+        id: &SandboxId,
+        file_path: &str,
+        content: &[u8],
+    ) -> Result<Option<serde_json::Value>> {
+        if let Some(host_path) = self.mounted_host_path(id, file_path) {
+            return native_host_write_file(
+                host_path
+                    .to_str()
+                    .ok_or_else(|| Error::message("mounted host path contains invalid UTF-8"))?,
+                content,
+            )
+            .await;
+        }
+
+        let container_name = self.container_name(id);
+        oci_container_write_file(self.cli, &container_name, file_path, content).await
+    }
+
+    async fn list_files(&self, id: &SandboxId, root: &str) -> Result<Vec<String>> {
+        if let Some(host_path) = self.mounted_host_path(id, root) {
+            let host_files = native_host_list_files(
+                host_path
+                    .to_str()
+                    .ok_or_else(|| Error::message("mounted host path contains invalid UTF-8"))?,
+            )
+            .await?;
+            return remap_host_files_to_guest(root, &host_path, host_files);
+        }
+
+        let container_name = self.container_name(id);
+        oci_container_list_files(self.cli, &container_name, root).await
     }
 
     async fn cleanup(&self, id: &SandboxId) -> Result<()> {
