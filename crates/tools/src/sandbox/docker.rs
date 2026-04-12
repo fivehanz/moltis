@@ -22,6 +22,10 @@ use {
     crate::{
         error::{Error, Result},
         exec::{ExecOpts, ExecResult},
+        sandbox::file_system::{
+            SandboxReadResult, native_host_list_files, native_host_read_file,
+            native_host_write_file,
+        },
     },
 };
 
@@ -453,6 +457,28 @@ impl Sandbox for NoSandbox {
 
     async fn exec(&self, _id: &SandboxId, command: &str, opts: &ExecOpts) -> Result<ExecResult> {
         crate::exec::exec_command(command, opts).await
+    }
+
+    async fn read_file(
+        &self,
+        _id: &SandboxId,
+        file_path: &str,
+        max_bytes: u64,
+    ) -> Result<SandboxReadResult> {
+        native_host_read_file(file_path, max_bytes).await
+    }
+
+    async fn write_file(
+        &self,
+        _id: &SandboxId,
+        file_path: &str,
+        content: &[u8],
+    ) -> Result<Option<serde_json::Value>> {
+        native_host_write_file(file_path, content).await
+    }
+
+    async fn list_files(&self, _id: &SandboxId, root: &str) -> Result<Vec<String>> {
+        native_host_list_files(root).await
     }
 
     async fn cleanup(&self, _id: &SandboxId) -> Result<()> {

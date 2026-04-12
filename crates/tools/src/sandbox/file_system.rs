@@ -9,7 +9,13 @@ use {
     async_trait::async_trait,
     base64::{Engine as _, engine::general_purpose::STANDARD as BASE64},
     serde_json::{Value, json},
-    std::{path::PathBuf, sync::Arc, time::Duration},
+    std::{
+        io,
+        io::Write as _,
+        path::{Path, PathBuf},
+        sync::Arc,
+        time::Duration,
+    },
 };
 
 use crate::{
@@ -461,6 +467,201 @@ fn apply_head_offset<T: Clone>(
         _ => (slice, false),
     };
     (capped.to_vec(), truncated)
+}
+
+enum NativeHostWriteOutcome {
+    Written,
+    SymlinkDenied,
+}
+
+/// Native host-backed read implementation for sandbox backends whose paths
+/// are just host paths.
+pub async fn native_host_read_file(file_path: &str, max_bytes: u64) -> Result<SandboxReadResult> {
+    let meta = match tokio::fs::metadata(file_path).await {
+        Ok(meta) => meta,
+        Err(error) => return Ok(map_io_error_to_read_result(&error)),
+    };
+
+    if !meta.is_file() {
+        return Ok(SandboxReadResult::NotRegularFile);
+    }
+    if meta.len() > max_bytes {
+        return Ok(SandboxReadResult::TooLarge(meta.len()));
+    }
+
+    let bytes = match tokio::fs::read(file_path).await {
+        Ok(bytes) => bytes,
+        Err(error) => return Ok(map_io_error_to_read_result(&error)),
+    };
+    if bytes.len() as u64 > max_bytes {
+        return Ok(SandboxReadResult::TooLarge(bytes.len() as u64));
+    }
+    Ok(SandboxReadResult::Ok(bytes))
+}
+
+/// Native host-backed write implementation for sandbox backends whose paths
+/// are just host paths.
+pub async fn native_host_write_file(file_path: &str, content: &[u8]) -> Result<Option<Value>> {
+    let path = PathBuf::from(file_path);
+    let parent = path.parent().ok_or_else(|| {
+        Error::message(format!(
+            "cannot resolve parent of '{file_path}': directory does not exist on host"
+        ))
+    })?;
+    match tokio::fs::metadata(parent).await {
+        Ok(metadata) if metadata.is_dir() => {},
+        Ok(_) => {
+            return Err(Error::message(format!(
+                "cannot resolve parent of '{file_path}': parent is not a directory on host"
+            )));
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::message(format!(
+                "cannot resolve parent of '{file_path}': directory does not exist on host"
+            )));
+        },
+        Err(error) => {
+            return Err(Error::message(format!(
+                "failed to inspect parent of '{file_path}': {error}"
+            )));
+        },
+    }
+    if is_symlink(&path).await? {
+        return Ok(Some(json!({
+            "kind": "path_denied",
+            "file_path": file_path,
+            "error": "target is a symbolic link; refusing to follow",
+            "detail": "native host write rejects symlinks",
+        })));
+    }
+
+    let bytes = content.to_vec();
+    let path_for_blocking = path.clone();
+    let parent_for_blocking = parent.to_path_buf();
+    let outcome = tokio::task::spawn_blocking(move || -> Result<NativeHostWriteOutcome> {
+        let mut tmp = tempfile::NamedTempFile::new_in(&parent_for_blocking).map_err(|error| {
+            Error::message(format!(
+                "failed to create temp file in '{}': {error}",
+                parent_for_blocking.display()
+            ))
+        })?;
+        tmp.write_all(&bytes)
+            .map_err(|error| Error::message(format!("failed to write temp file: {error}")))?;
+        tmp.as_file()
+            .sync_all()
+            .map_err(|error| Error::message(format!("failed to fsync temp file: {error}")))?;
+        if std::fs::symlink_metadata(&path_for_blocking)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Ok(NativeHostWriteOutcome::SymlinkDenied);
+        }
+        tmp.persist(&path_for_blocking).map_err(|error| {
+            Error::message(format!(
+                "failed to persist file '{}': {error}",
+                path_for_blocking.display()
+            ))
+        })?;
+        Ok(NativeHostWriteOutcome::Written)
+    })
+    .await
+    .map_err(|error| Error::message(format!("blocking write task failed: {error}")))??;
+
+    match outcome {
+        NativeHostWriteOutcome::Written => Ok(None),
+        NativeHostWriteOutcome::SymlinkDenied => Ok(Some(json!({
+            "kind": "path_denied",
+            "file_path": file_path,
+            "error": "target is a symbolic link; refusing to follow",
+            "detail": "native host write rejects symlinks",
+        }))),
+    }
+}
+
+/// Native host-backed file listing implementation for sandbox backends whose
+/// paths are just host paths.
+pub async fn native_host_list_files(root: &str) -> Result<Vec<String>> {
+    let root = PathBuf::from(root);
+    tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+        match std::fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Vec::new()),
+            Ok(metadata) if metadata.is_file() => return Ok(vec![root.display().to_string()]),
+            Ok(_) => {},
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(Error::message(format!(
+                    "sandbox list_files '{}' failed: {error}",
+                    root.display()
+                )));
+            },
+        }
+
+        let mut stack = vec![root];
+        let mut files = Vec::new();
+
+        while let Some(dir) = stack.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        continue;
+                    }
+                    return Err(Error::message(format!(
+                        "sandbox list_files '{}' failed: {error}",
+                        dir.display()
+                    )));
+                },
+            };
+
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    Error::message(format!(
+                        "sandbox list_files '{}' failed: {error}",
+                        dir.display()
+                    ))
+                })?;
+                let path = entry.path();
+                let file_type = entry.file_type().map_err(|error| {
+                    Error::message(format!(
+                        "sandbox list_files '{}' failed: {error}",
+                        path.display()
+                    ))
+                })?;
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
+                    stack.push(path);
+                } else if file_type.is_file() {
+                    files.push(path.display().to_string());
+                }
+            }
+        }
+
+        files.sort();
+        Ok(files)
+    })
+    .await
+    .map_err(|error| Error::message(format!("blocking list_files task failed: {error}")))?
+}
+
+fn map_io_error_to_read_result(error: &io::Error) -> SandboxReadResult {
+    match error.kind() {
+        io::ErrorKind::NotFound => SandboxReadResult::NotFound,
+        io::ErrorKind::PermissionDenied => SandboxReadResult::PermissionDenied,
+        _ => SandboxReadResult::NotRegularFile,
+    }
+}
+
+async fn is_symlink(path: &Path) -> Result<bool> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) => Ok(meta.file_type().is_symlink()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Error::message(format!(
+            "failed to inspect '{}': {error}",
+            path.display()
+        ))),
+    }
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]

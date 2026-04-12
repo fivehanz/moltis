@@ -16,6 +16,7 @@ use {
     crate::{
         error::{Error, Result},
         exec::{ExecOpts, ExecResult},
+        sandbox::file_system::SandboxReadResult,
     },
 };
 
@@ -648,6 +649,97 @@ async fn test_no_sandbox_exec() {
     let result = sandbox.exec(&id, "echo sandbox-test", &opts).await.unwrap();
     assert_eq!(result.stdout.trim(), "sandbox-test");
     assert_eq!(result.exit_code, 0);
+}
+
+#[tokio::test]
+async fn test_no_sandbox_read_file_native() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("note.txt");
+    std::fs::write(&file, "native read").unwrap();
+
+    let sandbox = NoSandbox;
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "test-read".into(),
+    };
+
+    let result = sandbox
+        .read_file(&id, &file.display().to_string(), 1024)
+        .await
+        .unwrap();
+    match result {
+        SandboxReadResult::Ok(bytes) => assert_eq!(bytes, b"native read"),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_no_sandbox_write_file_native() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("note.txt");
+
+    let sandbox = NoSandbox;
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "test-write".into(),
+    };
+
+    let result = sandbox
+        .write_file(&id, &file.display().to_string(), b"native write")
+        .await
+        .unwrap();
+    assert!(result.is_none());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "native write");
+}
+
+#[tokio::test]
+async fn test_no_sandbox_list_files_native() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let first = dir.path().join("a.txt");
+    let second = nested.join("b.txt");
+    std::fs::write(&first, "a").unwrap();
+    std::fs::write(&second, "b").unwrap();
+
+    let sandbox = NoSandbox;
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "test-list".into(),
+    };
+
+    let files = sandbox
+        .list_files(&id, &dir.path().display().to_string())
+        .await
+        .unwrap();
+    assert_eq!(files, vec![
+        first.display().to_string(),
+        second.display().to_string(),
+    ]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_no_sandbox_write_file_rejects_symlink_native() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.txt");
+    let link = dir.path().join("link.txt");
+    std::fs::write(&real, "original").unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let sandbox = NoSandbox;
+    let id = SandboxId {
+        scope: SandboxScope::Session,
+        key: "test-symlink".into(),
+    };
+
+    let result = sandbox
+        .write_file(&id, &link.display().to_string(), b"nope")
+        .await
+        .unwrap();
+    let payload = result.expect("expected typed payload");
+    assert_eq!(payload["kind"], "path_denied");
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "original");
 }
 
 #[test]
@@ -1990,6 +2082,97 @@ mod restricted_host_tests {
             .unwrap();
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout.trim(), "hello");
+    }
+
+    #[tokio::test]
+    async fn test_restricted_host_sandbox_read_file_native() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.txt");
+        std::fs::write(&file, "restricted read").unwrap();
+
+        let sandbox = RestrictedHostSandbox::new(SandboxConfig::default());
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "test-rh-read".into(),
+        };
+
+        let result = sandbox
+            .read_file(&id, &file.display().to_string(), 1024)
+            .await
+            .unwrap();
+        match result {
+            SandboxReadResult::Ok(bytes) => assert_eq!(bytes, b"restricted read"),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_restricted_host_sandbox_write_file_native() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.txt");
+
+        let sandbox = RestrictedHostSandbox::new(SandboxConfig::default());
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "test-rh-write".into(),
+        };
+
+        let result = sandbox
+            .write_file(&id, &file.display().to_string(), b"restricted write")
+            .await
+            .unwrap();
+        assert!(result.is_none());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "restricted write");
+    }
+
+    #[tokio::test]
+    async fn test_restricted_host_sandbox_list_files_native() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let first = dir.path().join("a.txt");
+        let second = nested.join("b.txt");
+        std::fs::write(&first, "a").unwrap();
+        std::fs::write(&second, "b").unwrap();
+
+        let sandbox = RestrictedHostSandbox::new(SandboxConfig::default());
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "test-rh-list".into(),
+        };
+
+        let files = sandbox
+            .list_files(&id, &dir.path().display().to_string())
+            .await
+            .unwrap();
+        assert_eq!(files, vec![
+            first.display().to_string(),
+            second.display().to_string(),
+        ]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_restricted_host_sandbox_write_rejects_symlink_native() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        std::fs::write(&real, "original").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let sandbox = RestrictedHostSandbox::new(SandboxConfig::default());
+        let id = SandboxId {
+            scope: SandboxScope::Session,
+            key: "test-rh-symlink".into(),
+        };
+
+        let result = sandbox
+            .write_file(&id, &link.display().to_string(), b"nope")
+            .await
+            .unwrap();
+        let payload = result.expect("expected typed payload");
+        assert_eq!(payload["kind"], "path_denied");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "original");
     }
 
     #[tokio::test]
