@@ -1638,10 +1638,12 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .await
                     .map_err(ChannelError::unavailable)?;
 
+                use crate::approval::{MAX_COMMAND_PREVIEW_LEN, truncate_command_preview};
+                let preview = truncate_command_preview(&request.command, MAX_COMMAND_PREVIEW_LEN);
                 if cmd == "approve" {
-                    Ok(format!("Approved: `{}`", request.command))
+                    Ok(format!("Approved: `{preview}`"))
                 } else {
-                    Ok(format!("Denied: `{}`", request.command))
+                    Ok(format!("Denied: `{preview}`"))
                 }
             },
             "agent" => {
