@@ -31,20 +31,9 @@ use crate::{
 // Re-export core node execution types from the dedicated crate.
 pub use moltis_node_exec_types::{
     BLOCKED_ENV_PREFIXES, NodeExecResult, SAFE_ENV_ALLOWLIST, SAFE_ENV_PREFIX_ALLOWLIST,
-    SSH_ID_PREFIX, SSH_TARGET_ID_PREFIX,
+    SSH_ID_PREFIX, SSH_TARGET_ID_PREFIX, filter_env, is_safe_env, is_valid_env_key, ssh_node_id,
+    ssh_stored_node_id, ssh_target_matches,
 };
-
-pub(crate) fn ssh_node_id(target: &str) -> String {
-    format!("{SSH_ID_PREFIX}{target}")
-}
-
-fn ssh_stored_node_id(id: i64) -> String {
-    format!("{SSH_TARGET_ID_PREFIX}{id}")
-}
-
-pub(crate) fn ssh_target_matches(node_ref: &str, target: &str) -> bool {
-    node_ref == "ssh" || node_ref == target || node_ref.strip_prefix(SSH_ID_PREFIX) == Some(target)
-}
 
 pub(crate) fn ssh_node_info(target: &str) -> moltis_tools::nodes::NodeInfo {
     moltis_tools::nodes::NodeInfo {
@@ -509,43 +498,6 @@ fn ssh_destination_args(target: &str, remote_command: String) -> [String; 3] {
 fn ssh_config_quote_path(path: &Path) -> String {
     let value = path.to_string_lossy();
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-/// Filter environment variables to the safe allowlist.
-fn filter_env(env: &HashMap<String, String>) -> HashMap<String, String> {
-    env.iter()
-        .filter(|(key, _)| is_safe_env(key) && is_valid_env_key(key))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
-
-fn is_safe_env(key: &str) -> bool {
-    // Block dangerous prefixes first.
-    for prefix in BLOCKED_ENV_PREFIXES {
-        if key.starts_with(prefix) {
-            return false;
-        }
-    }
-
-    // Allow exact matches.
-    if SAFE_ENV_ALLOWLIST.contains(&key) {
-        return true;
-    }
-
-    // Allow prefix matches.
-    for prefix in SAFE_ENV_PREFIX_ALLOWLIST {
-        if key.starts_with(prefix) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn is_valid_env_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn parse_exec_result(value: &serde_json::Value) -> anyhow::Result<NodeExecResult> {
