@@ -1,6 +1,9 @@
 //! Nostr channel plugin — lifecycle, registration, and OTP provider.
 
-use std::{collections::HashMap, sync::Arc};
+use {
+    std::{collections::HashMap, sync::Arc},
+    tokio::sync::RwLock as TokioRwLock,
+};
 
 use {
     async_trait::async_trait,
@@ -12,7 +15,6 @@ use {
     nostr_sdk::prelude::*,
     secrecy::ExposeSecret,
     serde_json::Value,
-    tokio::sync::RwLock,
     tokio_util::sync::CancellationToken,
 };
 
@@ -42,7 +44,7 @@ pub struct NostrPlugin {
 
 impl NostrPlugin {
     pub fn new() -> Self {
-        let accounts: AccountStateMap = Arc::new(RwLock::new(HashMap::new()));
+        let accounts: AccountStateMap = Arc::new(std::sync::RwLock::new(HashMap::new()));
         Self {
             outbound: NostrOutbound {
                 accounts: Arc::clone(&accounts),
@@ -65,7 +67,7 @@ impl NostrPlugin {
 
     /// List pending OTP challenges for a specific account.
     fn otp_challenges(&self, account_id: &str) -> Vec<OtpChallengeInfo> {
-        let accounts = self.accounts.blocking_read();
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts
             .get(account_id)
             .map(|state| {
@@ -149,11 +151,11 @@ impl ChannelPlugin for NostrPlugin {
         // Pre-parse allowlist and create shared config — the bus loop and
         // update_account_config both use this same Arc so policy changes
         // take effect immediately.
-        let cached_allowlist = Arc::new(RwLock::new(keys::normalize_pubkeys(
+        let cached_allowlist = Arc::new(TokioRwLock::new(keys::normalize_pubkeys(
             &nostr_config.allowed_pubkeys,
         )));
         let otp_cooldown = nostr_config.otp_cooldown_secs;
-        let shared_config = Arc::new(RwLock::new(nostr_config));
+        let shared_config = Arc::new(TokioRwLock::new(nostr_config));
         let shared_otp = Arc::new(std::sync::Mutex::new(moltis_channels::otp::OtpState::new(
             otp_cooldown,
         )));
@@ -193,23 +195,37 @@ impl ChannelPlugin for NostrPlugin {
 
         self.accounts
             .write()
-            .await
+            .unwrap_or_else(|e| e.into_inner())
             .insert(account_id.to_string(), state);
 
         #[cfg(feature = "metrics")]
-        gauge!(nostr_metrics::ACTIVE_ACCOUNTS).set(self.accounts.read().await.len() as f64);
+        gauge!(nostr_metrics::ACTIVE_ACCOUNTS).set(
+            self.accounts
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len() as f64,
+        );
 
         tracing::info!(account_id, "Nostr account started");
         Ok(())
     }
 
     async fn stop_account(&mut self, account_id: &str) -> ChannelResult<()> {
-        let state = self.accounts.write().await.remove(account_id);
+        let state = self
+            .accounts
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(account_id);
         if let Some(state) = state {
             state.cancel.cancel();
             state.client.disconnect().await;
             #[cfg(feature = "metrics")]
-            gauge!(nostr_metrics::ACTIVE_ACCOUNTS).set(self.accounts.read().await.len() as f64);
+            gauge!(nostr_metrics::ACTIVE_ACCOUNTS).set(
+                self.accounts
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .len() as f64,
+            );
             tracing::info!(account_id, "Nostr account stopped");
         }
         Ok(())
@@ -224,15 +240,23 @@ impl ChannelPlugin for NostrPlugin {
     }
 
     fn has_account(&self, account_id: &str) -> bool {
-        self.accounts.blocking_read().contains_key(account_id)
+        self.accounts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(account_id)
     }
 
     fn account_ids(&self) -> Vec<String> {
-        self.accounts.blocking_read().keys().cloned().collect()
+        self.accounts
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn account_config(&self, account_id: &str) -> Option<Box<dyn ChannelConfigView>> {
-        let accounts = self.accounts.blocking_read();
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts.get(account_id).map(|s| {
             let cfg = s.config.blocking_read();
             Box::new(cfg.clone()) as Box<dyn ChannelConfigView>
@@ -240,7 +264,7 @@ impl ChannelPlugin for NostrPlugin {
     }
 
     fn account_config_json(&self, account_id: &str) -> Option<Value> {
-        let accounts = self.accounts.blocking_read();
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         accounts.get(account_id).and_then(|s| {
             let cfg = s.config.blocking_read();
             serde_json::to_value(crate::config::RedactedConfig(&cfg)).ok()
@@ -252,7 +276,7 @@ impl ChannelPlugin for NostrPlugin {
             moltis_channels::Error::invalid_input(format!("invalid nostr config: {e}"))
         })?;
 
-        let accounts = self.accounts.blocking_read();
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         if let Some(state) = accounts.get(account_id) {
             // Merge guard: if the incoming secret_key is the redacted sentinel,
             // preserve the existing key instead of corrupting it.
@@ -292,23 +316,28 @@ impl ChannelPlugin for NostrPlugin {
 #[async_trait]
 impl ChannelStatus for NostrPlugin {
     async fn probe(&self, account_id: &str) -> ChannelResult<ChannelHealthSnapshot> {
-        let accounts = self.accounts.read().await;
-        let state = accounts.get(account_id);
+        // Clone client + keys out of the std RwLock guard before any .await
+        // (std guards are not Send).
+        let snapshot = {
+            let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
+            accounts
+                .get(account_id)
+                .map(|s| (s.client.clone(), s.keys.clone()))
+        };
 
-        match state {
-            Some(state) => {
-                let relays = state.client.relays().await;
+        match snapshot {
+            Some((client, keys)) => {
+                let relays = client.relays().await;
                 let connected_count = relays
                     .values()
                     .filter(|r| r.status() == RelayStatus::Connected)
                     .count();
                 let total = relays.len();
 
-                let npub = state
-                    .keys
+                let npub = keys
                     .public_key()
                     .to_bech32()
-                    .unwrap_or_else(|_| state.keys.public_key().to_hex());
+                    .unwrap_or_else(|_| keys.public_key().to_hex());
                 Ok(ChannelHealthSnapshot {
                     connected: connected_count > 0,
                     account_id: account_id.to_string(),

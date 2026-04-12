@@ -3,7 +3,10 @@
 //! Implements `ChannelOutbound` and `ChannelStreamOutbound` — encrypts text
 //! with NIP-04 and publishes to connected relays.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 
 use {
     async_trait::async_trait,
@@ -13,7 +16,6 @@ use {
     },
     moltis_common::types::ReplyPayload,
     nostr_sdk::prelude::*,
-    tokio::sync::RwLock,
 };
 
 use crate::state::AccountState;
@@ -22,6 +24,10 @@ use crate::state::AccountState;
 use moltis_metrics::{counter, histogram, nostr as nostr_metrics};
 
 /// Shared account state map type.
+///
+/// Uses `std::sync::RwLock` (not `tokio::sync::RwLock`) so that sync
+/// `ChannelPlugin` trait methods (`has_account`, `account_ids`, etc.) can
+/// read from it without panicking inside a tokio runtime.
 pub type AccountStateMap = Arc<RwLock<HashMap<String, AccountState>>>;
 
 /// Nostr outbound adapter.
@@ -36,7 +42,7 @@ impl NostrOutbound {
         account_id: &str,
         to: &str,
     ) -> ChannelResult<(Client, Keys, PublicKey)> {
-        let accounts = self.accounts.read().await;
+        let accounts = self.accounts.read().unwrap_or_else(|e| e.into_inner());
         let state = accounts.get(account_id).ok_or_else(|| {
             moltis_channels::Error::unavailable(format!("nostr account not found: {account_id}"))
         })?;
