@@ -3797,7 +3797,8 @@ enabled = true
     fn terminal_enabled_defaults_to_true() {
         let cfg: MoltisConfig = toml::from_str("").unwrap();
         assert!(cfg.server.terminal_enabled);
-        assert!(cfg.server.is_terminal_enabled());
+        // Note: is_terminal_enabled() is NOT tested here because it reads
+        // the MOLTIS_TERMINAL_DISABLED env var, which may be set in CI.
     }
 
     #[test]
