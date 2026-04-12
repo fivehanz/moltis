@@ -19,6 +19,169 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260412.01] - 2026-04-12
+### Added
+- [discord] Handle inbound voice and image attachments
+- [hooks] Include channel provenance in payloads
+- [web] Add Projects section to Settings sidebar navigation
+- [tools] Native filesystem tools (Read, Write, Edit, MultiEdit, Glob, Grep)
+- [tools] Typed error taxonomy for Read (not_found / permission_denied / too_large / not_regular_file)
+- [tools] Phase 1 polish (byte cap, session key, fs-tools feature, contract tests)
+- [tools] CRLF-tolerant Edit recovery for fs tools
+- [tools] Per-session FsState with must-read-before-write + re-read loop detection
+- [tools] [tools.fs] config + path allow/deny policy (phase 4)
+- [tools] Checkpoint_before_mutation + binary base64 + respect_gitignore + docs page
+- [tools] Phase 2 sandbox bridge for Read/Write/Edit/MultiEdit/Glob
+- [tools] Phase 2b — Grep sandbox routing
+- [tools] Phase 3c — adaptive Read paging coupled to context window
+- [chat] Deterministic compaction with budget discipline
+- [chat] Pluggable compaction modes with config + docs
+- [chat] Implement recency_preserving compaction mode
+- [chat] Implement structured compaction mode
+- [chat] Surface mode + token usage in compaction broadcasts
+- [chat,web] Surface compaction mode + tokens in UI and channels
+- [compaction] Add chat.compaction.show_settings_hint opt-out
+- [tools] Claude Code compat — BOM strip, binary extensions, smart quotes, mtime tracking
+- [tools] PDF text extraction in Read tool
+- [tools] Image dispatch in Read + Grep context alias + Edit param aliases
+- [memory] Add prompt memory styles
+- [memory] Extend config surfaces
+- [provider-setup] Remove automatic model probe, add manual Test button
+- [tools] Auto-page reads and serialize fs mutations
+- [tools] Expose read continuation offsets
+- [tools] Surface sandbox scan truncation
+- [tools] Wire layered tool policy into runtime with per-provider, per-agent, per-channel, and per-sender support
+- [tools] Add sandbox tools_policy as layer 6 in policy resolution
+- [channels] Add Nostr DM channel support
+- [channels] Add Nostr web UI, E2E tests, and documentation
+- [channels] Add Nostr to onboarding flow
+- [nostr] Add metrics, NIP-44 decryption, and integration tests
+- [website] Add slack, matrix, and nostr channels
+- [website] Add Nostr channel SVG icon
+- [chat] Add summary budget discipline for compaction
+- [website] Add community quote from discussion #680 and make quotes horizontally scrollable
+- [web] Add option to disable terminal in Web UI
+- [auth] Add brute-force protection with IP ban and account lockout
+
+
+### Changed
+- [chat] Align multimodal rewrite updates
+- [telegram] Extract STT setup hint constant
+- [discord] Reuse inbound downloader per handler
+- [chat] Simplify deterministic compaction module
+- [chat] Split compaction_run into per-strategy submodules
+- [tools] Use ripgrep crates for fs grep
+- [tools] Split read.rs into read/ module with pdf.rs and image.rs
+- [tools] Centralize sandbox filesystem access
+- [media] Sniff mime and expose sandbox file ops
+- [tools] Add native host sandbox file ops
+- [tools] Add container-aware fs transports
+- [tools] Stream OCI file transfers
+- [tools] Stream OCI reads from cp
+
+
+### Fixed
+- [agents] Dispatch ToolResultPersist hooks
+- [agents] Sanitize ToolResultPersist tool names
+- [agents] Handle Z.AI text tool calls and dedupe providers
+- [gateway] Address PR comment follow-ups
+- [hooks] Honor MessageReceived actions
+- [chat] Harden MessageReceived hook handling
+- [telegram] Avoid placeholder voice fallbacks
+- [telegram] Preserve caption when STT unavailable
+- [discord] Address review feedback
+- [discord] Log stt-unavailable voice notes
+- [common] Block mapped ipv6 ssrf bypass
+- [hooks] Address review feedback
+- [chat] Warn on invalid channel bindings
+- [hooks] Address remaining provenance feedback
+- [agents] Warn on invalid hook channel context
+- [plugins] Refresh hook docs and logger timestamps
+- [common] Update message received fixtures
+- [web] Store container ref in teardownProjects, remove unused settings_projects route
+- [tools] Fs tools require absolute paths, add workspace_root for Glob/Grep
+- [agents] Warn on tool name collision in ToolRegistry::register*
+- [compaction] Address code review issues #1-7
+- [compaction] Address Greptile PR #653 review comments
+- [chat] Correct recent_messages_preserved flag in compaction
+- [compaction] Strip preamble and directive from re-compaction extraction
+- [compaction] Invert candidate order so bullets outlive plain lines
+- [compaction] Protect summary tags from budget-pressure dropping
+- [compaction] Address PR #653 review findings
+- [chat] Memory-file summary lookup across all compaction modes
+- [compaction] Extract_summary_body picks newest summary on iterative re-compaction
+- [chat] Wire chat.compaction.threshold_percent into auto-compact trigger
+- [compaction] Address Greptile round-2 review on #653 (P1 + P2)
+- [web] Track compacting status message per-session to avoid removing compact card
+- [compaction] Restore 0.95 default threshold + remove dead code
+- [chat] Close compact/store race and tag auto_compact broadcast paths
+- [compaction] Address Greptile round-5 P2 findings on #653
+- [tools] Enforce exec allowlist when approval_mode is off
+- [tools] Deny dangerous commands in off mode instead of hanging
+- [tools] Warn when safe-bin bypasses explicit allowlist in off mode
+- [config] List tools.policy.profile in preset silent-policy warning
+- [tools] Address filesystem review comments
+- [tools] Address Greptile round-2 findings (max_read_bytes wiring, sandbox note_fs_mutation, truncated semantics)
+- [tools] Address Greptile round-3 findings (Grep policy, must-read sandbox, Glob root deny)
+- [tools] Address Greptile round-4 findings (binary read tracking, sandbox Write new-file)
+- [tools] Sandbox Grep post-filters results through path policy
+- [tools] PDF/image dispatch now enforces path policy, sandbox guard, and FsState recording
+- [memory] Tighten qmd and rpc validation
+- [chat] Honor [skills] enabled=false at runtime
+- [chat] Replace test Mutex<()> with Semaphore
+- [chat] Reuse existing config in context skill discovery
+- [httpd] Redirect remote setup traffic to onboarding wizard
+- [agents] Detect and break tool-call reflex loops (#658)
+- [agents] Address Greptile review feedback on #658
+- [agents] Loop detector handles mixed-outcome batches correctly (#658)
+- [agents] Treat success=false without error field as failure (#658)
+- [e2e] Wait for Preact render flush in matrix senders test
+- [web] Show Clear button for main session in modal
+- [memory] Add missing runtime module
+- [web] Remove unused VALIDATION_HINT_RUNNING_TEXT, clear stale test results
+- [gateway] Unify config-override test lock to prevent flaky test
+- [tools] Smart-quote recovery preserves file content + sandbox grep uses PCRE
+- [tools] Scope tar helper to tests
+- [tools] Preserve loop warnings for auto-paged reads
+- [chat] Populate sender_id in channel binding and runtime context
+- [chat] Read sandbox state from runtime context in PolicyContext
+- [agents] Add missing channel_sender_id field in test
+- [tools] Use struct init instead of field reassign in test
+- [tools] Expand profile field in provider, sender, and sandbox policy layers
+- [httpd] Start stored channels on vault unseal
+- [httpd] Add missing continue in unsupported channel type guard
+- [config] Revert unintended matrix named field promotion
+- [nostr] Fix integration test DM round-trip reliability
+- [nostr] Prevent panic on UTF-8 boundary when truncating large DMs
+- [website] Use official Nostr protocol logo (CC0, mbarulli/nostr-logo)
+- [web] Preserve Nostr OTP settings on edit modal save
+- [nostr] Resolve clippy collapsible_match and len_without_is_empty
+- [nostr] Implement OTP challenge initiation and DM delivery
+- [nostr] Implement OTP verification path for code replies
+- [nostr] Use std::sync::RwLock for accounts map to avoid blocking panic
+- [web] Remove channel-error class from conditionally-rendered error divs
+- [chat] Correct budget accounting bugs in compress_summary
+- [chat] Address greptile review feedback (greploop iteration 1)
+- [channels] Finish discussion 425 follow-ups
+- [channels] Address review feedback
+- [channels] Harden channel command authorization and session scoping
+- [gateway] Truncate approval previews safely
+- [channels] Chunk unicode safely
+- [chat] Isolate sqlite memory tests
+- [web] Stabilize mocked channel refresh
+- [channels] Address greptile review feedback
+- [channels] Truncate command in approve/deny confirmation messages
+- [auth] Second-pass security hardening
+- [web] Address PR review comments
+- [config] Preserve TOML section order on web UI save
+- Apply local fixes
+
+
+### Security
+- [config] Warn when preset tool policies are set but tools.policy is empty
+- [nostr] Address PR review comments
+- [auth] Harden remote access with 9 security improvements
+
 ## [20260410.01] - 2026-04-10
 ### Added
 - [oauth] Log loopback redirect URI rewrites at debug level
