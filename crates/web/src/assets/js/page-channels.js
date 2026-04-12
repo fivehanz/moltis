@@ -1936,7 +1936,10 @@ function EditChannelModal() {
 		} else if (isNostr) {
 			config.secret_key = editCredential.value || cfg.secret_key || "";
 			var relaysVal = form.querySelector("[data-field=relays]")?.value || "";
-			config.relays = relaysVal.split(",").map((r) => r.trim()).filter(Boolean);
+			config.relays = relaysVal
+				.split(",")
+				.map((r) => r.trim())
+				.filter(Boolean);
 		} else if (isMatrix) {
 			config.homeserver = form.querySelector("[data-field=homeserver]")?.value || cfg.homeserver || "";
 			config.user_id = form.querySelector("[data-field=userId]")?.value || cfg.user_id || "";
