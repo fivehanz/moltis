@@ -327,6 +327,9 @@ pub async fn handle_room_message(
         username: Some(sender_id.clone()),
         message_kind: Some(kind),
         model: config.resolve_model(&room_id, &sender_id).map(String::from),
+        agent_id: config
+            .resolve_agent_id(&room_id, &sender_id)
+            .map(String::from),
         audio_filename: None,
     };
 

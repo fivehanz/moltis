@@ -16,6 +16,7 @@ use {
     moltis_channels::{
         ChannelAttachment, ChannelEvent, ChannelMessageKind, ChannelMessageMeta, ChannelOutbound,
         ChannelReplyTarget, ChannelType,
+        config_view::ChannelConfigView,
         message_log::MessageLogEntry,
         otp::{approve_sender_via_otp, emit_otp_challenge, emit_otp_resolution},
     },
@@ -658,7 +659,7 @@ pub async fn handle_message_direct(
                 }
 
                 let response = if cmd == "help" {
-                    "Available commands:\n/new — Start a new session\n/sessions — List and switch sessions\n/agent — Switch session agent\n/model — Switch provider/model\n/sandbox — Toggle sandbox and choose image\n/sh — Enable command mode (/sh off to exit)\n/clear — Clear session history\n/compact — Compact session (summarize)\n/context — Show session context info\n/help — Show this help".to_string()
+                    "Available commands:\n/new — Start a new session\n/sessions — List and switch this chat's sessions\n/attach — Attach an existing session to this chat\n/approvals — List pending exec approvals for this session\n/approve N — Approve a pending exec request\n/deny N — Deny a pending exec request\n/agent — Switch session agent\n/model — Switch provider/model\n/sandbox — Toggle sandbox and choose image\n/sh — Enable command mode (/sh off to exit)\n/clear — Clear session history\n/compact — Compact session (summarize)\n/context — Show session context info\n/help — Show this help".to_string()
                 } else {
                     match sink.dispatch_command(cmd_text, reply_target.clone()).await {
                         Ok(msg) => msg,
@@ -695,7 +696,12 @@ pub async fn handle_message_direct(
             sender_name: sender_name.clone(),
             username: username.clone(),
             message_kind: message_kind(&msg),
-            model: config.model.clone(),
+            model: config
+                .resolve_model(&msg.chat.id.0.to_string(), &peer_id)
+                .map(String::from),
+            agent_id: config
+                .resolve_agent_id(&msg.chat.id.0.to_string(), &peer_id)
+                .map(String::from),
             audio_filename,
         };
 
@@ -715,8 +721,8 @@ pub async fn handle_message_direct(
 
 fn should_intercept_slash_command(cmd: &str, cmd_text: &str) -> bool {
     match cmd {
-        "new" | "clear" | "compact" | "context" | "model" | "sandbox" | "sessions" | "agent"
-        | "help" => true,
+        "new" | "clear" | "compact" | "context" | "model" | "sandbox" | "sessions" | "attach"
+        | "approvals" | "approve" | "deny" | "agent" | "help" => true,
         "sh" => {
             let args = cmd_text.strip_prefix(cmd).unwrap_or("").trim();
             args.is_empty() || matches!(args, "on" | "off" | "exit" | "status")

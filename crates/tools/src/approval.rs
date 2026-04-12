@@ -239,7 +239,18 @@ pub fn matches_allowlist(command: &str, allowlist: &[String]) -> bool {
 
 /// Pending approval request waiting for gateway resolution.
 struct PendingApproval {
+    command: String,
+    session_key: Option<String>,
     tx: oneshot::Sender<ApprovalDecision>,
+}
+
+/// Serializable summary of a pending approval request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingApprovalView {
+    pub id: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
 }
 
 /// The approval manager handles approval flow for exec commands.
@@ -354,14 +365,19 @@ impl ApprovalManager {
     pub async fn create_request(
         &self,
         command: &str,
+        session_key: Option<&str>,
     ) -> (String, oneshot::Receiver<ApprovalDecision>) {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         self.pending
             .write()
             .await
-            .insert(id.clone(), PendingApproval { tx });
-        debug!(id = %id, command, "approval request created");
+            .insert(id.clone(), PendingApproval {
+                command: command.to_string(),
+                session_key: session_key.map(str::to_string),
+                tx,
+            });
+        debug!(id = %id, command, session_key, "approval request created");
         (id, rx)
     }
 
@@ -382,7 +398,38 @@ impl ApprovalManager {
 
     /// Return the IDs of all pending approval requests.
     pub async fn pending_ids(&self) -> Vec<String> {
-        self.pending.read().await.keys().cloned().collect()
+        let mut ids: Vec<_> = self.pending.read().await.keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Return summaries of all pending approval requests.
+    pub async fn pending_requests(&self) -> Vec<PendingApprovalView> {
+        let mut requests: Vec<_> = self
+            .pending
+            .read()
+            .await
+            .iter()
+            .map(|(id, pending)| PendingApprovalView {
+                id: id.clone(),
+                command: pending.command.clone(),
+                session_key: pending.session_key.clone(),
+            })
+            .collect();
+        requests.sort_by(|left, right| left.id.cmp(&right.id));
+        requests
+    }
+
+    /// Return summaries of pending approval requests scoped to a session.
+    pub async fn pending_requests_for_session(
+        &self,
+        session_key: &str,
+    ) -> Vec<PendingApprovalView> {
+        self.pending_requests()
+            .await
+            .into_iter()
+            .filter(|request| request.session_key.as_deref() == Some(session_key))
+            .collect()
     }
 
     /// Wait for an approval decision with timeout.
@@ -771,5 +818,21 @@ mod tests {
         };
         let action = mgr.check_command("git reset --hard").await.unwrap();
         assert_eq!(action, ApprovalAction::NeedsApproval);
+    }
+
+    #[tokio::test]
+    async fn test_pending_requests_for_session_filters_other_sessions() {
+        let mgr = ApprovalManager::default();
+        let _ = mgr.create_request("echo one", Some("session:a")).await;
+        let _ = mgr.create_request("echo two", Some("session:b")).await;
+        let _ = mgr.create_request("echo three", Some("session:a")).await;
+
+        let pending = mgr.pending_requests_for_session("session:a").await;
+        assert_eq!(pending.len(), 2);
+        assert!(
+            pending
+                .iter()
+                .all(|request| request.session_key.as_deref() == Some("session:a"))
+        );
     }
 }

@@ -782,10 +782,16 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # [channels.whatsapp.my-bot]
 # dm_policy = "open"              # "open", "allowlist", or "disabled"
 # group_policy = "disabled"       # "open", "allowlist", or "disabled"
+# mention_mode = "always"         # "always", "mention", or "none"
 # model = "anthropic/claude-sonnet-4-20250514"
 # model_provider = "anthropic"
+# agent_id = "support"            # Default agent for this account
 # otp_self_approval = true        # OTP self-approval for non-allowlisted DM users
 # otp_cooldown_secs = 300         # Cooldown after 3 failed OTP attempts
+# [channels.whatsapp.my-bot.channel_overrides."120363456789@g.us"]
+# agent_id = "triage"
+# [channels.whatsapp.my-bot.user_overrides."15551234567@s.whatsapp.net"]
+# agent_id = "research"
 
 # Telegram bots
 # [channels.telegram.my-bot]
@@ -796,10 +802,15 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # allowlist = []                  # Telegram user IDs or usernames (strings)
 # group_allowlist = []            # Telegram group/chat IDs (strings)
 # reply_to_message = false        # Send responses as Telegram replies
+# agent_id = "research"           # Default agent for this bot
 # otp_self_approval = true        # OTP self-approval for non-allowlisted DM users
 # otp_cooldown_secs = 300         # Cooldown after 3 failed OTP attempts
 # stream_mode = "edit_in_place"   # "edit_in_place" or "off"
 # edit_throttle_ms = 300          # Min ms between streaming edits
+# [channels.telegram.my-bot.channel_overrides."-1001234567890"]
+# agent_id = "triage"
+# [channels.telegram.my-bot.user_overrides."123456789"]
+# agent_id = "research"
 
 # Microsoft Teams bots
 # [channels.msteams.my-bot]

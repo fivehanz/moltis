@@ -562,6 +562,9 @@ pub(crate) async fn handle_inbound(
             username,
             message_kind: Some(ChannelMessageKind::Text),
             model: config.resolve_model(channel_id, user_id).map(String::from),
+            agent_id: config
+                .resolve_agent_id(channel_id, user_id)
+                .map(String::from),
             audio_filename: None,
         };
 

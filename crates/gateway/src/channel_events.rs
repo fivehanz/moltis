@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, sync::Arc};
 use {
     async_trait::async_trait,
     moltis_tools::image_cache::ImageBuilder,
+    serde::Deserialize,
     tracing::{debug, error, info, warn},
 };
 
@@ -11,7 +12,8 @@ use {
         ChannelAttachment, ChannelEvent, ChannelEventSink, ChannelMessageMeta, ChannelReplyTarget,
         Error as ChannelError, Result as ChannelResult,
     },
-    moltis_sessions::metadata::SqliteSessionMetadata,
+    moltis_sessions::metadata::{SessionEntry, SqliteSessionMetadata},
+    moltis_tools::approval::PendingApprovalView,
 };
 
 use crate::{
@@ -77,6 +79,10 @@ fn is_channel_control_command_name(cmd: &str) -> bool {
             | "model"
             | "sandbox"
             | "sessions"
+            | "attach"
+            | "approvals"
+            | "approve"
+            | "deny"
             | "agent"
             | "help"
             | "sh"
@@ -98,6 +104,158 @@ fn rewrite_for_shell_mode(text: &str) -> Option<String> {
     }
 
     Some(format!("/sh {trimmed}"))
+}
+
+fn parse_numbered_selection(arg: &str, command_name: &str) -> ChannelResult<usize> {
+    arg.parse()
+        .map_err(|_| ChannelError::invalid_input(format!("usage: /{command_name} [number]")))
+}
+
+fn is_attachable_session(entry: &SessionEntry) -> bool {
+    !entry.archived && !entry.key.starts_with("cron:")
+}
+
+fn session_list_label(entry: &SessionEntry) -> &str {
+    entry.label.as_deref().unwrap_or(&entry.key)
+}
+
+fn format_channel_sessions_list(sessions: &[SessionEntry], current_session_key: &str) -> String {
+    let mut lines = Vec::new();
+    for (i, session) in sessions.iter().enumerate() {
+        let marker = if session.key == current_session_key {
+            " *"
+        } else {
+            ""
+        };
+        lines.push(format!(
+            "{}. {} ({} msgs){}",
+            i + 1,
+            session_list_label(session),
+            session.message_count,
+            marker,
+        ));
+    }
+    lines.push("\nUse /sessions N to switch.".to_string());
+    lines.join("\n")
+}
+
+fn format_attachable_sessions_list(sessions: &[SessionEntry], current_session_key: &str) -> String {
+    let mut lines = Vec::new();
+    for (i, session) in sessions.iter().enumerate() {
+        let label = session_list_label(session);
+        let marker = if session.key == current_session_key {
+            " *"
+        } else {
+            ""
+        };
+        let key_suffix = if label == session.key {
+            String::new()
+        } else {
+            format!(" [{}]", session.key)
+        };
+        lines.push(format!(
+            "{}. {}{} ({} msgs){}",
+            i + 1,
+            label,
+            key_suffix,
+            session.message_count,
+            marker,
+        ));
+    }
+    lines.push(
+        "\nUse /attach N to move an existing session to this chat. This rebinds it from any previous channel chat."
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+fn format_pending_approvals_list(requests: &[PendingApprovalView]) -> String {
+    let mut lines = Vec::new();
+    for (i, request) in requests.iter().enumerate() {
+        lines.push(format!("{}. `{}`", i + 1, request.command));
+    }
+    lines.push("\nUse /approve N or /deny N.".to_string());
+    lines.join("\n")
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalListResponse {
+    #[serde(default)]
+    requests: Vec<PendingApprovalView>,
+}
+
+#[derive(Debug, Default)]
+struct ChannelSessionDefaults {
+    model: Option<String>,
+    agent_id: Option<String>,
+}
+
+fn config_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn override_map<'a>(
+    config: &'a serde_json::Value,
+    key: &str,
+    target_id: &str,
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    config
+        .get(key)
+        .and_then(serde_json::Value::as_object)
+        .and_then(|overrides| overrides.get(target_id))
+        .and_then(serde_json::Value::as_object)
+}
+
+async fn resolve_channel_session_defaults(
+    state: &Arc<GatewayState>,
+    reply_to: &ChannelReplyTarget,
+) -> ChannelSessionDefaults {
+    let Ok(status) = state.services.channel.status().await else {
+        return ChannelSessionDefaults::default();
+    };
+    let Some(channel) = status
+        .get("channels")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|channels| {
+            channels.iter().find(|channel| {
+                channel
+                    .get("account_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(reply_to.account_id.as_str())
+                    && channel.get("type").and_then(serde_json::Value::as_str)
+                        == Some(reply_to.channel_type.as_str())
+            })
+        })
+    else {
+        return ChannelSessionDefaults::default();
+    };
+    let Some(config) = channel.get("config") else {
+        return ChannelSessionDefaults::default();
+    };
+
+    let user_override = override_map(config, "user_overrides", &reply_to.chat_id);
+    let channel_override = override_map(config, "channel_overrides", &reply_to.chat_id);
+
+    ChannelSessionDefaults {
+        model: user_override
+            .and_then(|override_value| config_string(override_value.get("model")))
+            .or_else(|| {
+                channel_override
+                    .and_then(|override_value| config_string(override_value.get("model")))
+            })
+            .or_else(|| config_string(config.get("model"))),
+        agent_id: user_override
+            .and_then(|override_value| config_string(override_value.get("agent_id")))
+            .or_else(|| {
+                channel_override
+                    .and_then(|override_value| config_string(override_value.get("agent_id")))
+            })
+            .or_else(|| config_string(config.get("agent_id"))),
+    }
 }
 
 fn start_channel_typing_loop(
@@ -122,6 +280,59 @@ fn start_channel_typing_loop(
     });
 
     Some(done_tx)
+}
+
+async fn resolve_channel_agent_id(
+    state: &Arc<GatewayState>,
+    session_key: &str,
+    requested_agent_id: Option<&str>,
+) -> String {
+    let fallback = if let Some(ref store) = state.services.agent_persona_store {
+        store
+            .default_id()
+            .await
+            .unwrap_or_else(|_| "main".to_string())
+    } else {
+        "main".to_string()
+    };
+
+    let Some(agent_id) = requested_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return fallback;
+    };
+
+    if agent_id == "main" {
+        return "main".to_string();
+    }
+
+    let Some(ref store) = state.services.agent_persona_store else {
+        return agent_id.to_string();
+    };
+
+    match store.get(agent_id).await {
+        Ok(Some(_)) => agent_id.to_string(),
+        Ok(None) => {
+            warn!(
+                session = %session_key,
+                agent_id,
+                fallback = %fallback,
+                "channel requested unknown agent, falling back to default"
+            );
+            fallback
+        },
+        Err(error) => {
+            warn!(
+                session = %session_key,
+                agent_id,
+                fallback = %fallback,
+                %error,
+                "failed to resolve channel agent, falling back to default"
+            );
+            fallback
+        },
+    }
 }
 
 /// Broadcasts channel events over the gateway WebSocket.
@@ -255,15 +466,9 @@ impl ChannelEventSink for GatewayChannelEventSink {
                         .map(str::trim)
                         .is_none_or(|value| value.is_empty())
                 {
-                    let default_agent = if let Some(ref store) = state.services.agent_persona_store
-                    {
-                        store
-                            .default_id()
-                            .await
-                            .unwrap_or_else(|_| "main".to_string())
-                    } else {
-                        "main".to_string()
-                    };
+                    let default_agent =
+                        resolve_channel_agent_id(state, &session_key, meta.agent_id.as_deref())
+                            .await;
                     let _ = session_meta
                         .set_agent_id(&session_key, Some(&default_agent))
                         .await;
@@ -822,14 +1027,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .map(str::trim)
                     .is_none_or(|value| value.is_empty())
             {
-                let default_agent = if let Some(ref store) = state.services.agent_persona_store {
-                    store
-                        .default_id()
-                        .await
-                        .unwrap_or_else(|_| "main".to_string())
-                } else {
-                    "main".to_string()
-                };
+                let default_agent =
+                    resolve_channel_agent_id(state, &session_key, meta.agent_id.as_deref()).await;
                 let _ = session_meta
                     .set_agent_id(&session_key, Some(&default_agent))
                     .await;
@@ -991,6 +1190,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
                 // Ensure the old session also has a channel binding (for listing).
                 let old_entry = session_metadata.get(&session_key).await;
+                let channel_defaults = resolve_channel_session_defaults(state, &reply_to).await;
                 if old_entry
                     .as_ref()
                     .and_then(|e| e.channel_binding.as_ref())
@@ -1008,6 +1208,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .filter(|value| !value.is_empty())
                     .map(str::to_string);
                 let target_agent = if let Some(agent_id) = inherited_agent {
+                    agent_id
+                } else if let Some(agent_id) = channel_defaults.agent_id.clone() {
                     agent_id
                 } else if let Some(ref store) = state.services.agent_persona_store {
                     store
@@ -1040,25 +1242,11 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
                 // Assign a model to the new session: prefer the channel's
                 // configured model, fall back to the first registered model.
-                let channel_model: Option<String> =
-                    state.services.channel.status().await.ok().and_then(|v| {
-                        let channels = v.get("channels")?.as_array()?;
-                        channels
-                            .iter()
-                            .find(|ch| {
-                                ch.get("account_id").and_then(|v| v.as_str())
-                                    == Some(&reply_to.account_id)
-                            })
-                            .and_then(|ch| {
-                                ch.get("config")?.get("model")?.as_str().map(String::from)
-                            })
-                    });
-
                 let models_val = state.services.model.list().await.ok();
                 let models = models_val.as_ref().and_then(|v| v.as_array());
 
                 let (model_id, model_display): (Option<String>, String) = if let Some(ref cm) =
-                    channel_model
+                    channel_defaults.model
                 {
                     let d = models
                         .and_then(|ms| {
@@ -1207,30 +1395,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
                 }
 
                 if args.is_empty() {
-                    // List mode.
-                    let mut lines = Vec::new();
-                    for (i, s) in sessions.iter().enumerate() {
-                        let label = s.label.as_deref().unwrap_or(&s.key);
-                        let marker = if s.key == session_key {
-                            " *"
-                        } else {
-                            ""
-                        };
-                        lines.push(format!(
-                            "{}. {} ({} msgs){}",
-                            i + 1,
-                            label,
-                            s.message_count,
-                            marker,
-                        ));
-                    }
-                    lines.push("\nUse /sessions N to switch.".to_string());
-                    Ok(lines.join("\n"))
+                    Ok(format_channel_sessions_list(&sessions, &session_key))
                 } else {
                     // Switch mode.
-                    let n: usize = args
-                        .parse()
-                        .map_err(|_| ChannelError::invalid_input("usage: /sessions [number]"))?;
+                    let n = parse_numbered_selection(args, "sessions")?;
                     if n == 0 || n > sessions.len() {
                         return Err(ChannelError::invalid_input(format!(
                             "invalid session number. Use 1–{}.",
@@ -1274,6 +1442,143 @@ impl ChannelEventSink for GatewayChannelEventSink {
                     .await;
 
                     Ok(format!("Switched to: {label}"))
+                }
+            },
+            "attach" => {
+                let sessions: Vec<_> = session_metadata
+                    .list()
+                    .await
+                    .into_iter()
+                    .filter(is_attachable_session)
+                    .collect();
+
+                if sessions.is_empty() {
+                    return Ok("No attachable sessions found yet.".to_string());
+                }
+
+                if args.is_empty() {
+                    return Ok(format_attachable_sessions_list(&sessions, &session_key));
+                }
+
+                let n = parse_numbered_selection(args, "attach")?;
+                if n == 0 || n > sessions.len() {
+                    return Err(ChannelError::invalid_input(format!(
+                        "invalid session number. Use 1–{}.",
+                        sessions.len()
+                    )));
+                }
+
+                let target_session = &sessions[n - 1];
+                let binding_json = serde_json::to_string(&reply_to)
+                    .map_err(|e| ChannelError::external("serialize channel binding", e))?;
+
+                session_metadata
+                    .clear_active_session_mappings(&target_session.key)
+                    .await;
+                session_metadata
+                    .set_channel_binding(&target_session.key, Some(binding_json))
+                    .await;
+                session_metadata
+                    .set_active_session(
+                        reply_to.channel_type.as_str(),
+                        &reply_to.account_id,
+                        &reply_to.chat_id,
+                        reply_to.thread_id.as_deref(),
+                        &target_session.key,
+                    )
+                    .await;
+
+                let label = session_list_label(target_session);
+                info!(
+                    session = %target_session.key,
+                    "channel /attach: rebound existing session to current chat"
+                );
+
+                broadcast(
+                    state,
+                    "session",
+                    serde_json::json!({
+                        "kind": "switched",
+                        "sessionKey": &target_session.key,
+                    }),
+                    BroadcastOpts {
+                        drop_if_slow: true,
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+                Ok(format!("Attached here: {label}"))
+            },
+            "approvals" => {
+                let response = state
+                    .services
+                    .exec_approval
+                    .request(serde_json::json!({ "sessionKey": &session_key }))
+                    .await
+                    .map_err(ChannelError::unavailable)?;
+                let approvals: ApprovalListResponse = serde_json::from_value(response)
+                    .map_err(|e| ChannelError::external("parse approval list", e))?;
+
+                if approvals.requests.is_empty() {
+                    Ok("No pending approvals for this session.".to_string())
+                } else {
+                    Ok(format_pending_approvals_list(&approvals.requests))
+                }
+            },
+            "approve" | "deny" => {
+                if args.is_empty() {
+                    return Err(ChannelError::invalid_input(format!(
+                        "usage: /{cmd} [number]"
+                    )));
+                }
+
+                let response = state
+                    .services
+                    .exec_approval
+                    .request(serde_json::json!({ "sessionKey": &session_key }))
+                    .await
+                    .map_err(ChannelError::unavailable)?;
+                let approvals: ApprovalListResponse = serde_json::from_value(response)
+                    .map_err(|e| ChannelError::external("parse approval list", e))?;
+
+                if approvals.requests.is_empty() {
+                    return Ok("No pending approvals for this session.".to_string());
+                }
+
+                let n = parse_numbered_selection(args, cmd)?;
+                if n == 0 || n > approvals.requests.len() {
+                    return Err(ChannelError::invalid_input(format!(
+                        "invalid approval number. Use 1–{}.",
+                        approvals.requests.len()
+                    )));
+                }
+
+                let request = &approvals.requests[n - 1];
+                let decision = if cmd == "approve" {
+                    "approved"
+                } else {
+                    "denied"
+                };
+                let mut params = serde_json::json!({
+                    "requestId": &request.id,
+                    "decision": decision,
+                });
+                if cmd == "approve" {
+                    params["command"] = serde_json::json!(&request.command);
+                }
+
+                state
+                    .services
+                    .exec_approval
+                    .resolve(params)
+                    .await
+                    .map_err(ChannelError::unavailable)?;
+
+                if cmd == "approve" {
+                    Ok(format!("Approved: `{}`", request.command))
+                } else {
+                    Ok(format!("Denied: `{}`", request.command))
                 }
             },
             "agent" => {
@@ -1862,6 +2167,7 @@ mod tests {
     #[test]
     fn shell_mode_rewrite_skips_control_commands() {
         assert!(rewrite_for_shell_mode("/context").is_none());
+        assert!(rewrite_for_shell_mode("/attach").is_none());
         assert!(rewrite_for_shell_mode("/sh uname -a").is_none());
     }
 
@@ -1869,6 +2175,10 @@ mod tests {
     fn peek_and_stop_are_control_commands() {
         assert!(is_channel_control_command_name("peek"));
         assert!(is_channel_control_command_name("stop"));
+        assert!(is_channel_control_command_name("attach"));
+        assert!(is_channel_control_command_name("approvals"));
+        assert!(is_channel_control_command_name("approve"));
+        assert!(is_channel_control_command_name("deny"));
     }
 
     #[test]
@@ -1919,5 +2229,124 @@ mod tests {
     #[test]
     fn unique_providers_empty_input() {
         assert!(unique_providers(&[]).is_empty());
+    }
+
+    #[test]
+    fn attachable_session_filter_skips_archived_and_cron_sessions() {
+        let archived = SessionEntry {
+            id: "1".into(),
+            key: "session:archived".into(),
+            label: None,
+            created_at: 0,
+            updated_at: 0,
+            message_count: 0,
+            last_seen_message_count: 0,
+            project_id: None,
+            archived: true,
+            worktree_branch: None,
+            sandbox_enabled: None,
+            sandbox_image: None,
+            channel_binding: None,
+            parent_session_key: None,
+            fork_point: None,
+            mcp_disabled: None,
+            preview: None,
+            agent_id: None,
+            model: None,
+            node_id: None,
+            version: 0,
+        };
+        let cron = SessionEntry {
+            key: "cron:heartbeat".into(),
+            archived: false,
+            ..archived.clone()
+        };
+        let normal = SessionEntry {
+            key: "session:normal".into(),
+            archived: false,
+            ..archived.clone()
+        };
+
+        assert!(!is_attachable_session(&cron));
+        assert!(!is_attachable_session(&archived));
+        assert!(is_attachable_session(&normal));
+    }
+
+    #[test]
+    fn format_attachable_sessions_shows_session_keys_when_labels_are_present() {
+        let sessions = vec![
+            SessionEntry {
+                id: "1".into(),
+                key: "main".into(),
+                label: None,
+                created_at: 0,
+                updated_at: 0,
+                message_count: 3,
+                last_seen_message_count: 0,
+                project_id: None,
+                archived: false,
+                worktree_branch: None,
+                sandbox_enabled: None,
+                sandbox_image: None,
+                channel_binding: None,
+                parent_session_key: None,
+                fork_point: None,
+                mcp_disabled: None,
+                preview: None,
+                agent_id: None,
+                model: None,
+                node_id: None,
+                version: 0,
+            },
+            SessionEntry {
+                id: "2".into(),
+                key: "session:abc".into(),
+                label: Some("Build Fix".into()),
+                created_at: 0,
+                updated_at: 0,
+                message_count: 12,
+                last_seen_message_count: 0,
+                project_id: None,
+                archived: false,
+                worktree_branch: None,
+                sandbox_enabled: None,
+                sandbox_image: None,
+                channel_binding: None,
+                parent_session_key: None,
+                fork_point: None,
+                mcp_disabled: None,
+                preview: None,
+                agent_id: None,
+                model: None,
+                node_id: None,
+                version: 0,
+            },
+        ];
+
+        let rendered = format_attachable_sessions_list(&sessions, "session:abc");
+        assert!(rendered.contains("1. main (3 msgs)"));
+        assert!(rendered.contains("2. Build Fix [session:abc] (12 msgs) *"));
+        assert!(rendered.contains("Use /attach N to move an existing session to this chat."));
+    }
+
+    #[test]
+    fn format_pending_approvals_renders_numbered_commands() {
+        let approvals = vec![
+            PendingApprovalView {
+                id: "1".into(),
+                command: "git status".into(),
+                session_key: Some("session:a".into()),
+            },
+            PendingApprovalView {
+                id: "2".into(),
+                command: "rm -rf /tmp/build".into(),
+                session_key: Some("session:a".into()),
+            },
+        ];
+
+        let rendered = format_pending_approvals_list(&approvals);
+        assert!(rendered.contains("1. `git status`"));
+        assert!(rendered.contains("2. `rm -rf /tmp/build`"));
+        assert!(rendered.contains("Use /approve N or /deny N."));
     }
 }

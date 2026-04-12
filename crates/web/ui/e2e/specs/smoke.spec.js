@@ -96,6 +96,71 @@ test("mobile menu drives settings and sessions", async ({ page }) => {
 	expect(pageErrors).toEqual([]);
 });
 
+test("standalone mobile layout avoids double safe-area padding", async ({ page }) => {
+	const pageErrors = watchPageErrors(page);
+	await page.setViewportSize({ width: 390, height: 844 });
+	await page.addInitScript(() => {
+		const originalMatchMedia = window.matchMedia.bind(window);
+		window.matchMedia = (query) => {
+			if (query === "(display-mode: standalone)") {
+				return {
+					matches: true,
+					media: query,
+					onchange: null,
+					addListener() {
+						return undefined;
+					},
+					removeListener() {
+						return undefined;
+					},
+					addEventListener() {
+						return undefined;
+					},
+					removeEventListener() {
+						return undefined;
+					},
+					dispatchEvent() {
+						return true;
+					},
+				};
+			}
+			return originalMatchMedia(query);
+		};
+		Object.defineProperty(navigator, "standalone", {
+			configurable: true,
+			get() {
+				return true;
+			},
+		});
+	});
+
+	await page.goto("/");
+	await expect(page).toHaveURL(/\/chats\/main$/);
+	await expectPageContentMounted(page);
+	await expect(page.locator("html")).toHaveClass(/pwa-standalone/);
+
+	await page.evaluate(() => {
+		document.documentElement.style.setProperty("--safe-top", "24px");
+		document.documentElement.style.setProperty("--safe-bottom", "18px");
+	});
+
+	const layout = await page.evaluate(() => {
+		const body = getComputedStyle(document.body);
+		const header = getComputedStyle(document.querySelector("header"));
+		const inputRow = getComputedStyle(document.querySelector(".chat-input-row"));
+		return {
+			bodyPaddingTop: parseFloat(body.paddingTop),
+			headerPaddingTop: parseFloat(header.paddingTop),
+			inputPaddingBottom: parseFloat(inputRow.paddingBottom),
+		};
+	});
+
+	expect(layout.bodyPaddingTop).toBe(0);
+	expect(layout.headerPaddingTop).toBeGreaterThan(24);
+	expect(layout.inputPaddingBottom).toBeGreaterThan(18);
+	expect(pageErrors).toEqual([]);
+});
+
 const routeCases = [
 	{
 		path: "/settings/crons",

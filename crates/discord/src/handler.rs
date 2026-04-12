@@ -986,6 +986,7 @@ impl EventHandler for Handler {
             username,
             message_kind: Some(inferred_kind),
             model: config.model.clone(),
+            agent_id: None,
             audio_filename,
         };
 

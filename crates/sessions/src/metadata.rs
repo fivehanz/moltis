@@ -819,6 +819,16 @@ impl SqliteSessionMetadata {
         .ok();
     }
 
+    /// Clear any explicit channel chat mappings that currently point at the
+    /// given session key.
+    pub async fn clear_active_session_mappings(&self, session_key: &str) {
+        sqlx::query("DELETE FROM channel_sessions WHERE session_key = ?")
+            .bind(session_key)
+            .execute(&self.pool)
+            .await
+            .ok();
+    }
+
     /// List all sessions that have been bound to a given channel chat
     /// (i.e. sessions whose `channel_binding` JSON contains the matching chat_id + account_id).
     pub async fn list_channel_sessions(
@@ -1365,6 +1375,38 @@ mod tests {
         // Different chat should return empty.
         let other = meta.list_channel_sessions("telegram", "bot1", "999").await;
         assert!(other.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_clear_active_session_mappings() {
+        let pool = sqlite_pool().await;
+        let meta = SqliteSessionMetadata::new(pool);
+
+        meta.set_active_session("telegram", "bot1", "123", None, "session:abc")
+            .await;
+        meta.set_active_session("telegram", "bot1", "456", None, "session:abc")
+            .await;
+        meta.set_active_session("telegram", "bot1", "789", None, "session:def")
+            .await;
+
+        meta.clear_active_session_mappings("session:abc").await;
+
+        assert!(
+            meta.get_active_session("telegram", "bot1", "123", None)
+                .await
+                .is_none()
+        );
+        assert!(
+            meta.get_active_session("telegram", "bot1", "456", None)
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            meta.get_active_session("telegram", "bot1", "789", None)
+                .await
+                .as_deref(),
+            Some("session:def")
+        );
     }
 
     #[tokio::test]

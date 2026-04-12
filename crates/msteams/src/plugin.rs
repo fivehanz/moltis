@@ -471,6 +471,7 @@ impl MsTeamsPlugin {
                 ChannelMessageKind::Text
             }),
             model: config.model.clone(),
+            agent_id: None,
             audio_filename: None,
         };
 

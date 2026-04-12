@@ -42,7 +42,12 @@ const MAX_SANDBOX_RECOVERY_RETRIES: usize = 1;
 /// Broadcaster that notifies connected clients about pending approval requests.
 #[async_trait]
 pub trait ApprovalBroadcaster: Send + Sync {
-    async fn broadcast_request(&self, request_id: &str, command: &str) -> Result<()>;
+    async fn broadcast_request(
+        &self,
+        request_id: &str,
+        command: &str,
+        session_key: Option<&str>,
+    ) -> Result<()>;
 }
 
 /// Provider of environment variables to inject into sandbox execution.
@@ -538,11 +543,11 @@ impl AgentTool for ExecTool {
             let action = mgr.check_command(command).await?;
             if action == ApprovalAction::NeedsApproval {
                 info!(command, "command needs approval, waiting...");
-                let (req_id, rx) = mgr.create_request(command).await;
+                let (req_id, rx) = mgr.create_request(command, session_key).await;
 
                 // Broadcast to connected clients.
                 if let Some(ref bc) = self.broadcaster
-                    && let Err(e) = bc.broadcast_request(&req_id, command).await
+                    && let Err(e) = bc.broadcast_request(&req_id, command, session_key).await
                 {
                     warn!(error = %e, "failed to broadcast approval request");
                 }
@@ -831,12 +836,14 @@ mod tests {
 
     struct TestBroadcaster {
         called: AtomicBool,
+        session_key: std::sync::Mutex<Option<String>>,
     }
 
     impl TestBroadcaster {
         fn new() -> Self {
             Self {
                 called: AtomicBool::new(false),
+                session_key: std::sync::Mutex::new(None),
             }
         }
     }
@@ -851,8 +858,14 @@ mod tests {
 
     #[async_trait]
     impl ApprovalBroadcaster for TestBroadcaster {
-        async fn broadcast_request(&self, _request_id: &str, _command: &str) -> Result<()> {
+        async fn broadcast_request(
+            &self,
+            _request_id: &str,
+            _command: &str,
+            session_key: Option<&str>,
+        ) -> Result<()> {
             self.called.store(true, Ordering::SeqCst);
+            *self.session_key.lock().unwrap() = session_key.map(ToOwned::to_owned);
             Ok(())
         }
     }
@@ -959,10 +972,17 @@ mod tests {
         });
 
         let result = tool
-            .execute(serde_json::json!({ "command": "curl http://example.com" }))
+            .execute(serde_json::json!({
+                "command": "curl http://example.com",
+                "_session_key": "session:abc"
+            }))
             .await;
         handle.await.unwrap();
         assert!(bc.called.load(Ordering::SeqCst));
+        assert_eq!(
+            bc.session_key.lock().unwrap().as_deref(),
+            Some("session:abc")
+        );
         let _ = result;
     }
 
