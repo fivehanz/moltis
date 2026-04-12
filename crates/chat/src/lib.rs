@@ -6920,6 +6920,54 @@ async fn run_with_tools(
                         "seq": seq,
                     })
                 },
+                RunnerEvent::ToolCallRejected {
+                    id,
+                    name,
+                    arguments,
+                    error,
+                } => {
+                    // Pre-dispatch validation failure — the tool's `execute`
+                    // method never ran. Emit as a terminal tool_call_end with
+                    // a `rejected: true` marker so the UI can render it
+                    // distinctly from a normal execution failure (issue #658).
+                    if let Some(ref map) = active_tool_calls {
+                        let mut guard = map.write().await;
+                        if let Some(calls) = guard.get_mut(&sk) {
+                            calls.retain(|tc| tc.id != id);
+                            if calls.is_empty() {
+                                guard.remove(&sk);
+                            }
+                        }
+                    }
+                    serde_json::json!({
+                        "runId": run_id,
+                        "sessionKey": sk,
+                        "state": "tool_call_end",
+                        "toolCallId": id,
+                        "toolName": name,
+                        "arguments": arguments,
+                        "success": false,
+                        "rejected": true,
+                        "error": parse_chat_error(&error, None),
+                        "seq": seq,
+                    })
+                },
+                RunnerEvent::LoopInterventionFired { stage, tool_name } => {
+                    serde_json::json!({
+                        "runId": run_id,
+                        "sessionKey": sk,
+                        "state": "notice",
+                        "title": "Loop detected",
+                        "message": format!(
+                            "Detected repeated failed calls to `{}`. \
+                             Intervening (stage {}) to break the loop.",
+                            tool_name, stage
+                        ),
+                        "loopInterventionStage": stage,
+                        "stuckTool": tool_name,
+                        "seq": seq,
+                    })
+                },
             };
             broadcast(&state, "chat", payload, BroadcastOpts::default()).await;
         }

@@ -277,6 +277,8 @@ fn build_schema_map() -> KnownKeys {
             ("agent_auto_continue_min_tool_calls", Leaf),
             ("max_tool_result_bytes", Leaf),
             ("registry_mode", Leaf),
+            ("agent_loop_detector_window", Leaf),
+            ("agent_loop_detector_strip_tools_on_second_fire", Leaf),
         ]))
     };
 

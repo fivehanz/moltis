@@ -303,6 +303,8 @@ agent_max_auto_continues = 2      # Auto-continue nudges when model stops mid-ta
 agent_auto_continue_min_tool_calls = 3  # Min tool calls before auto-continue can trigger
 max_tool_result_bytes = 50000     # Max bytes per tool result before truncation (50KB)
 # registry_mode = "full"          # "full" = all schemas every turn, "lazy" = tool_search discovery
+agent_loop_detector_window = 3    # Fire intervention after N identical failing tool calls in a row (0 = disable)
+agent_loop_detector_strip_tools_on_second_fire = true  # On second consecutive fire, strip tool schemas for one turn to force a text response
 
 # ── Maps ─────────────────────────────────────────────────────────────────────
 
