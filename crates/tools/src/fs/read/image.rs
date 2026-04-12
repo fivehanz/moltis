@@ -45,10 +45,12 @@ pub(crate) async fn read_image(file_path: &str) -> Result<Value> {
         match moltis_media::image_ops::optimize_for_llm(&bytes, None) {
             Ok(optimized) => {
                 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+                let media_type =
+                    moltis_media::mime::detect_mime(&optimized.data, Some(&optimized.media_type));
                 Ok(json!({
                     "kind": "image",
                     "file_path": path_owned,
-                    "media_type": optimized.media_type,
+                    "media_type": media_type,
                     "original_width": optimized.original_width,
                     "original_height": optimized.original_height,
                     "final_width": optimized.final_width,

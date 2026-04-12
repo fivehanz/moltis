@@ -158,253 +158,283 @@ pub async fn sandbox_file_system_for_session(
     Ok(Arc::new(CommandSandboxFileSystem::new(backend, id)))
 }
 
+/// Default command-based sandbox read implementation used by the file service
+/// and by `Sandbox` trait default methods.
+pub async fn command_read_file<S: Sandbox + ?Sized>(
+    backend: &S,
+    id: &SandboxId,
+    file_path: &str,
+    max_bytes: u64,
+) -> Result<SandboxReadResult> {
+    let quoted = shell_single_quote(file_path);
+    let script = format!(
+        "path={quoted}; max={max_bytes}; \
+         if [ ! -e \"$path\" ]; then exit {EXIT_NOT_FOUND}; fi; \
+         if [ ! -r \"$path\" ]; then exit {EXIT_PERMISSION_DENIED}; fi; \
+         if [ ! -f \"$path\" ]; then exit {EXIT_NOT_REGULAR_FILE}; fi; \
+         size=$(wc -c < \"$path\"); \
+         if [ \"$size\" -gt \"$max\" ]; then echo \"$size\" >&2; exit {EXIT_TOO_LARGE}; fi; \
+         base64 < \"$path\" | tr -d '\\n'"
+    );
+
+    let result = backend.exec(id, &script, &default_opts()).await?;
+    match result.exit_code {
+        0 => {
+            let bytes = BASE64.decode(result.stdout.trim()).map_err(|e| {
+                Error::message(format!(
+                    "failed to decode sandbox read for '{file_path}': {e}"
+                ))
+            })?;
+            Ok(SandboxReadResult::Ok(bytes))
+        },
+        EXIT_NOT_FOUND => Ok(SandboxReadResult::NotFound),
+        EXIT_PERMISSION_DENIED => Ok(SandboxReadResult::PermissionDenied),
+        EXIT_NOT_REGULAR_FILE => Ok(SandboxReadResult::NotRegularFile),
+        EXIT_TOO_LARGE => {
+            let size = result.stderr.trim().parse::<u64>().unwrap_or(0);
+            Ok(SandboxReadResult::TooLarge(size))
+        },
+        other => {
+            let detail = if result.stderr.trim().is_empty() {
+                format!("sandbox read exited with code {other}")
+            } else {
+                result.stderr.trim().to_string()
+            };
+            Err(Error::message(format!(
+                "sandbox read of '{file_path}' failed: {detail}"
+            )))
+        },
+    }
+}
+
+/// Default command-based sandbox write implementation used by the file service
+/// and by `Sandbox` trait default methods.
+pub async fn command_write_file<S: Sandbox + ?Sized>(
+    backend: &S,
+    id: &SandboxId,
+    file_path: &str,
+    content: &[u8],
+) -> Result<Option<Value>> {
+    if content.len() > MAX_SANDBOX_WRITE_BYTES {
+        return Err(Error::message(format!(
+            "sandbox Write is limited to {} KB per call (got {:.1} KB); \
+             larger writes will ship in a follow-up that chunks content",
+            MAX_SANDBOX_WRITE_BYTES / 1024,
+            content.len() as f64 / 1024.0,
+        )));
+    }
+
+    let encoded = BASE64.encode(content);
+    let quoted_path = shell_single_quote(file_path);
+    let script = format!(
+        "path={quoted_path}; \
+         parent=$(dirname \"$path\"); \
+         if [ ! -d \"$parent\" ]; then exit {EXIT_PARENT_MISSING}; fi; \
+         if [ -L \"$path\" ]; then exit {EXIT_SYMLINK}; fi; \
+         tmp=\"$path.moltis.$$\"; \
+         if ! printf '%s' '{encoded}' | base64 -d > \"$tmp\"; then rm -f \"$tmp\"; exit 1; fi; \
+         sync \"$tmp\" 2>/dev/null || sync; \
+         if [ -L \"$path\" ]; then rm -f \"$tmp\"; exit {EXIT_SYMLINK}; fi; \
+         mv \"$tmp\" \"$path\""
+    );
+
+    let result = backend.exec(id, &script, &default_opts()).await?;
+    match result.exit_code {
+        0 => Ok(None),
+        EXIT_PARENT_MISSING => Err(Error::message(format!(
+            "cannot resolve parent of '{file_path}': directory does not exist in sandbox"
+        ))),
+        EXIT_SYMLINK => Ok(Some(json!({
+            "kind": "path_denied",
+            "file_path": file_path,
+            "error": "target is a symbolic link; refusing to follow",
+            "detail": "sandbox Write rejects symlinks",
+        }))),
+        other => {
+            let detail = if result.stderr.trim().is_empty() {
+                format!("sandbox write exited with code {other}")
+            } else {
+                result.stderr.trim().to_string()
+            };
+            Err(Error::message(format!(
+                "sandbox write of '{file_path}' failed: {detail}"
+            )))
+        },
+    }
+}
+
+/// Default command-based sandbox list-files implementation used by the file service
+/// and by `Sandbox` trait default methods.
+pub async fn command_list_files<S: Sandbox + ?Sized>(
+    backend: &S,
+    id: &SandboxId,
+    root: &str,
+) -> Result<Vec<String>> {
+    let quoted = shell_single_quote(root);
+    let script = format!("find {quoted} -type f 2>/dev/null");
+    let result = backend.exec(id, &script, &default_opts()).await?;
+    if result.exit_code != 0 && result.stdout.trim().is_empty() {
+        let detail = if result.stderr.trim().is_empty() {
+            format!("find exited with code {}", result.exit_code)
+        } else {
+            result.stderr.trim().to_string()
+        };
+        return Err(Error::message(format!(
+            "sandbox list_files '{root}' failed: {detail}"
+        )));
+    }
+    Ok(result
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+/// Default command-based sandbox grep implementation used by the file service
+/// and by `Sandbox` trait default methods.
+pub async fn command_grep<S: Sandbox + ?Sized>(
+    backend: &S,
+    id: &SandboxId,
+    opts: SandboxGrepOptions,
+) -> Result<Value> {
+    let pattern_q = shell_single_quote(&opts.pattern);
+    let path_q = shell_single_quote(&opts.path);
+    let mut flags: Vec<&str> = vec!["-r", "-P"];
+    if opts.case_insensitive {
+        flags.push("-i");
+    }
+    match opts.mode {
+        SandboxGrepMode::Content => {
+            flags.push("-n");
+            flags.push("-H");
+        },
+        SandboxGrepMode::FilesWithMatches => {
+            flags.push("-l");
+        },
+        SandboxGrepMode::Count => {
+            flags.push("-c");
+            flags.push("-H");
+        },
+    }
+    let include_args = if opts.include_globs.is_empty() {
+        String::new()
+    } else {
+        opts.include_globs
+            .iter()
+            .map(|glob| format!("--include={}", shell_single_quote(glob)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let flags_str = flags.join(" ");
+    let flags_str_ere = flags_str.replace("-P", "-E");
+    let script = format!(
+        "grep {flags_str} {include_args} -- {pattern_q} {path_q} 2>/dev/null; \
+         rc=$?; \
+         if [ $rc -eq 2 ]; then \
+           grep {flags_str_ere} {include_args} -- {pattern_q} {path_q} 2>/dev/null; \
+           rc=$?; \
+         fi; \
+         if [ $rc -eq 1 ]; then exit 0; else exit $rc; fi"
+    );
+    let result = backend.exec(id, &script, &default_opts()).await?;
+    if result.exit_code != 0 {
+        let detail = if result.stderr.trim().is_empty() {
+            format!("grep exited with code {}", result.exit_code)
+        } else {
+            result.stderr.trim().to_string()
+        };
+        return Err(Error::message(format!("sandbox grep failed: {detail}")));
+    }
+
+    let lines: Vec<&str> = result
+        .stdout
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    match opts.mode {
+        SandboxGrepMode::FilesWithMatches => {
+            let files = lines
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>();
+            let (files, truncated) = apply_head_offset(files, opts.offset, opts.head_limit);
+            Ok(json!({
+                "mode": "files_with_matches",
+                "files": files,
+                "truncated": truncated,
+            }))
+        },
+        SandboxGrepMode::Count => {
+            let mut counts = Vec::new();
+            for line in &lines {
+                if let Some((path, count_str)) = line.rsplit_once(':')
+                    && let Ok(count) = count_str.parse::<usize>()
+                    && count > 0
+                {
+                    counts.push(json!({
+                        "path": path,
+                        "count": count,
+                    }));
+                }
+            }
+            let (counts, truncated) = apply_head_offset(counts, opts.offset, opts.head_limit);
+            Ok(json!({
+                "mode": "count",
+                "counts": counts,
+                "truncated": truncated,
+            }))
+        },
+        SandboxGrepMode::Content => {
+            let mut matches = Vec::new();
+            for line in &lines {
+                let mut parts = line.splitn(3, ':');
+                let (Some(path), Some(lineno_str), Some(text)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                let Ok(lineno) = lineno_str.parse::<usize>() else {
+                    continue;
+                };
+                matches.push(json!({
+                    "path": path,
+                    "line": lineno,
+                    "match": text,
+                    "block": vec![format!("{lineno}:{text}")],
+                }));
+            }
+            let (matches, cap_truncated) = apply_match_cap(matches, opts.match_cap);
+            let (matches, page_truncated) =
+                apply_head_offset(matches, opts.offset, opts.head_limit);
+            Ok(json!({
+                "mode": "content",
+                "matches": matches,
+                "truncated": cap_truncated || page_truncated,
+            }))
+        },
+    }
+}
+
 #[async_trait]
 impl SandboxFileSystem for CommandSandboxFileSystem {
     async fn read_file(&self, file_path: &str, max_bytes: u64) -> Result<SandboxReadResult> {
-        let quoted = shell_single_quote(file_path);
-        let script = format!(
-            "path={quoted}; max={max_bytes}; \
-             if [ ! -e \"$path\" ]; then exit {EXIT_NOT_FOUND}; fi; \
-             if [ ! -r \"$path\" ]; then exit {EXIT_PERMISSION_DENIED}; fi; \
-             if [ ! -f \"$path\" ]; then exit {EXIT_NOT_REGULAR_FILE}; fi; \
-             size=$(wc -c < \"$path\"); \
-             if [ \"$size\" -gt \"$max\" ]; then echo \"$size\" >&2; exit {EXIT_TOO_LARGE}; fi; \
-             base64 < \"$path\" | tr -d '\\n'"
-        );
-
-        let result = self
-            .backend
-            .exec(&self.id, &script, &default_opts())
-            .await?;
-        match result.exit_code {
-            0 => {
-                let bytes = BASE64.decode(result.stdout.trim()).map_err(|e| {
-                    Error::message(format!(
-                        "failed to decode sandbox read for '{file_path}': {e}"
-                    ))
-                })?;
-                Ok(SandboxReadResult::Ok(bytes))
-            },
-            EXIT_NOT_FOUND => Ok(SandboxReadResult::NotFound),
-            EXIT_PERMISSION_DENIED => Ok(SandboxReadResult::PermissionDenied),
-            EXIT_NOT_REGULAR_FILE => Ok(SandboxReadResult::NotRegularFile),
-            EXIT_TOO_LARGE => {
-                let size = result.stderr.trim().parse::<u64>().unwrap_or(0);
-                Ok(SandboxReadResult::TooLarge(size))
-            },
-            other => {
-                let detail = if result.stderr.trim().is_empty() {
-                    format!("sandbox read exited with code {other}")
-                } else {
-                    result.stderr.trim().to_string()
-                };
-                Err(Error::message(format!(
-                    "sandbox read of '{file_path}' failed: {detail}"
-                )))
-            },
-        }
+        self.backend.read_file(&self.id, file_path, max_bytes).await
     }
 
     async fn write_file(&self, file_path: &str, content: &[u8]) -> Result<Option<Value>> {
-        if content.len() > MAX_SANDBOX_WRITE_BYTES {
-            return Err(Error::message(format!(
-                "sandbox Write is limited to {} KB per call (got {:.1} KB); \
-                 larger writes will ship in a follow-up that chunks content",
-                MAX_SANDBOX_WRITE_BYTES / 1024,
-                content.len() as f64 / 1024.0,
-            )));
-        }
-
-        let encoded = BASE64.encode(content);
-        let quoted_path = shell_single_quote(file_path);
-        let script = format!(
-            "path={quoted_path}; \
-             parent=$(dirname \"$path\"); \
-             if [ ! -d \"$parent\" ]; then exit {EXIT_PARENT_MISSING}; fi; \
-             if [ -L \"$path\" ]; then exit {EXIT_SYMLINK}; fi; \
-             tmp=\"$path.moltis.$$\"; \
-             if ! printf '%s' '{encoded}' | base64 -d > \"$tmp\"; then rm -f \"$tmp\"; exit 1; fi; \
-             sync \"$tmp\" 2>/dev/null || sync; \
-             if [ -L \"$path\" ]; then rm -f \"$tmp\"; exit {EXIT_SYMLINK}; fi; \
-             mv \"$tmp\" \"$path\""
-        );
-
-        let result = self
-            .backend
-            .exec(&self.id, &script, &default_opts())
-            .await?;
-        match result.exit_code {
-            0 => Ok(None),
-            EXIT_PARENT_MISSING => Err(Error::message(format!(
-                "cannot resolve parent of '{file_path}': directory does not exist in sandbox"
-            ))),
-            EXIT_SYMLINK => Ok(Some(json!({
-                "kind": "path_denied",
-                "file_path": file_path,
-                "error": "target is a symbolic link; refusing to follow",
-                "detail": "sandbox Write rejects symlinks",
-            }))),
-            other => {
-                let detail = if result.stderr.trim().is_empty() {
-                    format!("sandbox write exited with code {other}")
-                } else {
-                    result.stderr.trim().to_string()
-                };
-                Err(Error::message(format!(
-                    "sandbox write of '{file_path}' failed: {detail}"
-                )))
-            },
-        }
+        self.backend.write_file(&self.id, file_path, content).await
     }
 
     async fn list_files(&self, root: &str) -> Result<Vec<String>> {
-        let quoted = shell_single_quote(root);
-        let script = format!("find {quoted} -type f 2>/dev/null");
-        let result = self
-            .backend
-            .exec(&self.id, &script, &default_opts())
-            .await?;
-        if result.exit_code != 0 && result.stdout.trim().is_empty() {
-            let detail = if result.stderr.trim().is_empty() {
-                format!("find exited with code {}", result.exit_code)
-            } else {
-                result.stderr.trim().to_string()
-            };
-            return Err(Error::message(format!(
-                "sandbox list_files '{root}' failed: {detail}"
-            )));
-        }
-        Ok(result
-            .stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect())
+        self.backend.list_files(&self.id, root).await
     }
 
     async fn grep(&self, opts: SandboxGrepOptions) -> Result<Value> {
-        let pattern_q = shell_single_quote(&opts.pattern);
-        let path_q = shell_single_quote(&opts.path);
-        let mut flags: Vec<&str> = vec!["-r", "-P"];
-        if opts.case_insensitive {
-            flags.push("-i");
-        }
-        match opts.mode {
-            SandboxGrepMode::Content => {
-                flags.push("-n");
-                flags.push("-H");
-            },
-            SandboxGrepMode::FilesWithMatches => {
-                flags.push("-l");
-            },
-            SandboxGrepMode::Count => {
-                flags.push("-c");
-                flags.push("-H");
-            },
-        }
-        let include_args = if opts.include_globs.is_empty() {
-            String::new()
-        } else {
-            opts.include_globs
-                .iter()
-                .map(|glob| format!("--include={}", shell_single_quote(glob)))
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let flags_str = flags.join(" ");
-        let flags_str_ere = flags_str.replace("-P", "-E");
-        let script = format!(
-            "grep {flags_str} {include_args} -- {pattern_q} {path_q} 2>/dev/null; \
-             rc=$?; \
-             if [ $rc -eq 2 ]; then \
-               grep {flags_str_ere} {include_args} -- {pattern_q} {path_q} 2>/dev/null; \
-               rc=$?; \
-             fi; \
-             if [ $rc -eq 1 ]; then exit 0; else exit $rc; fi"
-        );
-        let result = self
-            .backend
-            .exec(&self.id, &script, &default_opts())
-            .await?;
-        if result.exit_code != 0 {
-            let detail = if result.stderr.trim().is_empty() {
-                format!("grep exited with code {}", result.exit_code)
-            } else {
-                result.stderr.trim().to_string()
-            };
-            return Err(Error::message(format!("sandbox grep failed: {detail}")));
-        }
-
-        let lines: Vec<&str> = result
-            .stdout
-            .lines()
-            .map(str::trim_end)
-            .filter(|line| !line.is_empty())
-            .collect();
-
-        match opts.mode {
-            SandboxGrepMode::FilesWithMatches => {
-                let files = lines
-                    .iter()
-                    .map(|line| line.to_string())
-                    .collect::<Vec<_>>();
-                let (files, truncated) = apply_head_offset(files, opts.offset, opts.head_limit);
-                Ok(json!({
-                    "mode": "files_with_matches",
-                    "files": files,
-                    "truncated": truncated,
-                }))
-            },
-            SandboxGrepMode::Count => {
-                let mut counts = Vec::new();
-                for line in &lines {
-                    if let Some((path, count_str)) = line.rsplit_once(':')
-                        && let Ok(count) = count_str.parse::<usize>()
-                        && count > 0
-                    {
-                        counts.push(json!({
-                            "path": path,
-                            "count": count,
-                        }));
-                    }
-                }
-                let (counts, truncated) = apply_head_offset(counts, opts.offset, opts.head_limit);
-                Ok(json!({
-                    "mode": "count",
-                    "counts": counts,
-                    "truncated": truncated,
-                }))
-            },
-            SandboxGrepMode::Content => {
-                let mut matches = Vec::new();
-                for line in &lines {
-                    let mut parts = line.splitn(3, ':');
-                    let (Some(path), Some(lineno_str), Some(text)) =
-                        (parts.next(), parts.next(), parts.next())
-                    else {
-                        continue;
-                    };
-                    let Ok(lineno) = lineno_str.parse::<usize>() else {
-                        continue;
-                    };
-                    matches.push(json!({
-                        "path": path,
-                        "line": lineno,
-                        "match": text,
-                        "block": vec![format!("{lineno}:{text}")],
-                    }));
-                }
-                let (matches, cap_truncated) = apply_match_cap(matches, opts.match_cap);
-                let (matches, page_truncated) =
-                    apply_head_offset(matches, opts.offset, opts.head_limit);
-                Ok(json!({
-                    "mode": "content",
-                    "matches": matches,
-                    "truncated": cap_truncated || page_truncated,
-                }))
-            },
-        }
+        self.backend.grep(&self.id, opts).await
     }
 }
 
