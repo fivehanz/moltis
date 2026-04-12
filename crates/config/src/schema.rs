@@ -2492,7 +2492,7 @@ pub struct BrowserConfig {
 }
 
 fn default_sandbox_image() -> String {
-    "browserless/chrome".to_string()
+    "docker.io/browserless/chrome".to_string()
 }
 
 const fn default_low_memory_threshold_mb() -> u64 {
