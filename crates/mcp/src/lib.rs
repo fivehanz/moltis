@@ -11,6 +11,7 @@
 //! in secret-aware types and only expose sanitized display projections.
 
 pub mod auth;
+pub mod config_parsing;
 pub mod client;
 pub mod error;
 pub mod manager;
@@ -25,6 +26,7 @@ pub mod types;
 pub use {
     auth::{McpAuthProvider, McpAuthState, McpOAuthOverride, McpOAuthProvider, SharedAuthProvider},
     client::{McpClient, McpClientState},
+    config_parsing::{merge_env_overrides, parse_server_config},
     error::{Context, Error, Result},
     manager::McpManager,
     registry::{McpOAuthConfig, McpRegistry, McpServerConfig, TransportType},

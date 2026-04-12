@@ -442,19 +442,6 @@ fn env_value_with_overrides(env_overrides: &HashMap<String, String>, key: &str) 
         })
 }
 
-fn merge_env_overrides(
-    base_overrides: &HashMap<String, String>,
-    additional: Vec<(String, String)>,
-) -> HashMap<String, String> {
-    let mut merged = base_overrides.clone();
-    for (key, value) in additional {
-        if key.trim().is_empty() || value.trim().is_empty() {
-            continue;
-        }
-        merged.entry(key).or_insert(value);
-    }
-    merged
-}
 
 fn summarize_model_ids_for_logs(sorted_model_ids: &[String], max_items: usize) -> Vec<String> {
     if max_items == 0 {
@@ -1757,7 +1744,7 @@ pub async fn prepare_gateway_core(
     // Runtime env overrides from the settings UI (`/api/env`) layered after
     // config `[env]`. Process env remains highest precedence.
     let runtime_env_overrides = match credential_store.get_all_env_values().await {
-        Ok(db_env_vars) => merge_env_overrides(&config_env_overrides, db_env_vars),
+        Ok(db_env_vars) => crate::mcp_service::merge_env_overrides(&config_env_overrides, db_env_vars),
         Err(error) => {
             warn!(%error, "failed to load persisted env overrides from credential store");
             config_env_overrides.clone()
@@ -5884,7 +5871,7 @@ mod tests {
             ("OPENAI_API_KEY".to_string(), "config-openai".to_string()),
             ("BRAVE_API_KEY".to_string(), "config-brave".to_string()),
         ]);
-        let merged = merge_env_overrides(&base, vec![
+        let merged = crate::mcp_service::merge_env_overrides(&base, vec![
             ("OPENAI_API_KEY".to_string(), "db-openai".to_string()),
             (
                 "PERPLEXITY_API_KEY".to_string(),
