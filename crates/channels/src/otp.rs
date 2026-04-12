@@ -345,6 +345,7 @@ mod tests {
             &self,
             _command: &str,
             _reply_to: ChannelReplyTarget,
+            _sender_id: Option<&str>,
         ) -> Result<String> {
             Ok(String::new())
         }

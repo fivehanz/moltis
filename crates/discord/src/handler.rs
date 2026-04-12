@@ -21,6 +21,7 @@ use {
     moltis_channels::{
         ChannelEvent, ChannelType, Error as ChannelError, InboundMediaDownloader,
         InboundMediaSource, Result as ChannelsResult,
+        config_view::ChannelConfigView,
         gating::DmPolicy,
         message_log::MessageLogEntry,
         otp::{
@@ -841,7 +842,7 @@ impl EventHandler for Handler {
             .await;
 
             let response_text = match sink
-                .dispatch_command(command.trim(), reply_to.clone())
+                .dispatch_command(command.trim(), reply_to.clone(), Some(&peer_id))
                 .await
             {
                 Ok(response) => response,
@@ -985,8 +986,10 @@ impl EventHandler for Handler {
             sender_name,
             username,
             message_kind: Some(inferred_kind),
-            model: config.model.clone(),
-            agent_id: None,
+            model: config.resolve_model(&chat_id, &peer_id).map(String::from),
+            agent_id: config
+                .resolve_agent_id(&chat_id, &peer_id)
+                .map(String::from),
             audio_filename,
         };
 
@@ -1818,6 +1821,7 @@ mod tests {
             &self,
             _command: &str,
             _reply_to: ChannelReplyTarget,
+            _sender_id: Option<&str>,
         ) -> ChannelsResult<String> {
             Ok(String::new())
         }

@@ -260,6 +260,7 @@ async fn command_events_callback(
     let command_text = event.command.to_string();
     let text = event.text.unwrap_or_default();
     let full_command = format!("{command_text} {text}").trim().to_string();
+    let sender_id = event.user_id.to_string();
 
     let event_sink = {
         let accts = listener_state
@@ -277,7 +278,10 @@ async fn command_events_callback(
             message_id: None,
             thread_id: None,
         };
-        match sink.dispatch_command(&full_command, reply_to).await {
+        match sink
+            .dispatch_command(&full_command, reply_to, Some(&sender_id))
+            .await
+        {
             Ok(response_text) => Ok(SlackCommandEventResponse::new(
                 SlackMessageContent::new().with_text(response_text),
             )),

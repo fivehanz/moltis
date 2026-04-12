@@ -841,6 +841,7 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # mention_mode = "mention"        # "mention", "always", or "none"
 # allowlist = []                  # Discord user IDs allowed to DM
 # guild_allowlist = []            # Discord guild/server IDs (empty = all)
+# agent_id = "research"           # Default agent for this bot
 # reply_to_message = false        # Send responses as Discord replies
 # ack_reaction = "👀"             # Emoji reaction while processing (omit to disable)
 # activity = "with AI"            # Bot activity status text

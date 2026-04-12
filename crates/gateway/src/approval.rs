@@ -112,7 +112,6 @@ impl GatewayApprovalBroadcaster {
     async fn notify_origin_channel(
         &self,
         session_key: Option<&str>,
-        request_id: &str,
         command: &str,
     ) -> moltis_tools::Result<()> {
         let Some(session_key) = session_key else {
@@ -134,7 +133,7 @@ impl GatewayApprovalBroadcaster {
         };
 
         let message = format!(
-            "Approval needed for `{}`.\nRequest ID: `{request_id}`\nUse /approvals to list pending requests, then /approve N or /deny N. The web UI still works too.",
+            "Approval needed for `{}`.\nUse /approvals to see the numbered list, then /approve N or /deny N. The web UI still works too.",
             command
         );
         outbound
@@ -163,10 +162,7 @@ impl ApprovalBroadcaster for GatewayApprovalBroadcaster {
             BroadcastOpts::default(),
         )
         .await;
-        if let Err(error) = self
-            .notify_origin_channel(session_key, request_id, command)
-            .await
-        {
+        if let Err(error) = self.notify_origin_channel(session_key, command).await {
             warn!(%error, session_key, request_id, "failed to notify originating channel about approval");
         }
         Ok(())

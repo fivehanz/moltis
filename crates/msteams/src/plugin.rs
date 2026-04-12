@@ -407,7 +407,7 @@ impl MsTeamsPlugin {
         let dispatch_text = text.as_deref().unwrap_or("");
         if let Some(command) = dispatch_text.strip_prefix('/') {
             match sink
-                .dispatch_command(command.trim(), reply_to.clone())
+                .dispatch_command(command.trim(), reply_to.clone(), Some(&peer_id))
                 .await
             {
                 Ok(response) => {

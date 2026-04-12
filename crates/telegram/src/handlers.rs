@@ -530,8 +530,9 @@ pub async fn handle_message_direct(
             if should_intercept_slash_command(cmd, cmd_text) {
                 // For /context, send a formatted card with inline keyboard.
                 if cmd == "context" {
-                    let context_result =
-                        sink.dispatch_command("context", reply_target.clone()).await;
+                    let context_result = sink
+                        .dispatch_command("context", reply_target.clone(), Some(&peer_id))
+                        .await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
                         accts.get(account_id).map(|s| s.bot.clone())
@@ -556,7 +557,9 @@ pub async fn handle_message_direct(
 
                 // For /model without args, send an inline keyboard to pick a model.
                 if cmd == "agent" && cmd_text.trim() == "agent" {
-                    let list_result = sink.dispatch_command("agent", reply_target.clone()).await;
+                    let list_result = sink
+                        .dispatch_command("agent", reply_target.clone(), Some(&peer_id))
+                        .await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
                         accts.get(account_id).map(|s| s.bot.clone())
@@ -581,7 +584,9 @@ pub async fn handle_message_direct(
 
                 // For /model without args, send an inline keyboard to pick a model.
                 if cmd == "model" && cmd_text.trim() == "model" {
-                    let list_result = sink.dispatch_command("model", reply_target.clone()).await;
+                    let list_result = sink
+                        .dispatch_command("model", reply_target.clone(), Some(&peer_id))
+                        .await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
                         accts.get(account_id).map(|s| s.bot.clone())
@@ -606,7 +611,9 @@ pub async fn handle_message_direct(
 
                 // For /sandbox without args, send toggle + image keyboard.
                 if cmd == "sandbox" && cmd_text.trim() == "sandbox" {
-                    let list_result = sink.dispatch_command("sandbox", reply_target.clone()).await;
+                    let list_result = sink
+                        .dispatch_command("sandbox", reply_target.clone(), Some(&peer_id))
+                        .await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
                         accts.get(account_id).map(|s| s.bot.clone())
@@ -633,7 +640,7 @@ pub async fn handle_message_direct(
                 // For /sessions without args, send an inline keyboard instead of plain text.
                 if cmd == "sessions" && cmd_text.trim() == "sessions" {
                     let list_result = sink
-                        .dispatch_command("sessions", reply_target.clone())
+                        .dispatch_command("sessions", reply_target.clone(), Some(&peer_id))
                         .await;
                     let bot = {
                         let accts = accounts.read().unwrap_or_else(|e| e.into_inner());
@@ -661,7 +668,10 @@ pub async fn handle_message_direct(
                 let response = if cmd == "help" {
                     "Available commands:\n/new — Start a new session\n/sessions — List and switch this chat's sessions\n/attach — Attach an existing session to this chat\n/approvals — List pending exec approvals for this session\n/approve N — Approve a pending exec request\n/deny N — Deny a pending exec request\n/agent — Switch session agent\n/model — Switch provider/model\n/sandbox — Toggle sandbox and choose image\n/sh — Enable command mode (/sh off to exit)\n/clear — Clear session history\n/compact — Compact session (summarize)\n/context — Show session context info\n/help — Show this help".to_string()
                 } else {
-                    match sink.dispatch_command(cmd_text, reply_target.clone()).await {
+                    match sink
+                        .dispatch_command(cmd_text, reply_target.clone(), Some(&peer_id))
+                        .await
+                    {
                         Ok(msg) => msg,
                         Err(e) => format!("Error: {e}"),
                     }
@@ -1373,6 +1383,7 @@ pub async fn handle_callback_query(
         .and_then(|m| m.regular_message())
         .and_then(|m| m.thread_id)
         .map(|tid| tid.0.0.to_string());
+    let sender_id = query.from.id.0.to_string();
     let reply_target = ChannelReplyTarget {
         channel_type: ChannelType::Telegram,
         account_id: account_id.to_string(),
@@ -1389,7 +1400,10 @@ pub async fn handle_callback_query(
         }
         if let Some(ref sink) = event_sink {
             let cmd = format!("model provider:{provider_name}");
-            match sink.dispatch_command(&cmd, reply_target).await {
+            match sink
+                .dispatch_command(&cmd, reply_target, Some(&sender_id))
+                .await
+            {
                 Ok(text) => {
                     if let Some(ref b) = bot {
                         send_model_keyboard(b, &outbound_to, &text).await;
@@ -1413,7 +1427,10 @@ pub async fn handle_callback_query(
     };
 
     if let Some(ref sink) = event_sink {
-        let response = match sink.dispatch_command(&cmd_text, reply_target).await {
+        let response = match sink
+            .dispatch_command(&cmd_text, reply_target, Some(&sender_id))
+            .await
+        {
             Ok(msg) => msg,
             Err(e) => format!("Error: {e}"),
         };
@@ -2227,6 +2244,7 @@ mod tests {
             &self,
             _command: &str,
             _reply_to: ChannelReplyTarget,
+            _sender_id: Option<&str>,
         ) -> Result<String> {
             Ok(String::new())
         }

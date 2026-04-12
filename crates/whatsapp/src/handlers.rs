@@ -345,7 +345,7 @@ async fn handle_message(
             thread_id: None,
         };
         if let Some(ref sink) = state.event_sink {
-            match sink.dispatch_command(cmd, reply_to).await {
+            match sink.dispatch_command(cmd, reply_to, Some(&peer_id)).await {
                 Ok(response) => {
                     let outbound_msg = wa::Message {
                         conversation: Some(response),

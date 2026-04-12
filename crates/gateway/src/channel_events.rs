@@ -213,6 +213,7 @@ fn override_map<'a>(
 async fn resolve_channel_session_defaults(
     state: &Arc<GatewayState>,
     reply_to: &ChannelReplyTarget,
+    sender_id: Option<&str>,
 ) -> ChannelSessionDefaults {
     let Ok(status) = state.services.channel.status().await else {
         return ChannelSessionDefaults::default();
@@ -237,8 +238,22 @@ async fn resolve_channel_session_defaults(
         return ChannelSessionDefaults::default();
     };
 
-    let user_override = override_map(config, "user_overrides", &reply_to.chat_id);
-    let channel_override = override_map(config, "channel_overrides", &reply_to.chat_id);
+    resolve_channel_session_defaults_from_config(config, &reply_to.chat_id, sender_id)
+}
+
+fn resolve_channel_session_defaults_from_config(
+    config: &serde_json::Value,
+    chat_id: &str,
+    sender_id: Option<&str>,
+) -> ChannelSessionDefaults {
+    let user_override = override_map(
+        config,
+        "user_overrides",
+        sender_id
+            .filter(|sender_id| *sender_id != chat_id)
+            .unwrap_or(chat_id),
+    );
+    let channel_override = override_map(config, "channel_overrides", chat_id);
 
     ChannelSessionDefaults {
         model: user_override
@@ -801,7 +816,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
             )));
         };
 
-        self.dispatch_command(&cmd_text, reply_to).await
+        self.dispatch_command(&cmd_text, reply_to, None).await
     }
 
     async fn update_location(
@@ -1142,6 +1157,7 @@ impl ChannelEventSink for GatewayChannelEventSink {
         &self,
         command: &str,
         reply_to: ChannelReplyTarget,
+        sender_id: Option<&str>,
     ) -> ChannelResult<String> {
         let state = self
             .state
@@ -1190,7 +1206,8 @@ impl ChannelEventSink for GatewayChannelEventSink {
 
                 // Ensure the old session also has a channel binding (for listing).
                 let old_entry = session_metadata.get(&session_key).await;
-                let channel_defaults = resolve_channel_session_defaults(state, &reply_to).await;
+                let channel_defaults =
+                    resolve_channel_session_defaults(state, &reply_to, sender_id).await;
                 if old_entry
                     .as_ref()
                     .and_then(|e| e.channel_binding.as_ref())
@@ -2348,5 +2365,48 @@ mod tests {
         assert!(rendered.contains("1. `git status`"));
         assert!(rendered.contains("2. `rm -rf /tmp/build`"));
         assert!(rendered.contains("Use /approve N or /deny N."));
+    }
+
+    #[test]
+    fn channel_session_defaults_use_sender_override_for_group_commands() {
+        let config = serde_json::json!({
+            "model": "default-model",
+            "agent_id": "default-agent",
+            "channel_overrides": {
+                "group-1": {
+                    "model": "channel-model",
+                    "agent_id": "channel-agent"
+                }
+            },
+            "user_overrides": {
+                "user-42": {
+                    "model": "user-model",
+                    "agent_id": "user-agent"
+                }
+            }
+        });
+
+        let defaults =
+            resolve_channel_session_defaults_from_config(&config, "group-1", Some("user-42"));
+        assert_eq!(defaults.model.as_deref(), Some("user-model"));
+        assert_eq!(defaults.agent_id.as_deref(), Some("user-agent"));
+    }
+
+    #[test]
+    fn channel_session_defaults_use_chat_id_for_dm_commands() {
+        let config = serde_json::json!({
+            "model": "default-model",
+            "agent_id": "default-agent",
+            "user_overrides": {
+                "dm-1": {
+                    "model": "dm-model",
+                    "agent_id": "dm-agent"
+                }
+            }
+        });
+
+        let defaults = resolve_channel_session_defaults_from_config(&config, "dm-1", Some("dm-1"));
+        assert_eq!(defaults.model.as_deref(), Some("dm-model"));
+        assert_eq!(defaults.agent_id.as_deref(), Some("dm-agent"));
     }
 }
