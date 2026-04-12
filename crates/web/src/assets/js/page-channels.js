@@ -53,6 +53,7 @@ var showAddDiscord = signal(false);
 var showAddWhatsApp = signal(false);
 var showAddSlack = signal(false);
 var showAddMatrix = signal(false);
+var showAddNostr = signal(false);
 var editingChannel = signal(null);
 var sendersAccount = signal("");
 
@@ -73,6 +74,7 @@ function channelLabel(type) {
 	if (t === "whatsapp") return "WhatsApp";
 	if (t === "slack") return "Slack";
 	if (t === "matrix") return "Matrix";
+	if (t === "nostr") return "Nostr";
 	return "Telegram";
 }
 
@@ -493,6 +495,15 @@ function ConnectButtons() {
 				if (connected.value) showAddWhatsApp.value = true;
 			}}>
 			<span class="icon icon-whatsapp"></span> Connect WhatsApp
+		</button>`
+		}
+		${
+			offered.has("nostr") &&
+			html`<button class="provider-btn provider-btn-secondary inline-flex items-center gap-1.5"
+			onClick=${() => {
+				if (connected.value) showAddNostr.value = true;
+			}}>
+			Connect Nostr
 		</button>`
 		}
 	</div>`;
@@ -1603,6 +1614,132 @@ function QrCodeDisplay({ data, svg }) {
   </div>`;
 }
 
+// ── Add Nostr modal ──────────────────────────────────────────
+function AddNostrModal() {
+	var error = useSignal("");
+	var saving = useSignal(false);
+	var addModel = useSignal("");
+	var allowlistItems = useSignal([]);
+	var accountDraft = useSignal("");
+	var secretKeyDraft = useSignal("");
+	var relaysDraft = useSignal("wss://relay.damus.io, wss://relay.nostr.band, wss://nos.lol");
+	var advancedConfigPatch = useSignal("");
+
+	function onSubmit(e) {
+		e.preventDefault();
+		var form = e.target.closest(".channel-form");
+		var accountId = accountDraft.value.trim();
+		var secretKey = secretKeyDraft.value.trim();
+		if (!accountId) {
+			error.value = "Account ID is required.";
+			return;
+		}
+		if (!secretKey) {
+			error.value = "Secret key is required.";
+			return;
+		}
+		var advancedPatch = parseChannelConfigPatch(advancedConfigPatch.value);
+		if (!advancedPatch.ok) {
+			error.value = advancedPatch.error;
+			return;
+		}
+		error.value = "";
+		saving.value = true;
+		var relays = relaysDraft.value
+			.split(",")
+			.map((r) => r.trim())
+			.filter(Boolean);
+		var addConfig = {
+			secret_key: secretKey,
+			relays: relays,
+			dm_policy: form.querySelector("[data-field=dmPolicy]").value,
+			allowed_pubkeys: allowlistItems.value,
+		};
+		if (addModel.value) {
+			addConfig.model = addModel.value;
+			var found = modelsSig.value.find((x) => x.id === addModel.value);
+			if (found?.provider) addConfig.model_provider = found.provider;
+		}
+		Object.assign(addConfig, advancedPatch.value);
+		addChannel("nostr", accountId, addConfig).then((res) => {
+			saving.value = false;
+			if (res?.ok) {
+				showAddNostr.value = false;
+				addModel.value = "";
+				allowlistItems.value = [];
+				accountDraft.value = "";
+				secretKeyDraft.value = "";
+				relaysDraft.value = "wss://relay.damus.io, wss://relay.nostr.band, wss://nos.lol";
+				advancedConfigPatch.value = "";
+				loadChannels();
+			} else {
+				error.value = (res?.error && (res.error.message || res.error.detail)) || "Failed to connect channel.";
+			}
+		});
+	}
+
+	return html`<${Modal} show=${showAddNostr.value} onClose=${() => {
+		showAddNostr.value = false;
+	}}
+	    title="Connect Nostr">
+	    <div class="channel-form">
+	      <div class="channel-card">
+	        <div>
+	          <span class="text-xs font-medium text-[var(--text-strong)]">How to set up Nostr DMs</span>
+	          <div class="text-xs text-[var(--muted)] channel-help">1. Generate or use an existing Nostr secret key (nsec1... or hex)</div>
+	          <div class="text-xs text-[var(--muted)]">2. Configure relay URLs (defaults are provided)</div>
+	          <div class="text-xs text-[var(--muted)]">3. Add allowed public keys (npub1... or hex) to the allowlist</div>
+	          <div class="text-xs text-[var(--muted)]">4. Send a DM to the bot's public key from any Nostr client</div>
+	        </div>
+	      </div>
+	      <${ConnectionModeHint} type="nostr" />
+	      <label class="text-xs text-[var(--muted)]">Account ID</label>
+	      <input data-field="accountId" type="text" placeholder="e.g. my-nostr-bot"
+	        value=${accountDraft.value}
+	        onInput=${(e) => {
+						accountDraft.value = e.target.value;
+					}}
+	        class="channel-input" />
+	      <label class="text-xs text-[var(--muted)]">Secret Key</label>
+	      <input data-field="credential" type="password" placeholder="nsec1... or 64-char hex" class="channel-input"
+	        value=${secretKeyDraft.value}
+	        onInput=${(e) => {
+						secretKeyDraft.value = e.target.value;
+					}}
+	        autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false"
+	        name="nostr_secret_key" />
+	      <label class="text-xs text-[var(--muted)]">Relays (comma-separated)</label>
+	      <input data-field="relays" type="text" placeholder="wss://relay.damus.io, wss://nos.lol"
+	        value=${relaysDraft.value}
+	        onInput=${(e) => {
+						relaysDraft.value = e.target.value;
+					}}
+	        class="channel-input" />
+	      <label class="text-xs text-[var(--muted)]">DM Policy</label>
+	      <select data-field="dmPolicy" class="channel-select">
+	        <option value="allowlist">Allowlist only</option>
+	        <option value="open">Open (anyone)</option>
+	        <option value="disabled">Disabled</option>
+	      </select>
+	      <label class="text-xs text-[var(--muted)]">Default Model</label>
+	      <${ModelSelect} models=${modelsSig.value} value=${addModel.value} onChange=${(v) => {
+					addModel.value = v;
+				}} />
+	      <label class="text-xs text-[var(--muted)]">Allowed Public Keys</label>
+	      <${AllowlistInput} value=${allowlistItems.value} onChange=${(v) => {
+					allowlistItems.value = v;
+				}} />
+	      <${AdvancedConfigPatchField} value=${advancedConfigPatch.value} onInput=${(value) => {
+					advancedConfigPatch.value = value;
+				}} />
+	      ${error.value && html`<div class="text-xs text-[var(--error)] channel-error block">${error.value}</div>`}
+	      <button class="provider-btn" onClick=${onSubmit} disabled=${saving.value}>
+	        ${saving.value ? "Connecting\u2026" : "Connect Nostr"}
+	      </button>
+	    </div>
+	  </${Modal}>`;
+}
+
 // ── Add WhatsApp modal ───────────────────────────────────────
 function AddWhatsAppModal() {
 	var error = useSignal("");
@@ -1753,7 +1890,7 @@ function EditChannelModal() {
 	var editAdvancedConfigPatch = useSignal("");
 	useEffect(() => {
 		editModel.value = ch?.config?.model || "";
-		allowlistItems.value = ch?.config?.allowlist || ch?.config?.user_allowlist || [];
+		allowlistItems.value = ch?.config?.allowlist || ch?.config?.user_allowlist || ch?.config?.allowed_pubkeys || [];
 		roomAllowlistItems.value = ch?.config?.room_allowlist || [];
 		editCredential.value = "";
 		editWebhookSecret.value = ch?.config?.webhook_secret || "";
@@ -1778,6 +1915,7 @@ function EditChannelModal() {
 	var isWhatsApp = chType === "whatsapp";
 	var isTelegram = chType === "telegram";
 	var isMatrix = chType === "matrix";
+	var isNostr = chType === "nostr";
 
 	function addModelToConfig(config) {
 		if (!editModel.value) return;
@@ -1795,6 +1933,10 @@ function EditChannelModal() {
 			config.token = editCredential.value || cfg.token || "";
 		} else if (isTelegram) {
 			config.token = cfg.token || "";
+		} else if (isNostr) {
+			config.secret_key = editCredential.value || cfg.secret_key || "";
+			var relaysVal = form.querySelector("[data-field=relays]")?.value || "";
+			config.relays = relaysVal.split(",").map((r) => r.trim()).filter(Boolean);
 		} else if (isMatrix) {
 			config.homeserver = form.querySelector("[data-field=homeserver]")?.value || cfg.homeserver || "";
 			config.user_id = form.querySelector("[data-field=userId]")?.value || cfg.user_id || "";
@@ -1826,7 +1968,10 @@ function EditChannelModal() {
 			updateConfig.otp_self_approval = editMatrixOtpSelfApproval.value;
 			updateConfig.otp_cooldown_secs = normalizeMatrixOtpCooldown(editMatrixOtpCooldown.value);
 		}
-		if (!isWhatsApp) {
+		if (isNostr) {
+			updateConfig.allowed_pubkeys = allowlistItems.value;
+		}
+		if (!isWhatsApp && !isNostr) {
 			updateConfig.mention_mode = form.querySelector("[data-field=mentionMode]")?.value || "mention";
 		}
 		addChannelCredentials(updateConfig, form);
@@ -1945,6 +2090,22 @@ function EditChannelModal() {
 				          onInput=${(e) => {
 										editCredential.value = e.target.value;
 									}} />
+				      </div>`
+				}
+	      ${
+					isNostr &&
+					html`<div class="flex flex-col gap-1">
+				        <label class="text-xs text-[var(--muted)]">Secret Key (optional: leave blank to keep existing)</label>
+				        <input type="password" class="channel-input w-full" value=${editCredential.value}
+				          onInput=${(e) => {
+										editCredential.value = e.target.value;
+									}}
+				          autocomplete="new-password" />
+				      </div>
+				      <div class="flex flex-col gap-1">
+				        <label class="text-xs text-[var(--muted)]">Relays (comma-separated)</label>
+				        <input data-field="relays" type="text" class="channel-input w-full"
+				          defaultValue=${(cfg.relays || []).join(", ")} />
 				      </div>`
 				}
 	      ${
@@ -2203,6 +2364,7 @@ function ChannelsPage() {
     <${AddDiscordModal} />
     <${AddSlackModal} />
     <${AddMatrixModal} />
+    <${AddNostrModal} />
     <${AddWhatsAppModal} />
     <${EditChannelModal} />
     <${ConfirmDialog} />
@@ -2220,6 +2382,7 @@ export function initChannels(container) {
 	showAddDiscord.value = false;
 	showAddSlack.value = false;
 	showAddMatrix.value = false;
+	showAddNostr.value = false;
 	showAddWhatsApp.value = false;
 	editingChannel.value = null;
 	sendersAccount.value = "";
