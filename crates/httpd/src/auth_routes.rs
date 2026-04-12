@@ -1482,26 +1482,24 @@ mod tests {
 #[cfg(feature = "vault")]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod vault_unseal_tests {
-    use super::*;
-    use async_trait::async_trait;
-    use moltis_channels::{
-        ChannelRegistry,
-        store::{ChannelStore, StoredChannel},
+    use {
+        super::*,
+        async_trait::async_trait,
+        moltis_channels::{
+            ChannelRegistry,
+            config_view::ChannelConfigView,
+            plugin::{ChannelOutbound, ChannelPlugin, ChannelStreamOutbound, StreamEvent},
+            store::{ChannelStore, StoredChannel},
+        },
     };
-    use moltis_channels::plugin::{
-        ChannelOutbound, ChannelPlugin, ChannelStreamOutbound, StreamEvent,
-    };
-    use moltis_channels::config_view::ChannelConfigView;
 
-    use moltis_channels::plugin::ChannelStatus;
-    use moltis_common::types::ReplyPayload;
-    use std::sync::Mutex;
-    use tokio::sync::RwLock;
+    use {
+        moltis_channels::plugin::ChannelStatus, moltis_common::types::ReplyPayload,
+        std::sync::Mutex, tokio::sync::RwLock,
+    };
 
     /// Helper to build a minimal AuthState with the given services.
-    async fn build_auth_state(
-        services: moltis_gateway::services::GatewayServices,
-    ) -> AuthState {
+    async fn build_auth_state(services: moltis_gateway::services::GatewayServices) -> AuthState {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let auth_config = moltis_config::AuthConfig::default();
         let cred_store = Arc::new(
@@ -1509,14 +1507,13 @@ mod vault_unseal_tests {
                 .await
                 .unwrap(),
         );
-        let gateway_state = GatewayState::new(
-            moltis_gateway::auth::resolve_auth(None, None),
-            services,
-        );
+        let gateway_state =
+            GatewayState::new(moltis_gateway::auth::resolve_auth(None, None), services);
         AuthState {
             credential_store: cred_store,
             webauthn_registry: None,
             gateway_state,
+            login_guard: LoginGuard::new(),
         }
     }
 
@@ -1587,6 +1584,7 @@ mod vault_unseal_tests {
         ) -> moltis_channels::Result<()> {
             Ok(())
         }
+
         async fn send_media(
             &self,
             _: &str,
@@ -1649,9 +1647,11 @@ mod vault_unseal_tests {
         fn id(&self) -> &str {
             &self.id
         }
+
         fn name(&self) -> &str {
             &self.id
         }
+
         async fn start_account(
             &mut self,
             account_id: &str,
@@ -1666,24 +1666,31 @@ mod vault_unseal_tests {
                 .push((account_id.to_string(), config));
             Ok(())
         }
+
         async fn stop_account(&mut self, _account_id: &str) -> moltis_channels::Result<()> {
             Ok(())
         }
+
         fn outbound(&self) -> Option<&dyn ChannelOutbound> {
             None
         }
+
         fn status(&self) -> Option<&dyn ChannelStatus> {
             None
         }
+
         fn has_account(&self, _account_id: &str) -> bool {
             false
         }
+
         fn account_ids(&self) -> Vec<String> {
             Vec::new()
         }
+
         fn account_config(&self, _account_id: &str) -> Option<Box<dyn ChannelConfigView>> {
             None
         }
+
         fn update_account_config(
             &self,
             _account_id: &str,
@@ -1691,9 +1698,11 @@ mod vault_unseal_tests {
         ) -> moltis_channels::Result<()> {
             Ok(())
         }
+
         fn shared_outbound(&self) -> Arc<dyn ChannelOutbound> {
             Arc::new(NullOutbound)
         }
+
         fn shared_stream_outbound(&self) -> Arc<dyn ChannelStreamOutbound> {
             Arc::new(NullStreamOutbound)
         }
@@ -1712,8 +1721,8 @@ mod vault_unseal_tests {
     #[tokio::test]
     async fn returns_early_when_channel_store_is_none() {
         let registry = Arc::new(ChannelRegistry::new());
-        let services = moltis_gateway::services::GatewayServices::noop()
-            .with_channel_registry(registry);
+        let services =
+            moltis_gateway::services::GatewayServices::noop().with_channel_registry(registry);
         // No channel_store set — should return without panicking
         let state = build_auth_state(services).await;
         start_stored_channels_on_vault_unseal(&state).await;
@@ -1745,15 +1754,13 @@ mod vault_unseal_tests {
     #[tokio::test]
     async fn skips_channels_with_unsupported_type() {
         let registry = Arc::new(ChannelRegistry::new());
-        let store: Arc<dyn ChannelStore> = Arc::new(MockChannelStore::new(vec![
-            StoredChannel {
-                account_id: "acct1".to_string(),
-                channel_type: "unknown_type".to_string(),
-                config: serde_json::json!({}),
-                created_at: 0,
-                updated_at: 0,
-            },
-        ]));
+        let store: Arc<dyn ChannelStore> = Arc::new(MockChannelStore::new(vec![StoredChannel {
+            account_id: "acct1".to_string(),
+            channel_type: "unknown_type".to_string(),
+            config: serde_json::json!({}),
+            created_at: 0,
+            updated_at: 0,
+        }]));
         let services = moltis_gateway::services::GatewayServices::noop()
             .with_channel_registry(registry)
             .with_channel_store(store);
@@ -1784,15 +1791,13 @@ mod vault_unseal_tests {
             .unwrap();
 
         let registry = Arc::new(registry);
-        let store: Arc<dyn ChannelStore> = Arc::new(MockChannelStore::new(vec![
-            StoredChannel {
-                account_id: "acct1".to_string(),
-                channel_type: "telegram".to_string(),
-                config: serde_json::json!({"token": "new"}),
-                created_at: 0,
-                updated_at: 0,
-            },
-        ]));
+        let store: Arc<dyn ChannelStore> = Arc::new(MockChannelStore::new(vec![StoredChannel {
+            account_id: "acct1".to_string(),
+            channel_type: "telegram".to_string(),
+            config: serde_json::json!({"token": "new"}),
+            created_at: 0,
+            updated_at: 0,
+        }]));
         let services = moltis_gateway::services::GatewayServices::noop()
             .with_channel_registry(registry)
             .with_channel_store(store);
@@ -1804,7 +1809,11 @@ mod vault_unseal_tests {
         // called again (resolve_channel_type returned Some, so it was skipped).
         // Only the pre-start call should be recorded.
         let calls = started.lock().unwrap();
-        assert_eq!(calls.len(), 1, "should not re-start already running account");
+        assert_eq!(
+            calls.len(),
+            1,
+            "should not re-start already running account"
+        );
         assert_eq!(calls[0].0, "acct1");
     }
 
@@ -1814,9 +1823,7 @@ mod vault_unseal_tests {
         let started_accounts = Arc::clone(&plugin.started_accounts);
 
         let mut registry = ChannelRegistry::new();
-        registry
-            .register(Arc::new(RwLock::new(plugin)))
-            .await;
+        registry.register(Arc::new(RwLock::new(plugin))).await;
 
         let registry = Arc::new(registry);
         let store: Arc<dyn ChannelStore> = Arc::new(MockChannelStore::new(vec![
@@ -1856,20 +1863,16 @@ mod vault_unseal_tests {
         let started_accounts = Arc::clone(&plugin.started_accounts);
 
         let mut registry = ChannelRegistry::new();
-        registry
-            .register(Arc::new(RwLock::new(plugin)))
-            .await;
+        registry.register(Arc::new(RwLock::new(plugin))).await;
 
         let registry = Arc::new(registry);
-        let store: Arc<dyn ChannelStore> = Arc::new(MockChannelStore::new(vec![
-            StoredChannel {
-                account_id: "bot1".to_string(),
-                channel_type: "telegram".to_string(),
-                config: serde_json::json!({"token": "bad"}),
-                created_at: 0,
-                updated_at: 0,
-            },
-        ]));
+        let store: Arc<dyn ChannelStore> = Arc::new(MockChannelStore::new(vec![StoredChannel {
+            account_id: "bot1".to_string(),
+            channel_type: "telegram".to_string(),
+            config: serde_json::json!({"token": "bad"}),
+            created_at: 0,
+            updated_at: 0,
+        }]));
         let services = moltis_gateway::services::GatewayServices::noop()
             .with_channel_registry(registry)
             .with_channel_store(store);
@@ -1880,7 +1883,11 @@ mod vault_unseal_tests {
 
         // The plugin should have attempted the start (and recorded it before failing)
         let calls = started_accounts.lock().unwrap();
-        assert_eq!(calls.len(), 0, "failing plugin should not record successful starts");
+        assert_eq!(
+            calls.len(),
+            0,
+            "failing plugin should not record successful starts"
+        );
     }
 
     #[tokio::test]
@@ -1889,9 +1896,7 @@ mod vault_unseal_tests {
         let started_accounts = Arc::clone(&plugin.started_accounts);
 
         let mut registry = ChannelRegistry::new();
-        registry
-            .register(Arc::new(RwLock::new(plugin)))
-            .await;
+        registry.register(Arc::new(RwLock::new(plugin))).await;
 
         let registry = Arc::new(registry);
         let store: Arc<dyn ChannelStore> = Arc::new(MockChannelStore::new(vec![
@@ -1936,9 +1941,11 @@ mod vault_unseal_tests {
         fn id(&self) -> &str {
             self.inner.id()
         }
+
         fn name(&self) -> &str {
             self.inner.name()
         }
+
         async fn start_account(
             &mut self,
             account_id: &str,
@@ -1950,24 +1957,31 @@ mod vault_unseal_tests {
                 .push((account_id.to_string(), config.clone()));
             self.inner.start_account(account_id, config).await
         }
+
         async fn stop_account(&mut self, account_id: &str) -> moltis_channels::Result<()> {
             self.inner.stop_account(account_id).await
         }
+
         fn outbound(&self) -> Option<&dyn ChannelOutbound> {
             self.inner.outbound()
         }
+
         fn status(&self) -> Option<&dyn ChannelStatus> {
             self.inner.status()
         }
+
         fn has_account(&self, account_id: &str) -> bool {
             self.inner.has_account(account_id)
         }
+
         fn account_ids(&self) -> Vec<String> {
             self.inner.account_ids()
         }
+
         fn account_config(&self, account_id: &str) -> Option<Box<dyn ChannelConfigView>> {
             self.inner.account_config(account_id)
         }
+
         fn update_account_config(
             &self,
             account_id: &str,
@@ -1975,9 +1989,11 @@ mod vault_unseal_tests {
         ) -> moltis_channels::Result<()> {
             self.inner.update_account_config(account_id, config)
         }
+
         fn shared_outbound(&self) -> Arc<dyn ChannelOutbound> {
             self.inner.shared_outbound()
         }
+
         fn shared_stream_outbound(&self) -> Arc<dyn ChannelStreamOutbound> {
             self.inner.shared_stream_outbound()
         }

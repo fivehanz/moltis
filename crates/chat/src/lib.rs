@@ -1050,7 +1050,12 @@ fn compress_summary(text: &str) -> String {
         let mut budget = SUMMARY_MAX_CHARS.saturating_sub(make_notice(base_dropped).len() + 1);
         let mut kept = 0usize;
         for line in &headers {
-            let needed = line.len() + if kept == 0 { 0 } else { 1 };
+            let needed = line.len()
+                + if kept == 0 {
+                    0
+                } else {
+                    1
+                };
             if needed > budget || kept + 1 >= SUMMARY_MAX_LINES {
                 header_drop_count += 1;
             } else {
@@ -1065,7 +1070,12 @@ fn compress_summary(text: &str) -> String {
     let mut char_budget = SUMMARY_MAX_CHARS.saturating_sub(notice.len() + 1);
     let mut result: Vec<String> = Vec::new();
     for line in &headers {
-        let needed = line.len() + if result.is_empty() { 0 } else { 1 };
+        let needed = line.len()
+            + if result.is_empty() {
+                0
+            } else {
+                1
+            };
         if needed > char_budget || result.len() + 1 >= SUMMARY_MAX_LINES {
             continue;
         }
@@ -1091,13 +1101,13 @@ fn compress_summary_in_history(mut history: Vec<Value>) -> Vec<Value> {
         for prefix in ["[Conversation Summary]\n\n", "[Conversation Compacted]\n\n"] {
             if let Some(body) = content.strip_prefix(prefix) {
                 let compressed = compress_summary(body);
-                if compressed.len() < body.len() {
-                    if let Some(obj) = msg.as_object_mut() {
-                        obj.insert(
-                            "content".into(),
-                            Value::String(format!("{prefix}{compressed}")),
-                        );
-                    }
+                if compressed.len() < body.len()
+                    && let Some(obj) = msg.as_object_mut()
+                {
+                    obj.insert(
+                        "content".into(),
+                        Value::String(format!("{prefix}{compressed}")),
+                    );
                 }
                 break;
             }

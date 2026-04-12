@@ -286,6 +286,7 @@ async fn handle_event(
         sender_id: Some(sender_hex.clone()),
         message_kind: Some(moltis_channels::ChannelMessageKind::Text),
         model: None,
+        agent_id: None,
         audio_filename: None,
     };
 

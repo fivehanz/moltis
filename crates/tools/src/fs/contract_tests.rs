@@ -34,7 +34,12 @@ impl TestBroadcaster {
 
 #[async_trait]
 impl ApprovalBroadcaster for TestBroadcaster {
-    async fn broadcast_request(&self, _request_id: &str, _command: &str) -> crate::Result<()> {
+    async fn broadcast_request(
+        &self,
+        _request_id: &str,
+        _command: &str,
+        _session_key: Option<&str>,
+    ) -> crate::Result<()> {
         self.called.store(true, Ordering::SeqCst);
         Ok(())
     }

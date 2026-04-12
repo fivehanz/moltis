@@ -453,10 +453,12 @@ pub async fn require_fs_mutation_approval(
     };
 
     info!(request, "fs mutation needs approval, waiting...");
-    let (request_id, rx) = manager.create_request(request).await;
+    let (request_id, rx) = manager.create_request(request, None).await;
 
     if let Some(broadcaster) = broadcaster
-        && let Err(error) = broadcaster.broadcast_request(&request_id, request).await
+        && let Err(error) = broadcaster
+            .broadcast_request(&request_id, request, None)
+            .await
     {
         warn!(%error, request, "failed to broadcast fs approval request");
     }
