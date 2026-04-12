@@ -1981,6 +1981,17 @@ pub struct ToolsConfig {
     /// How tool schemas are presented to the model. Default "full".
     #[serde(default)]
     pub registry_mode: ToolRegistryMode,
+    /// Window size for the tool-call reflex-loop detector. When this many
+    /// consecutive tool calls share the same tool + (args or error), the
+    /// runner injects a directive intervention message. Set to 0 to disable.
+    /// Default 3.
+    #[serde(default = "default_agent_loop_detector_window")]
+    pub agent_loop_detector_window: usize,
+    /// When the loop detector fires a second time (stage 2), strip the tool
+    /// schema list for a single LLM turn so the model is forced to respond
+    /// in text. Default true.
+    #[serde(default = "default_agent_loop_detector_strip_tools")]
+    pub agent_loop_detector_strip_tools_on_second_fire: bool,
 }
 
 impl Default for ToolsConfig {
@@ -1997,6 +2008,9 @@ impl Default for ToolsConfig {
             agent_auto_continue_min_tool_calls: default_agent_auto_continue_min_tool_calls(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
             registry_mode: ToolRegistryMode::default(),
+            agent_loop_detector_window: default_agent_loop_detector_window(),
+            agent_loop_detector_strip_tools_on_second_fire: default_agent_loop_detector_strip_tools(
+            ),
         }
     }
 }
@@ -2019,6 +2033,14 @@ fn default_agent_auto_continue_min_tool_calls() -> usize {
 
 fn default_max_tool_result_bytes() -> usize {
     50_000
+}
+
+fn default_agent_loop_detector_window() -> usize {
+    3
+}
+
+fn default_agent_loop_detector_strip_tools() -> bool {
+    true
 }
 
 /// Map tools configuration.

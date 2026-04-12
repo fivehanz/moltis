@@ -1066,6 +1066,7 @@ test.describe("Settings navigation", () => {
 			});
 			state.setConnected(true);
 			await channelsPage.prefetchChannels();
+			await new Promise((resolve) => requestAnimationFrame(() => resolve()));
 		});
 
 		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible();

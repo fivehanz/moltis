@@ -1360,10 +1360,11 @@ async fn onboarding_passes_through_for_remote_during_setup() {
 }
 
 /// During setup (no password), a remote connection to / is redirected to
-/// /setup-required (same as /onboarding).
+/// /onboarding so the user can enter the setup code and complete first-
+/// time setup via the wizard's AuthStep (#646).
 #[cfg(feature = "web-ui")]
 #[tokio::test]
-async fn root_redirects_to_setup_required_for_remote() {
+async fn root_redirects_to_onboarding_for_remote() {
     let (addr, _store, _state) = start_proxied_server().await;
 
     let client = reqwest::Client::builder()
@@ -1383,13 +1384,15 @@ async fn root_redirects_to_setup_required_for_remote() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert_eq!(
-        location, "/setup-required",
-        "remote / during setup must redirect to /setup-required"
+        location, "/onboarding",
+        "remote / during setup must redirect to /onboarding"
     );
 }
 
-/// /setup-required is a public path and serves content even for remote
-/// connections during setup (no redirect loop).
+/// /setup-required is still served as a public stale-bookmark fallback
+/// even for remote connections during setup. It is no longer the default
+/// redirect target, but direct navigation must still work and must not
+/// redirect-loop.
 #[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn setup_required_page_accessible_for_remote() {
@@ -1414,8 +1417,12 @@ async fn setup_required_page_accessible_for_remote() {
     );
     let body = resp.text().await.unwrap();
     assert!(
-        body.contains("Authentication Not Configured"),
-        "/setup-required should contain the setup heading"
+        body.contains("First-time setup"),
+        "/setup-required should contain the new setup heading"
+    );
+    assert!(
+        body.contains("href=\"/onboarding\""),
+        "/setup-required should link to /onboarding"
     );
 }
 

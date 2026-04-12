@@ -15,6 +15,11 @@ use crate::{
         ChatMessage, CompletionResponse, LlmProvider, StreamEvent, ToolCall, Usage, UserContent,
     },
     response_sanitizer::{clean_response, recover_tool_calls_from_content},
+    tool_arg_validator::validate_tool_args,
+    tool_loop_detector::{
+        LoopDetectorAction, ToolCallFingerprint, ToolLoopDetector, format_intervention_message,
+        format_strip_tools_message,
+    },
     tool_parsing::{
         looks_like_failed_tool_call, new_synthetic_tool_call_id, parse_tool_calls_from_text,
     },
@@ -528,6 +533,24 @@ pub enum RunnerEvent {
         iteration: usize,
         max_iterations: usize,
     },
+    /// A tool call was rejected by pre-dispatch schema validation before the
+    /// tool's `execute` method ran. Used in place of the usual
+    /// `ToolCallStart`/`ToolCallEnd` pair for rejected calls so the UI does
+    /// not render a misleading "executing" status for a call that never
+    /// actually executed.
+    ToolCallRejected {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+        error: String,
+    },
+    /// The loop detector fired after observing repeated identical tool-call
+    /// failures. `stage` is 1 for the nudge/directive intervention and 2 for
+    /// the stronger tool-stripping escalation (see issue #658).
+    LoopInterventionFired {
+        stage: u8,
+        tool_name: String,
+    },
 }
 
 /// Detect an explicit shell command in the latest user turn.
@@ -909,6 +932,11 @@ pub async fn run_agent_loop_with_context(
     let mut malformed_retry_count: u8 = 0;
     let mut empty_tool_name_retry_count: u8 = 0;
     let mut auto_continue_count: usize = 0;
+    let mut loop_detector = ToolLoopDetector::new(
+        config.tools.agent_loop_detector_window,
+        config.tools.agent_loop_detector_strip_tools_on_second_fire,
+    );
+    let mut strip_tools_next_iter = false;
 
     loop {
         iterations += 1;
@@ -921,11 +949,17 @@ pub async fn run_agent_loop_with_context(
         }
 
         // Re-compute schemas each iteration so activated tools appear immediately.
-        let schemas_for_api = if native_tools {
+        // When the loop detector has escalated to stage 2, pass an empty tool
+        // list for this single turn so the model is forced to respond in text.
+        let schemas_for_api = if native_tools && !strip_tools_next_iter {
             tools.list_schemas()
         } else {
             vec![]
         };
+        if strip_tools_next_iter {
+            strip_tools_next_iter = false;
+            loop_detector.clear_strip_tools();
+        }
 
         enforce_tool_result_context_budget(
             &mut messages,
@@ -1249,19 +1283,14 @@ pub async fn run_agent_loop_with_context(
         // Execute tool calls concurrently.
         total_tool_calls += response.tool_calls.len();
 
-        // Emit all ToolCallStart events first (preserves notification order).
-        for tc in &response.tool_calls {
-            if let Some(cb) = on_event {
-                cb(RunnerEvent::ToolCallStart {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments: tc.arguments.clone(),
-                });
-            }
-            info!(tool = %tc.name, id = %tc.id, args = %tc.arguments, "executing tool");
-        }
-
         // Build futures for all tool calls (executed concurrently).
+        //
+        // Pre-dispatch schema validation runs synchronously against each
+        // tool's declared `parameters_schema`. Calls that fail validation
+        // are short-circuited to a directive error response — the tool's
+        // `execute` method is never invoked, and the UI receives a
+        // `ToolCallRejected` event instead of the misleading
+        // `ToolCallStart`/"executing" status (issue #658).
         let tool_futures: Vec<_> = response
             .tool_calls
             .iter()
@@ -1287,7 +1316,48 @@ pub async fn run_agent_loop_with_context(
                         args_obj.insert(k.clone(), v.clone());
                     }
                 }
+
+                // Pre-dispatch validation against the tool's schema.
+                let validation_error: Option<String> = if let Some(ref t) = tool {
+                    let schema = t.parameters_schema();
+                    match validate_tool_args(&schema, &args) {
+                        Ok(()) => None,
+                        Err(e) => {
+                            warn!(
+                                tool = %tc_name,
+                                summary = %e.short_summary(),
+                                "tool call rejected by pre-dispatch schema validation"
+                            );
+                            Some(e.to_llm_error_message(&tc_name))
+                        },
+                    }
+                } else {
+                    None
+                };
+
+                // Emit ToolCallStart only for calls that will actually run.
+                // Rejected calls get a single `ToolCallRejected` event after
+                // the concurrent batch completes (handled in the result loop).
+                if validation_error.is_none() {
+                    if let Some(cb) = on_event {
+                        cb(RunnerEvent::ToolCallStart {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: args.clone(),
+                        });
+                    }
+                    info!(tool = %tc_name, id = %tc.id, args = %args, "executing tool");
+                }
+
                 async move {
+                    if let Some(err_msg) = validation_error {
+                        return (
+                            false,
+                            serde_json::json!({ "error": err_msg.clone() }),
+                            Some(err_msg),
+                            true,
+                        );
+                    }
                     // Run BeforeToolCall hook.
                     if let Some(ref hooks) = hook_registry {
                         let payload = HookPayload::BeforeToolCall {
@@ -1304,6 +1374,7 @@ pub async fn run_agent_loop_with_context(
                                     false,
                                     serde_json::json!({ "error": err_str }),
                                     Some(err_str),
+                                    false,
                                 );
                             },
                             Ok(HookAction::ModifyPayload(v)) => {
@@ -1347,9 +1418,9 @@ pub async fn run_agent_loop_with_context(
 
                                 if has_error {
                                     // Tool executed but returned an error in the result
-                                    (false, serde_json::json!({ "result": val }), error_msg)
+                                    (false, serde_json::json!({ "result": val }), error_msg, false)
                                 } else {
-                                    (true, serde_json::json!({ "result": val }), None)
+                                    (true, serde_json::json!({ "result": val }), None, false)
                                 }
                             },
                             Err(e) => {
@@ -1371,6 +1442,7 @@ pub async fn run_agent_loop_with_context(
                                     false,
                                     serde_json::json!({ "error": err_str }),
                                     Some(err_str),
+                                    false,
                                 )
                             },
                         }
@@ -1380,6 +1452,7 @@ pub async fn run_agent_loop_with_context(
                             false,
                             serde_json::json!({ "error": err_str }),
                             Some(err_str),
+                            false,
                         )
                     }
                 }
@@ -1390,26 +1463,63 @@ pub async fn run_agent_loop_with_context(
         let results = futures::future::join_all(tool_futures).await;
 
         // Process results in original order: emit events, append messages.
-        for (tc, (success, mut result, error)) in response.tool_calls.iter().zip(results) {
+        // The loop detector records each outcome as it is processed; the
+        // authoritative intervention decision is derived AFTER the loop from
+        // the detector's post-batch state via `consume_pending_action()`.
+        // This avoids two edge cases that per-call return values hit in
+        // mixed batches:
+        //   1. Trailing success after a triggering failure must NOT leave a
+        //      stale intervention — the reset() abandons it cleanly.
+        //   2. A batch that races through both escalation stages must still
+        //      deliver the stage-1 nudge first, not skip straight to strip.
+        for (tc, (success, mut result, error, rejected)) in response.tool_calls.iter().zip(results)
+        {
             if success {
                 info!(tool = %tc.name, id = %tc.id, "tool execution succeeded");
                 trace!(tool = %tc.name, result = %result, "tool result");
+            } else if rejected {
+                warn!(
+                    tool = %tc.name,
+                    id = %tc.id,
+                    "tool call rejected before execution by pre-dispatch validation"
+                );
             } else {
                 warn!(tool = %tc.name, id = %tc.id, error = %error.as_deref().unwrap_or(""), "tool execution failed");
             }
 
+            // Record outcome in the loop detector. Use explicit success/failure
+            // constructors so tools returning `{success: false}` without an
+            // `error` field still register as failures.
+            if loop_detector.is_enabled() {
+                let fp = if success {
+                    ToolCallFingerprint::success(&tc.name, &tc.arguments)
+                } else {
+                    ToolCallFingerprint::failure(&tc.name, &tc.arguments, error.as_deref())
+                };
+                let _ = loop_detector.record(fp);
+            }
+
             if let Some(cb) = on_event {
-                cb(RunnerEvent::ToolCallEnd {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    success,
-                    error,
-                    result: if success {
-                        result.get("result").cloned()
-                    } else {
-                        None
-                    },
-                });
+                if rejected {
+                    cb(RunnerEvent::ToolCallRejected {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                        error: error.clone().unwrap_or_default(),
+                    });
+                } else {
+                    cb(RunnerEvent::ToolCallEnd {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        success,
+                        error,
+                        result: if success {
+                            result.get("result").cloned()
+                        } else {
+                            None
+                        },
+                    });
+                }
             }
 
             // Dispatch ToolResultPersist hook — the last opportunity for a handler
@@ -1457,6 +1567,71 @@ pub async fn run_agent_loop_with_context(
 
             messages.push(ChatMessage::tool(&tc.id, &tool_result_str));
         }
+
+        // Apply loop-detector intervention if one fired during this batch.
+        apply_loop_detector_intervention(
+            &mut loop_detector,
+            &mut messages,
+            &mut strip_tools_next_iter,
+            on_event,
+        );
+    }
+}
+
+/// Consume the detector's post-batch action (if any) and apply it to the
+/// runner state: push the directive user message into `messages`, emit the
+/// `LoopInterventionFired` UI event, and set `strip_tools_next_iter` when
+/// stage 2 fires. Shared by the streaming and non-streaming loops (issue
+/// #658).
+fn apply_loop_detector_intervention(
+    loop_detector: &mut ToolLoopDetector,
+    messages: &mut Vec<ChatMessage>,
+    strip_tools_next_iter: &mut bool,
+    on_event: Option<&OnEvent>,
+) {
+    if !loop_detector.is_enabled() {
+        return;
+    }
+    match loop_detector.consume_pending_action() {
+        LoopDetectorAction::None => {},
+        LoopDetectorAction::InjectNudge => {
+            let window = loop_detector.window_snapshot();
+            let stuck_tool = window
+                .first()
+                .map(|fp| fp.tool_name.clone())
+                .unwrap_or_default();
+            let intervention = format_intervention_message(&window);
+            info!(
+                tool = %stuck_tool,
+                "loop detector fired (stage 1): injecting directive intervention"
+            );
+            if let Some(cb) = on_event {
+                cb(RunnerEvent::LoopInterventionFired {
+                    stage: 1,
+                    tool_name: stuck_tool,
+                });
+            }
+            messages.push(ChatMessage::user(intervention));
+        },
+        LoopDetectorAction::StripTools => {
+            let stuck_tool = loop_detector
+                .window_snapshot()
+                .first()
+                .map(|fp| fp.tool_name.clone())
+                .unwrap_or_default();
+            info!(
+                tool = %stuck_tool,
+                "loop detector fired (stage 2): stripping tools for next iteration"
+            );
+            if let Some(cb) = on_event {
+                cb(RunnerEvent::LoopInterventionFired {
+                    stage: 2,
+                    tool_name: stuck_tool,
+                });
+            }
+            messages.push(ChatMessage::user(format_strip_tools_message()));
+            *strip_tools_next_iter = true;
+        },
     }
 }
 
@@ -1542,6 +1717,11 @@ pub async fn run_agent_loop_streaming(
     let mut malformed_retry_count: u8 = 0;
     let mut empty_tool_name_retry_count: u8 = 0;
     let mut auto_continue_count: usize = 0;
+    let mut loop_detector = ToolLoopDetector::new(
+        config.tools.agent_loop_detector_window,
+        config.tools.agent_loop_detector_strip_tools_on_second_fire,
+    );
+    let mut strip_tools_next_iter = false;
 
     loop {
         iterations += 1;
@@ -1557,11 +1737,18 @@ pub async fn run_agent_loop_streaming(
         }
 
         // Re-compute schemas each iteration so activated tools appear immediately.
-        let schemas_for_api = if native_tools {
+        // When the loop detector has escalated to stage 2, pass an empty tool
+        // list for this single turn so the model is forced to respond in text
+        // (issue #658).
+        let schemas_for_api = if native_tools && !strip_tools_next_iter {
             tools.list_schemas()
         } else {
             vec![]
         };
+        if strip_tools_next_iter {
+            strip_tools_next_iter = false;
+            loop_detector.clear_strip_tools();
+        }
 
         enforce_tool_result_context_budget(
             &mut messages,
@@ -1773,6 +1960,14 @@ pub async fn run_agent_loop_streaming(
         // Use stream_idx_to_vec_pos to map streaming indices (which may not
         // start at 0) to the actual position in the tool_calls vec.
         for (stream_idx, args_str) in &tool_call_args {
+            // Emit raw accumulated string at debug level so future variants of
+            // "default to {} because no deltas arrived" can be diagnosed
+            // without a repro (issue #658).
+            debug!(
+                stream_idx,
+                args_str = %args_str,
+                "finalizing tool call args"
+            );
             if let Some(&vec_pos) = stream_idx_to_vec_pos.get(stream_idx)
                 && vec_pos < tool_calls.len()
                 && !args_str.is_empty()
@@ -2009,19 +2204,13 @@ pub async fn run_agent_loop_streaming(
         // Execute tool calls concurrently.
         total_tool_calls += tool_calls.len();
 
-        // Emit all ToolCallStart events first (preserves notification order).
-        for tc in &tool_calls {
-            if let Some(cb) = on_event {
-                cb(RunnerEvent::ToolCallStart {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments: tc.arguments.clone(),
-                });
-            }
-            info!(tool = %tc.name, id = %tc.id, args = %tc.arguments, "executing tool");
-        }
-
         // Build futures for all tool calls (executed concurrently).
+        //
+        // Pre-dispatch schema validation runs synchronously against each
+        // tool's declared `parameters_schema`. Calls that fail validation
+        // are short-circuited to a directive error response without invoking
+        // `execute`, and the UI receives `ToolCallRejected` instead of the
+        // misleading "executing" status (issue #658).
         let tool_futures: Vec<_> = tool_calls
             .iter()
             .map(|tc| {
@@ -2044,7 +2233,45 @@ pub async fn run_agent_loop_streaming(
                         args_obj.insert(k.clone(), v.clone());
                     }
                 }
+
+                // Pre-dispatch validation against the tool's schema.
+                let validation_error: Option<String> = if let Some(ref t) = tool {
+                    let schema = t.parameters_schema();
+                    match validate_tool_args(&schema, &args) {
+                        Ok(()) => None,
+                        Err(e) => {
+                            warn!(
+                                tool = %tc_name,
+                                summary = %e.short_summary(),
+                                "tool call rejected by pre-dispatch schema validation"
+                            );
+                            Some(e.to_llm_error_message(&tc_name))
+                        },
+                    }
+                } else {
+                    None
+                };
+
+                if validation_error.is_none() {
+                    if let Some(cb) = on_event {
+                        cb(RunnerEvent::ToolCallStart {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: args.clone(),
+                        });
+                    }
+                    info!(tool = %tc_name, id = %tc.id, args = %args, "executing tool");
+                }
+
                 async move {
+                    if let Some(err_msg) = validation_error {
+                        return (
+                            false,
+                            serde_json::json!({ "error": err_msg.clone() }),
+                            Some(err_msg),
+                            true,
+                        );
+                    }
                     // Run BeforeToolCall hook.
                     if let Some(ref hooks) = hook_registry {
                         let payload = HookPayload::BeforeToolCall {
@@ -2061,6 +2288,7 @@ pub async fn run_agent_loop_streaming(
                                     false,
                                     serde_json::json!({ "error": err_str }),
                                     Some(err_str),
+                                    false,
                                 );
                             }
                             Ok(HookAction::ModifyPayload(v)) => {
@@ -2102,9 +2330,9 @@ pub async fn run_agent_loop_streaming(
                                 }
 
                                 if has_error {
-                                    (false, serde_json::json!({ "result": val }), error_msg)
+                                    (false, serde_json::json!({ "result": val }), error_msg, false)
                                 } else {
-                                    (true, serde_json::json!({ "result": val }), None)
+                                    (true, serde_json::json!({ "result": val }), None, false)
                                 }
                             }
                             Err(e) => {
@@ -2125,6 +2353,7 @@ pub async fn run_agent_loop_streaming(
                                     false,
                                     serde_json::json!({ "error": err_str }),
                                     Some(err_str),
+                                    false,
                                 )
                             }
                         }
@@ -2134,6 +2363,7 @@ pub async fn run_agent_loop_streaming(
                             false,
                             serde_json::json!({ "error": err_str }),
                             Some(err_str),
+                            false,
                         )
                     }
                 }
@@ -2144,26 +2374,54 @@ pub async fn run_agent_loop_streaming(
         let results = futures::future::join_all(tool_futures).await;
 
         // Process results in original order: emit events, append messages.
-        for (tc, (success, mut result, error)) in tool_calls.iter().zip(results) {
+        // Intervention is derived from the detector's post-batch state
+        // via `consume_pending_action()` below — see the non-streaming
+        // path for the rationale (issue #658).
+        for (tc, (success, mut result, error, rejected)) in tool_calls.iter().zip(results) {
             if success {
                 info!(tool = %tc.name, id = %tc.id, "tool execution succeeded");
                 trace!(tool = %tc.name, result = %result, "tool result");
+            } else if rejected {
+                warn!(
+                    tool = %tc.name,
+                    id = %tc.id,
+                    "tool call rejected before execution by pre-dispatch validation"
+                );
             } else {
                 warn!(tool = %tc.name, id = %tc.id, error = %error.as_deref().unwrap_or(""), "tool execution failed");
             }
 
+            // Record outcome in the loop detector (issue #658).
+            if loop_detector.is_enabled() {
+                let fp = if success {
+                    ToolCallFingerprint::success(&tc.name, &tc.arguments)
+                } else {
+                    ToolCallFingerprint::failure(&tc.name, &tc.arguments, error.as_deref())
+                };
+                let _ = loop_detector.record(fp);
+            }
+
             if let Some(cb) = on_event {
-                cb(RunnerEvent::ToolCallEnd {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    success,
-                    error,
-                    result: if success {
-                        result.get("result").cloned()
-                    } else {
-                        None
-                    },
-                });
+                if rejected {
+                    cb(RunnerEvent::ToolCallRejected {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        arguments: tc.arguments.clone(),
+                        error: error.clone().unwrap_or_default(),
+                    });
+                } else {
+                    cb(RunnerEvent::ToolCallEnd {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        success,
+                        error,
+                        result: if success {
+                            result.get("result").cloned()
+                        } else {
+                            None
+                        },
+                    });
+                }
             }
 
             // Dispatch ToolResultPersist hook — the last opportunity for a handler
@@ -2211,6 +2469,14 @@ pub async fn run_agent_loop_streaming(
 
             messages.push(ChatMessage::tool(&tc.id, &tool_result_str));
         }
+
+        // Apply loop-detector intervention if one fired during this batch.
+        apply_loop_detector_intervention(
+            &mut loop_detector,
+            &mut messages,
+            &mut strip_tools_next_iter,
+            on_event,
+        );
     }
 }
 
@@ -8460,5 +8726,615 @@ mod tests {
             let tool_names = tool_names.lock().unwrap_or_else(|e| e.into_inner());
             assert_eq!(tool_names.as_slice(), ["echo_tool"]);
         }
+    }
+
+    // Reflex-loop detector tests — issue #658.
+
+    struct ReflexExecProvider {
+        reflex_count: std::sync::atomic::AtomicUsize,
+        saw_intervention: std::sync::atomic::AtomicBool,
+    }
+
+    fn history_contains_intervention(messages: &[ChatMessage]) -> bool {
+        messages.iter().any(|m| match m {
+            ChatMessage::User {
+                content: UserContent::Text(text),
+            } => text.contains("LOOP DETECTED") || text.contains("TOOLS DISABLED"),
+            _ => false,
+        })
+    }
+
+    #[async_trait]
+    impl LlmProvider for ReflexExecProvider {
+        fn name(&self) -> &str {
+            "mock-reflex"
+        }
+
+        fn id(&self) -> &str {
+            "mock-reflex"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            if history_contains_intervention(messages) {
+                self.saw_intervention
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return Ok(CompletionResponse {
+                    text: Some("Sorry, I do not know what command you wanted.".into()),
+                    tool_calls: vec![],
+                    usage: Usage {
+                        input_tokens: 5,
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
+                });
+            }
+            let n = self
+                .reflex_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CompletionResponse {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: format!("call_{n}"),
+                    name: "exec".into(),
+                    arguments: serde_json::json!({}),
+                }],
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+            })
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn reflex_loop_fires_detector_and_terminates_non_streaming() {
+        let provider = Arc::new(ReflexExecProvider {
+            reflex_count: std::sync::atomic::AtomicUsize::new(0),
+            saw_intervention: std::sync::atomic::AtomicBool::new(false),
+        });
+        let saw = Arc::clone(&provider) as Arc<dyn LlmProvider>;
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestExecTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        });
+
+        let result = run_agent_loop(
+            saw,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("Run something"),
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.iterations <= 5,
+            "runner should intervene before iter 5, got {}",
+            result.iterations
+        );
+        assert!(result.text.contains("Sorry"));
+
+        assert!(
+            provider
+                .saw_intervention
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "provider never saw the loop-detector intervention message"
+        );
+
+        let events_snapshot = events.lock().unwrap().clone();
+        let any_start = events_snapshot
+            .iter()
+            .any(|e| matches!(e, RunnerEvent::ToolCallStart { .. }));
+        assert!(
+            !any_start,
+            "rejected calls must not emit ToolCallStart, got: {events_snapshot:?}"
+        );
+        let rejected_count = events_snapshot
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::ToolCallRejected { .. }))
+            .count();
+        assert!(
+            rejected_count >= 3,
+            "expected at least 3 ToolCallRejected events, got {rejected_count}"
+        );
+        assert!(
+            events_snapshot
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::LoopInterventionFired { .. })),
+            "expected a LoopInterventionFired event"
+        );
+    }
+
+    struct ReflexExecStreamProvider {
+        reflex_count: std::sync::atomic::AtomicUsize,
+        saw_intervention: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ReflexExecStreamProvider {
+        fn name(&self) -> &str {
+            "mock-reflex-stream"
+        }
+
+        fn id(&self) -> &str {
+            "mock-reflex-stream"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            unreachable!("streaming test should not call complete()")
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+
+        fn stream_with_tools(
+            &self,
+            messages: Vec<ChatMessage>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            if history_contains_intervention(&messages) {
+                self.saw_intervention
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let events = vec![
+                    StreamEvent::Delta(
+                        "I cannot proceed because I do not know what command you wanted me to run. \
+                         Please tell me the exact command to execute.".into(),
+                    ),
+                    StreamEvent::Done(Usage {
+                        input_tokens: 5,
+                        output_tokens: 5,
+                        ..Default::default()
+                    }),
+                ];
+                return Box::pin(tokio_stream::iter(events));
+            }
+            let n = self
+                .reflex_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let events = vec![
+                StreamEvent::ToolCallStart {
+                    id: format!("call_{n}"),
+                    name: "exec".into(),
+                    index: 0,
+                },
+                StreamEvent::ToolCallComplete { index: 0 },
+                StreamEvent::Done(Usage {
+                    input_tokens: 5,
+                    output_tokens: 5,
+                    ..Default::default()
+                }),
+            ];
+            Box::pin(tokio_stream::iter(events))
+        }
+    }
+
+    #[tokio::test]
+    async fn reflex_loop_fires_detector_and_terminates_streaming() {
+        let provider = Arc::new(ReflexExecStreamProvider {
+            reflex_count: std::sync::atomic::AtomicUsize::new(0),
+            saw_intervention: std::sync::atomic::AtomicBool::new(false),
+        });
+        let saw = Arc::clone(&provider) as Arc<dyn LlmProvider>;
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestExecTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        });
+
+        let result = run_agent_loop_streaming(
+            saw,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("Run something"),
+            Some(&on_event),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            result.iterations <= 5,
+            "streaming runner should intervene before iter 5, got {}",
+            result.iterations
+        );
+        assert!(
+            provider
+                .saw_intervention
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "streaming provider never saw the loop-detector intervention"
+        );
+
+        let events_snapshot = events.lock().unwrap().clone();
+        let rejected_count = events_snapshot
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::ToolCallRejected { .. }))
+            .count();
+        assert!(
+            rejected_count >= 3,
+            "streaming: expected >=3 ToolCallRejected events, got {rejected_count}"
+        );
+        assert!(
+            events_snapshot
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::LoopInterventionFired { .. })),
+            "streaming: expected LoopInterventionFired event"
+        );
+    }
+
+    struct LegitimateRetryProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for LegitimateRetryProvider {
+        fn name(&self) -> &str {
+            "mock-legitimate-retry"
+        }
+
+        fn id(&self) -> &str {
+            "mock-legitimate-retry"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match n {
+                0 => Ok(CompletionResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "exec".into(),
+                        arguments: serde_json::json!({"command": "ls /nonexistent-xyz"}),
+                    }],
+                    usage: Usage::default(),
+                }),
+                1 => Ok(CompletionResponse {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "c2".into(),
+                        name: "exec".into(),
+                        arguments: serde_json::json!({"command": "echo recovered"}),
+                    }],
+                    usage: Usage::default(),
+                }),
+                _ => Ok(CompletionResponse {
+                    text: Some("Done".into()),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                }),
+            }
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn legitimate_retry_does_not_fire_loop_detector() {
+        let provider = Arc::new(LegitimateRetryProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestExecTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        });
+
+        let result = run_agent_loop(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("Run something"),
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.text, "Done");
+        let events_snapshot = events.lock().unwrap().clone();
+        assert!(
+            !events_snapshot
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::LoopInterventionFired { .. })),
+            "legitimate retry must not trigger loop detector, got {events_snapshot:?}"
+        );
+    }
+
+    /// Provider that emits a parallel batch `[exec({}), exec("ls /tmp")]`
+    /// on the first turn — one call will fail schema validation and one
+    /// will succeed — then returns text. Exercises the "trailing success in
+    /// the same batch suppresses intervention" edge case end-to-end (Greptile
+    /// finding #1 on commit cf39c1a6).
+    struct MixedBatchProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for MixedBatchProvider {
+        fn name(&self) -> &str {
+            "mock-mixed-batch"
+        }
+
+        fn id(&self) -> &str {
+            "mock-mixed-batch"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // Two failures followed by a success in a single batch is
+                // the trickiest input for the loop detector: per-call
+                // return values would accumulate a pending nudge that the
+                // success then silently abandons. The runner must agree
+                // with the detector's post-batch state (None) and NOT
+                // inject an intervention.
+                return Ok(CompletionResponse {
+                    text: None,
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "c1".into(),
+                            name: "exec".into(),
+                            arguments: serde_json::json!({}),
+                        },
+                        ToolCall {
+                            id: "c2".into(),
+                            name: "exec".into(),
+                            arguments: serde_json::json!({}),
+                        },
+                        ToolCall {
+                            id: "c3".into(),
+                            name: "exec".into(),
+                            arguments: serde_json::json!({"command": "true"}),
+                        },
+                    ],
+                    usage: Usage::default(),
+                });
+            }
+            Ok(CompletionResponse {
+                text: Some(
+                    "Mixed batch complete — proceeding to the next step of the task.".into(),
+                ),
+                tool_calls: vec![],
+                usage: Usage::default(),
+            })
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_batch_with_trailing_success_does_not_fire_intervention() {
+        // Regression for Greptile finding #1: trailing success must cancel
+        // any pending intervention from earlier rejects in the same batch.
+        let provider = Arc::new(MixedBatchProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestExecTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        });
+
+        let _result = run_agent_loop(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("Run something"),
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let events_snapshot = events.lock().unwrap().clone();
+        assert!(
+            !events_snapshot
+                .iter()
+                .any(|e| matches!(e, RunnerEvent::LoopInterventionFired { .. })),
+            "trailing success in the same batch must not fire an intervention; \
+             got events: {events_snapshot:?}"
+        );
+        // Confirm the expected mix of rejected + successful calls was dispatched.
+        let rejected = events_snapshot
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::ToolCallRejected { .. }))
+            .count();
+        let started = events_snapshot
+            .iter()
+            .filter(|e| matches!(e, RunnerEvent::ToolCallStart { .. }))
+            .count();
+        assert_eq!(rejected, 2, "two calls should have been rejected");
+        assert_eq!(started, 1, "one successful call should have started");
+    }
+
+    /// Provider that emits FOUR identical `exec({})` calls in a single
+    /// batch. This races the loop detector through both escalation stages
+    /// within one batch; the runner must still deliver the stage-1 nudge
+    /// first rather than skipping straight to strip-tools (Greptile finding
+    /// #2 on commit cf39c1a6).
+    struct ParallelReflexProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ParallelReflexProvider {
+        fn name(&self) -> &str {
+            "mock-parallel-reflex"
+        }
+
+        fn id(&self) -> &str {
+            "mock-parallel-reflex"
+        }
+
+        fn supports_tools(&self) -> bool {
+            true
+        }
+
+        async fn complete(
+            &self,
+            messages: &[ChatMessage],
+            _tools: &[serde_json::Value],
+        ) -> Result<CompletionResponse> {
+            if history_contains_intervention(messages) {
+                return Ok(CompletionResponse {
+                    text: Some(
+                        "I cannot proceed without knowing what command to run. Please advise."
+                            .into(),
+                    ),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                });
+            }
+            let _n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(CompletionResponse {
+                text: None,
+                tool_calls: (0..4)
+                    .map(|i| ToolCall {
+                        id: format!("call_{i}"),
+                        name: "exec".into(),
+                        arguments: serde_json::json!({}),
+                    })
+                    .collect(),
+                usage: Usage::default(),
+            })
+        }
+
+        fn stream(
+            &self,
+            _messages: Vec<ChatMessage>,
+        ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send + '_>> {
+            Box::pin(tokio_stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_batch_with_stage_skip_delivers_nudge_first() {
+        // Regression for Greptile finding #2: four identical failing calls
+        // in one batch race past the nudge stage and would skip straight to
+        // strip-tools. The runner must still deliver the stage-1 nudge.
+        let provider = Arc::new(ParallelReflexProvider {
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(TestExecTool));
+
+        let events: Arc<std::sync::Mutex<Vec<RunnerEvent>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let on_event: OnEvent = Box::new(move |e| {
+            events_clone.lock().unwrap().push(e);
+        });
+
+        let _result = run_agent_loop(
+            provider,
+            &tools,
+            "You are a test bot.",
+            &UserContent::text("Run something"),
+            Some(&on_event),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let events_snapshot = events.lock().unwrap().clone();
+        let intervention_stages: Vec<u8> = events_snapshot
+            .iter()
+            .filter_map(|e| match e {
+                RunnerEvent::LoopInterventionFired { stage, .. } => Some(*stage),
+                _ => None,
+            })
+            .collect();
+        // The first intervention fired must be stage 1 (nudge), not stage 2.
+        assert!(
+            !intervention_stages.is_empty(),
+            "expected at least one LoopInterventionFired event"
+        );
+        assert_eq!(
+            intervention_stages[0], 1,
+            "stage-1 nudge must be delivered first even when a single batch races \
+             through both escalation stages; stages were: {intervention_stages:?}"
+        );
     }
 }

@@ -155,10 +155,16 @@ pub async fn auth_gate(
                 next.run(request).await
             } else {
                 // Remote connections to other pages when auth is not
-                // configured yet: redirect to a static "setup required"
-                // page instead of passing through, which would cause a
-                // redirect loop between `/` and `/onboarding` (#350).
-                Redirect::to("/setup-required").into_response()
+                // configured yet: send them to /onboarding so they can
+                // complete first-time setup via the setup-code flow
+                // (#350, #646).  The original redirect loop between `/`
+                // and `/onboarding` was fixed separately at the SPA
+                // template layer via `should_redirect_from_onboarding`,
+                // which keeps remote visitors on /onboarding while auth
+                // setup is pending.  The setup code (printed to stdout)
+                // still prevents an unauthorized remote visitor from
+                // claiming the instance.
+                Redirect::to("/onboarding").into_response()
             }
         },
         AuthResult::Unauthorized => {

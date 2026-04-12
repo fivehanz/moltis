@@ -1371,6 +1371,28 @@ fn prompt_build_limits_from_config(config: &moltis_config::MoltisConfig) -> Prom
     }
 }
 
+/// Discover skills from the default filesystem paths, honoring `[skills] enabled`.
+///
+/// Returns an empty list when `config.skills.enabled` is `false`, so callers can
+/// unconditionally feed the result into prompt building / tool filtering without
+/// injecting skills into the LLM context when the operator has disabled them.
+async fn discover_skills_if_enabled(
+    config: &moltis_config::MoltisConfig,
+) -> Vec<moltis_skills::types::SkillMetadata> {
+    if !config.skills.enabled {
+        return Vec::new();
+    }
+    let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
+    let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
+    match discoverer.discover().await {
+        Ok(skills) => skills,
+        Err(e) => {
+            warn!("failed to discover skills: {e}");
+            Vec::new()
+        },
+    }
+}
+
 fn resolve_channel_runtime_context(
     session_key: &str,
     session_entry: Option<&SessionEntry>,
@@ -3934,16 +3956,10 @@ impl ChatService for LiveChatService {
             run_id: Some(run_id.clone()),
         };
 
-        // Discover enabled skills/plugins for prompt injection.
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let discovered_skills = match discoverer.discover().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("failed to discover skills: {e}");
-                Vec::new()
-            },
-        };
+        // Discover enabled skills/plugins for prompt injection (gated on
+        // `[skills] enabled` — see #655).
+        let discovered_skills =
+            discover_skills_if_enabled(&moltis_config::discover_and_load()).await;
 
         // Check if MCP tools are disabled for this session and capture
         // per-session sandbox override details for prompt runtime context.
@@ -5273,23 +5289,20 @@ impl ChatService for LiveChatService {
             "promptSymbol": exec_prompt_symbol,
         });
 
-        // Discover enabled skills/plugins (only if provider supports tools)
+        // Discover enabled skills/plugins (only if provider supports tools and
+        // `[skills] enabled` is true — see #655).
         let skills_list: Vec<Value> = if supports_tools {
-            let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-            let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-            match discoverer.discover().await {
-                Ok(s) => s
-                    .iter()
-                    .map(|s| {
-                        serde_json::json!({
-                            "name": s.name,
-                            "description": s.description,
-                            "source": s.source,
-                        })
+            discover_skills_if_enabled(&config)
+                .await
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "description": s.description,
+                        "source": s.source,
                     })
-                    .collect(),
-                Err(_) => vec![],
-            }
+                })
+                .collect()
         } else {
             vec![]
         };
@@ -5373,16 +5386,8 @@ impl ChatService for LiveChatService {
             .resolve_project_context(&session_key, conn_id.as_deref())
             .await;
 
-        // Discover skills.
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let discovered_skills = match discoverer.discover().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("failed to discover skills: {e}");
-                Vec::new()
-            },
-        };
+        // Discover skills (gated on `[skills] enabled` — see #655).
+        let discovered_skills = discover_skills_if_enabled(&persona.config).await;
 
         // Check MCP disabled.
         let mcp_disabled = session_entry
@@ -5504,16 +5509,8 @@ impl ChatService for LiveChatService {
             .resolve_project_context(&session_key, conn_id.as_deref())
             .await;
 
-        // Discover skills.
-        let search_paths = moltis_skills::discover::FsSkillDiscoverer::default_paths();
-        let discoverer = moltis_skills::discover::FsSkillDiscoverer::new(search_paths);
-        let discovered_skills = match discoverer.discover().await {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("failed to discover skills: {e}");
-                Vec::new()
-            },
-        };
+        // Discover skills (gated on `[skills] enabled` — see #655).
+        let discovered_skills = discover_skills_if_enabled(&persona.config).await;
 
         // Check MCP disabled.
         let mcp_disabled = session_entry
@@ -7244,6 +7241,54 @@ async fn run_with_tools(
                         "state": "retrying",
                         "error": error_obj,
                         "retryAfterMs": delay_ms,
+                        "seq": seq,
+                    })
+                },
+                RunnerEvent::ToolCallRejected {
+                    id,
+                    name,
+                    arguments,
+                    error,
+                } => {
+                    // Pre-dispatch validation failure — the tool's `execute`
+                    // method never ran. Emit as a terminal tool_call_end with
+                    // a `rejected: true` marker so the UI can render it
+                    // distinctly from a normal execution failure (issue #658).
+                    if let Some(ref map) = active_tool_calls {
+                        let mut guard = map.write().await;
+                        if let Some(calls) = guard.get_mut(&sk) {
+                            calls.retain(|tc| tc.id != id);
+                            if calls.is_empty() {
+                                guard.remove(&sk);
+                            }
+                        }
+                    }
+                    serde_json::json!({
+                        "runId": run_id,
+                        "sessionKey": sk,
+                        "state": "tool_call_end",
+                        "toolCallId": id,
+                        "toolName": name,
+                        "arguments": arguments,
+                        "success": false,
+                        "rejected": true,
+                        "error": parse_chat_error(&error, None),
+                        "seq": seq,
+                    })
+                },
+                RunnerEvent::LoopInterventionFired { stage, tool_name } => {
+                    serde_json::json!({
+                        "runId": run_id,
+                        "sessionKey": sk,
+                        "state": "notice",
+                        "title": "Loop detected",
+                        "message": format!(
+                            "Detected repeated failed calls to `{}`. \
+                             Intervening (stage {}) to break the loop.",
+                            tool_name, stage
+                        ),
+                        "loopInterventionStage": stage,
+                        "stuckTool": tool_name,
                         "seq": seq,
                     })
                 },
@@ -15246,6 +15291,80 @@ mod tests {
         assert!(
             err.contains("timed out"),
             "error should mention timeout: {err}"
+        );
+    }
+
+    /// Serializes tests that mutate the global `moltis_config` data_dir
+    /// override so they don't race within the chat crate's test binary.
+    /// A `Semaphore` with a single permit is used here instead of
+    /// `Mutex<()>` because CLAUDE.md forbids bare `Mutex<()>` — a mutex must
+    /// guard real state. This semaphore is a pure serialization primitive
+    /// for a separately-owned global (`moltis_config`'s data_dir override).
+    static SKILLS_TEST_DATA_DIR_LOCK: Semaphore = Semaphore::const_new(1);
+
+    /// Regression test for #655: `[skills] enabled = false` must short-circuit
+    /// skill discovery so nothing from the filesystem ends up in the LLM prompt.
+    #[tokio::test]
+    async fn discover_skills_if_enabled_short_circuits_when_disabled() {
+        let _permit = SKILLS_TEST_DATA_DIR_LOCK
+            .acquire()
+            .await
+            .expect("semaphore closed");
+
+        // Point data_dir at a temp dir containing a real SKILL.md so that if
+        // the helper *did* fall through to the discoverer, it would return a
+        // non-empty list and fail this assertion.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = tmp.path().join("skills").join("planted-skill");
+        std::fs::create_dir_all(&skills_dir).expect("mkdir");
+        std::fs::write(
+            skills_dir.join("SKILL.md"),
+            "---\nname: planted-skill\ndescription: should not appear\n---\nbody",
+        )
+        .expect("write");
+        moltis_config::set_data_dir(tmp.path().to_path_buf());
+
+        let mut cfg = moltis_config::MoltisConfig::default();
+        cfg.skills.enabled = false;
+
+        let result = discover_skills_if_enabled(&cfg).await;
+        moltis_config::clear_data_dir();
+
+        assert!(
+            result.is_empty(),
+            "disabled skills must yield no discovered skills, got: {result:?}",
+        );
+    }
+
+    /// Complement to the short-circuit test: when enabled, the helper actually
+    /// invokes the filesystem discoverer. Validates the other arm of the
+    /// `enabled` branch so we don't accidentally hard-code `Vec::new()`.
+    #[tokio::test]
+    async fn discover_skills_if_enabled_runs_discoverer_when_enabled() {
+        let _permit = SKILLS_TEST_DATA_DIR_LOCK
+            .acquire()
+            .await
+            .expect("semaphore closed");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = tmp.path().join("skills").join("live-skill");
+        std::fs::create_dir_all(&skills_dir).expect("mkdir");
+        std::fs::write(
+            skills_dir.join("SKILL.md"),
+            "---\nname: live-skill\ndescription: visible to prompt\n---\nbody",
+        )
+        .expect("write");
+        moltis_config::set_data_dir(tmp.path().to_path_buf());
+
+        let mut cfg = moltis_config::MoltisConfig::default();
+        cfg.skills.enabled = true;
+
+        let result = discover_skills_if_enabled(&cfg).await;
+        moltis_config::clear_data_dir();
+
+        assert!(
+            result.iter().any(|s| s.name == "live-skill"),
+            "enabled skills must be discovered from data_dir, got: {result:?}",
         );
     }
 }
