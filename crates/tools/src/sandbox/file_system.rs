@@ -661,13 +661,12 @@ async fn oci_probe_write_target(
     }
 }
 
-fn extract_single_file_from_tar(
-    tar_bytes: &[u8],
+fn extract_single_file_from_tar_reader<R: io::Read>(
+    reader: R,
     file_path: &str,
     max_bytes: u64,
 ) -> Result<SandboxReadResult> {
-    let cursor = io::Cursor::new(tar_bytes);
-    let mut archive = Archive::new(cursor);
+    let mut archive = Archive::new(reader);
     let mut entries = archive.entries().map_err(|error| {
         Error::message(format!(
             "failed to read OCI tar stream for '{file_path}': {error}"
@@ -704,6 +703,14 @@ fn extract_single_file_from_tar(
         return Ok(SandboxReadResult::TooLarge(bytes.len() as u64));
     }
     Ok(SandboxReadResult::Ok(bytes))
+}
+
+fn extract_single_file_from_tar(
+    tar_bytes: &[u8],
+    file_path: &str,
+    max_bytes: u64,
+) -> Result<SandboxReadResult> {
+    extract_single_file_from_tar_reader(io::Cursor::new(tar_bytes), file_path, max_bytes)
 }
 
 fn build_single_file_tar(file_path: &str, content: &[u8]) -> Result<Vec<u8>> {
@@ -954,14 +961,41 @@ pub async fn oci_container_read_file(
     match oci_probe_file_kind(cli, container_name, file_path).await? {
         OciPathKind::File { bytes } if bytes > max_bytes => Ok(SandboxReadResult::TooLarge(bytes)),
         OciPathKind::File { .. } => {
-            let output = tokio::process::Command::new(cli)
-                .args(["cp", &format!("{container_name}:{file_path}"), "-"])
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()
-                .await?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
+            let cli = cli.to_string();
+            let container_name = container_name.to_string();
+            let file_path = file_path.to_string();
+            tokio::task::spawn_blocking(move || -> Result<SandboxReadResult> {
+                let mut child = std::process::Command::new(&cli)
+                    .args(["cp", &format!("{container_name}:{file_path}"), "-"])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()?;
+
+                let stdout = child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| Error::message("failed to open OCI copy stdout"))?;
+                let result = extract_single_file_from_tar_reader(stdout, &file_path, max_bytes);
+                let stop_child = !matches!(result, Ok(SandboxReadResult::Ok(_)));
+
+                if stop_child {
+                    let _ = child.kill();
+                }
+
+                let mut stderr = String::new();
+                if let Some(mut stderr_pipe) = child.stderr.take() {
+                    let _ = stderr_pipe.read_to_string(&mut stderr);
+                }
+                let status = child.wait()?;
+
+                if stop_child {
+                    return result;
+                }
+
+                if status.success() {
+                    return result;
+                }
+
                 if let Some(kind) = classify_container_copy_error(stderr.trim()) {
                     return Ok(match kind {
                         ContainerCopyErrorKind::NotFound => SandboxReadResult::NotFound,
@@ -970,12 +1004,14 @@ pub async fn oci_container_read_file(
                         },
                     });
                 }
-                return Err(Error::message(format!(
+
+                Err(Error::message(format!(
                     "{cli} cp failed for '{file_path}': {}",
                     stderr.trim()
-                )));
-            }
-            extract_single_file_from_tar(&output.stdout, file_path, max_bytes)
+                )))
+            })
+            .await
+            .map_err(|error| Error::message(format!("blocking OCI read task failed: {error}")))?
         },
         OciPathKind::Directory | OciPathKind::Other => Ok(SandboxReadResult::NotRegularFile),
     }
