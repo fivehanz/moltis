@@ -118,6 +118,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - name: Check Rust file size limit
+        run: ./scripts/check-file-size.sh
       - name: Check website install script sync
         run: ./scripts/check-website-install-sync.sh
       - name: Check install script package names match release workflow
