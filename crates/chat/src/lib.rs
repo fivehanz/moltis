@@ -1734,7 +1734,9 @@ fn build_policy_context(
         channel_account_id: host.and_then(|h| h.channel_account_id.clone()),
         group_id: host.and_then(|h| h.channel_chat_type.clone()),
         sender_id,
-        sandboxed: false,
+        sandboxed: runtime_context
+            .and_then(|rc| rc.sandbox.as_ref())
+            .is_some_and(|s| s.exec_sandboxed),
     }
 }
 
