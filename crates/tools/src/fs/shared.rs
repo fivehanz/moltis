@@ -8,7 +8,7 @@ use {
     globset::{Glob, GlobSet, GlobSetBuilder},
     serde_json::{Value, json},
     std::{
-        collections::{HashMap, HashSet},
+        collections::HashMap,
         io,
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
@@ -229,8 +229,10 @@ pub fn session_key_from(params: &Value) -> &str {
 /// (for loop detection after context compression).
 #[derive(Debug, Default)]
 pub struct SessionFsState {
-    /// Canonical paths the session has successfully read.
-    pub read_files: HashSet<PathBuf>,
+    /// Canonical paths the session has successfully read, with the
+    /// mtime at read time. Edit/Write check this to detect files
+    /// modified by linters or hooks between Read and mutation.
+    pub read_files: HashMap<PathBuf, Option<std::time::SystemTime>>,
     /// Most recent read signature: (path, offset, limit).
     pub last_read_key: Option<(PathBuf, usize, usize)>,
     /// Number of consecutive reads matching `last_read_key` with no
@@ -449,6 +451,42 @@ pub fn enforce_must_read_before_write(
     ))
 }
 
+/// Check whether a file has been modified since the session last read it.
+///
+/// Returns a typed error payload when the current mtime differs from
+/// the recorded mtime. Returns `None` (proceed) when mtimes match,
+/// when tracking is off, or when the file was never read (the latter
+/// is handled by `enforce_must_read_before_write` separately).
+///
+/// Ported from Claude Code's errorCode 7: *"File has been modified since
+/// read, either by the user or by a linter. Read it again."*
+#[must_use]
+pub fn check_file_modified_since_read(
+    fs_state: Option<&FsState>,
+    session_key: &str,
+    canonical_path: &Path,
+    file_path_display: &str,
+) -> Option<Value> {
+    let state = fs_state?;
+    let guard = state.lock().unwrap_or_else(|p| p.into_inner());
+    let recorded_mtime = guard.read_mtime(session_key, canonical_path)?;
+    let current_mtime = std::fs::metadata(canonical_path)
+        .ok()
+        .and_then(|m| m.modified().ok());
+    let Some(current) = current_mtime else {
+        return None; // can't stat — let the write proceed and fail naturally
+    };
+    if current != recorded_mtime {
+        return Some(json!({
+            "kind": "file_modified_since_read",
+            "file_path": file_path_display,
+            "error": "File has been modified since read, either by the user or by a linter. Read it again before attempting to edit.",
+            "detail": "",
+        }));
+    }
+    None
+}
+
 /// Note a successful mutation so the per-session loop counter is reset
 /// for subsequent reads of the same path.
 pub fn note_fs_mutation(fs_state: Option<&FsState>, session_key: &str, file_path: &str) {
@@ -472,6 +510,7 @@ impl FsStateInner {
         path: PathBuf,
         offset: usize,
         limit: usize,
+        mtime: Option<std::time::SystemTime>,
     ) -> usize {
         let entry = self.sessions.entry(session_key.to_string()).or_default();
         let key = (path.clone(), offset, limit);
@@ -481,7 +520,7 @@ impl FsStateInner {
             entry.last_read_key = Some(key);
             entry.consecutive_reads = 1;
         }
-        entry.read_files.insert(path);
+        entry.read_files.insert(path, mtime);
         entry.consecutive_reads
     }
 
@@ -490,7 +529,17 @@ impl FsStateInner {
     pub fn has_been_read(&self, session_key: &str, path: &Path) -> bool {
         self.sessions
             .get(session_key)
-            .is_some_and(|state| state.read_files.contains(path))
+            .is_some_and(|state| state.read_files.contains_key(path))
+    }
+
+    /// Return the mtime that was recorded when `path` was last read
+    /// by `session_key`. Returns `None` if the file was never read or
+    /// if the mtime was unavailable at read time.
+    #[must_use]
+    pub fn read_mtime(&self, session_key: &str, path: &Path) -> Option<std::time::SystemTime> {
+        self.sessions
+            .get(session_key)
+            .and_then(|state| state.read_files.get(path).copied().flatten())
     }
 
     /// Current consecutive-read count for `session_key`. Returns 0
@@ -585,8 +634,40 @@ pub async fn ensure_regular_file(path: &Path) -> Result<u64> {
     Ok(meta.len())
 }
 
-/// Heuristic binary detection: if the first `BINARY_SNIFF_BYTES` contain a null
-/// byte, treat as binary. Mirrors what `grep` and most text editors do.
+/// Known binary file extensions (ported from Claude Code's `KHK` set).
+///
+/// Checked by [`is_binary_extension`] before the content-based
+/// null-byte heuristic so files like `.woff2` or `.sqlite` are
+/// rejected even when they lack null bytes in the first 8 KB.
+const BINARY_EXTENSIONS: &[&str] = &[
+    // Images
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "tiff", "tif", // Video
+    "mp4", "mov", "avi", "mkv", "webm", "wmv", "flv", "m4v", "mpeg", "mpg", // Audio
+    "mp3", "wav", "ogg", "flac", "aac", "m4a", "wma", "aiff", "opus", // Archives
+    "zip", "tar", "gz", "bz2", "7z", "rar", "xz", "z", "tgz", "iso",
+    // Executables / native
+    "exe", "dll", "so", "dylib", "bin", "o", "a", "obj", "lib", "app", "msi", "deb", "rpm",
+    // Documents (binary formats)
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", // Fonts
+    "ttf", "otf", "woff", "woff2", "eot", // Compiled / bytecode
+    "pyc", "pyo", "class", "jar", "war", "ear", // Runtime artifacts
+    "node", "wasm", "rlib", // Databases
+    "sqlite", "sqlite3", "db", "mdb", "idx", // Design tools
+    "psd", "ai", "eps", "sketch", "fig", "xd", // 3D / legacy
+    "blend", "3ds", "max", "swf", "fla", // Misc binary
+    "lockb", "dat", "data",
+];
+
+/// Check file extension against the known binary set.
+#[must_use]
+pub fn is_binary_extension(path: &str) -> bool {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    BINARY_EXTENSIONS.iter().any(|&b| b == ext)
+}
+
+/// Heuristic binary detection: extension-based check first (fast, covers
+/// known binary formats), then null-byte probe in the first
+/// `BINARY_SNIFF_BYTES` (catches everything else).
 #[must_use]
 pub fn looks_binary(bytes: &[u8]) -> bool {
     let limit = bytes.len().min(BINARY_SNIFF_BYTES);
@@ -615,6 +696,9 @@ pub fn format_numbered_lines_with_cap(
     max_lines: usize,
     max_output_bytes: usize,
 ) -> NumberedLines {
+    // Strip UTF-8 BOM at byte 0 (matches Claude Code's BOM handling).
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+
     // Split on '\n' so that a trailing newline does not create an extra empty
     // line in the output (common cat -n behavior).
     let mut lines: Vec<&str> = content.split('\n').collect();
@@ -760,9 +844,9 @@ mod tests {
         let mut inner = state.lock().unwrap();
         let path = PathBuf::from("/tmp/x");
 
-        let c1 = inner.record_read("s1", path.clone(), 1, 100);
-        let c2 = inner.record_read("s1", path.clone(), 1, 100);
-        let c3 = inner.record_read("s1", path.clone(), 1, 100);
+        let c1 = inner.record_read("s1", path.clone(), 1, 100, None);
+        let c2 = inner.record_read("s1", path.clone(), 1, 100, None);
+        let c3 = inner.record_read("s1", path.clone(), 1, 100, None);
         assert_eq!(c1, 1);
         assert_eq!(c2, 2);
         assert_eq!(c3, 3);
@@ -775,8 +859,8 @@ mod tests {
         let mut inner = state.lock().unwrap();
         let path = PathBuf::from("/tmp/x");
 
-        assert_eq!(inner.record_read("s1", path.clone(), 1, 100), 1);
-        assert_eq!(inner.record_read("s1", path.clone(), 10, 100), 1);
+        assert_eq!(inner.record_read("s1", path.clone(), 1, 100, None), 1);
+        assert_eq!(inner.record_read("s1", path.clone(), 10, 100, None), 1);
     }
 
     #[test]
@@ -786,7 +870,7 @@ mod tests {
         let path = PathBuf::from("/tmp/x");
 
         assert!(!inner.has_been_read("s1", &path));
-        inner.record_read("s1", path.clone(), 1, 100);
+        inner.record_read("s1", path.clone(), 1, 100, None);
         assert!(inner.has_been_read("s1", &path));
         // Session isolation: a different session_key sees nothing.
         assert!(!inner.has_been_read("s2", &path));
@@ -798,11 +882,11 @@ mod tests {
         let mut inner = state.lock().unwrap();
         let path = PathBuf::from("/tmp/x");
 
-        inner.record_read("s1", path.clone(), 1, 100);
-        inner.record_read("s1", path.clone(), 1, 100);
+        inner.record_read("s1", path.clone(), 1, 100, None);
+        inner.record_read("s1", path.clone(), 1, 100, None);
         inner.note_mutation("s1", &path);
         // After note_mutation, the next read starts a fresh streak.
-        assert_eq!(inner.record_read("s1", path.clone(), 1, 100), 1);
+        assert_eq!(inner.record_read("s1", path.clone(), 1, 100, None), 1);
     }
 
     #[test]
@@ -973,7 +1057,7 @@ mod tests {
         let mut guard = state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _ = guard.record_read("session-a", PathBuf::from("/tmp/demo.txt"), 0, 10);
+        let _ = guard.record_read("session-a", PathBuf::from("/tmp/demo.txt"), 0, 10, None);
         assert!(guard.has_been_read("session-a", Path::new("/tmp/demo.txt")));
 
         guard.remove_session("session-a");

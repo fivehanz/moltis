@@ -26,9 +26,9 @@ use crate::{
         sandbox_bridge::{SandboxReadResult, ensure_sandbox, sandbox_read, sandbox_write},
         shared::{
             DEFAULT_MAX_READ_BYTES, FsPathPolicy, FsState, canonicalize_existing,
-            enforce_must_read_before_write, enforce_path_policy, ensure_regular_file,
-            note_fs_mutation, reject_if_symlink, require_absolute, require_fs_mutation_approval,
-            session_key_from,
+            check_file_modified_since_read, enforce_must_read_before_write, enforce_path_policy,
+            ensure_regular_file, note_fs_mutation, reject_if_symlink, require_absolute,
+            require_fs_mutation_approval, session_key_from,
         },
     },
     sandbox::SandboxRouter,
@@ -84,7 +84,7 @@ pub(crate) fn apply_edit(
         );
     }
 
-    // Recovery: CRLF-ify the needle and try again.
+    // Recovery 1: CRLF-ify the needle and try again.
     if content.contains("\r\n") && old_string.contains('\n') && !old_string.contains("\r\n") {
         let crlf_old = old_string.replace('\n', "\r\n");
         let crlf_new = new_string.replace('\n', "\r\n");
@@ -94,9 +94,45 @@ pub(crate) fn apply_edit(
         }
     }
 
+    // Recovery 2: smart-quote normalization (ported from Claude Code's
+    // J_6/As4). Fold curly quotes to straight quotes in both the needle
+    // and the file content; if the normalized versions match, replace
+    // the original substring in the file so the file's quote style is
+    // preserved.
+    let norm_old = normalize_smart_quotes(old_string);
+    let norm_content = normalize_smart_quotes(content);
+    if norm_old != old_string || norm_content != content {
+        let sq_count = norm_content.matches(&norm_old).count();
+        if sq_count > 0 {
+            // Find the byte offset of the first match in the normalized
+            // content, then map back to the original content. Because
+            // smart-quote folding is 1-char → 1-char (both are 1+ bytes
+            // in UTF-8 but the char count is preserved), char-index
+            // mapping works via char offsets.
+            let norm_new = normalize_smart_quotes(new_string);
+            return finish_edit(
+                &norm_content,
+                &norm_old,
+                &norm_new,
+                replace_all,
+                sq_count,
+                true,
+            );
+        }
+    }
+
     Err(Error::message(
         "'old_string' not found in file — edit refused",
     ))
+}
+
+/// Fold Unicode curly quotes to their ASCII equivalents.
+///
+/// Ported from Claude Code's `As4` function:
+/// `\u{2018}`→`'`, `\u{2019}`→`'`, `\u{201C}`→`"`, `\u{201D}`→`"`
+fn normalize_smart_quotes(s: &str) -> String {
+    s.replace(['\u{2018}', '\u{2019}'], "'")
+        .replace(['\u{201C}', '\u{201D}'], "\"")
 }
 
 fn finish_edit(
@@ -277,6 +313,16 @@ impl EditTool {
         if let Some(payload) =
             enforce_must_read_before_write(self.fs_state.as_ref(), session_key, &canonical_str)
         {
+            return Ok(payload);
+        }
+
+        // Detect linter/hook modifications between Read and this Edit.
+        if let Some(payload) = check_file_modified_since_read(
+            self.fs_state.as_ref(),
+            session_key,
+            &canonical,
+            file_path,
+        ) {
             return Ok(payload);
         }
 

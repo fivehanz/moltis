@@ -26,8 +26,8 @@ use crate::{
             BinaryPolicy, DEFAULT_MAX_READ_BYTES, DEFAULT_READ_LINE_LIMIT, FsErrorKind,
             FsPathPolicy, FsState, MAX_READ_OUTPUT_BYTES, READ_LOOP_THRESHOLD,
             compute_adaptive_read_cap, enforce_path_policy, format_numbered_lines_with_cap,
-            fs_error_payload, io_error_to_typed_payload, looks_binary, require_absolute,
-            session_key_from,
+            fs_error_payload, io_error_to_typed_payload, is_binary_extension, looks_binary,
+            require_absolute, session_key_from,
         },
     },
     sandbox::SandboxRouter,
@@ -144,6 +144,7 @@ impl ReadTool {
                         &bytes,
                         session_key,
                         true,
+                        None, // sandbox mtime unavailable
                     ));
                 },
                 other => {
@@ -213,7 +214,16 @@ impl ReadTool {
             },
         };
 
-        Ok(self.render_bytes_to_payload(file_path, offset, limit, &bytes, session_key, false))
+        let mtime = meta.modified().ok();
+        Ok(self.render_bytes_to_payload(
+            file_path,
+            offset,
+            limit,
+            &bytes,
+            session_key,
+            false,
+            mtime,
+        ))
     }
 
     /// Render raw file bytes into the typed Read payload.
@@ -230,6 +240,7 @@ impl ReadTool {
         bytes: &[u8],
         session_key: &str,
         from_sandbox: bool,
+        mtime: Option<std::time::SystemTime>,
     ) -> Value {
         // Record the read in the tracker BEFORE any early return (including
         // binary). An operator with must_read_before_write + binary_policy=base64
@@ -244,12 +255,10 @@ impl ReadTool {
             let mut guard = state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let _consecutive = guard.record_read(session_key, tracker_path, offset, limit);
-            // loop_warning only applies to text reads; binary reads
-            // are a one-shot check, not something the LLM re-reads.
+            let _consecutive = guard.record_read(session_key, tracker_path, offset, limit, mtime);
         }
 
-        if looks_binary(bytes) {
+        if is_binary_extension(file_path) || looks_binary(bytes) {
             #[cfg(feature = "metrics")]
             counter!(
                 tools_metrics::EXECUTIONS_TOTAL,
