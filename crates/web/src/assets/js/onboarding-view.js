@@ -2352,6 +2352,12 @@ function ChannelTypeSelector({ onSelect, offered }) {
 			<span class="text-sm font-medium text-[var(--text-strong)]">Matrix</span>
 		</button>`
 		}
+		${
+			offered.has("nostr") &&
+			html`<button type="button" class="backend-card flex-1 items-center gap-3 py-6" onClick=${() => onSelect("nostr")}>
+			<span class="text-sm font-medium text-[var(--text-strong)]">Nostr</span>
+		</button>`
+		}
 	</div>`;
 }
 
@@ -3448,6 +3454,7 @@ function channelDisplayLabel(type) {
 	if (type === "slack") return "Slack";
 	if (type === "whatsapp") return "WhatsApp";
 	if (type === "matrix") return "Matrix";
+	if (type === "nostr") return "Nostr";
 	return "Telegram";
 }
 
@@ -3472,6 +3479,120 @@ function ChannelSuccess({ channelName, channelType: type, onAnother }) {
 		}
 		<button type="button" class="text-xs text-[var(--accent)] cursor-pointer bg-transparent border-none underline self-start" onClick=${onAnother}>Connect another channel</button>
 	</div>`;
+}
+
+function NostrForm({ onConnected, error, setError }) {
+	var [accountId, setAccountId] = useState("");
+	var [secretKey, setSecretKey] = useState("");
+	var [relays, setRelays] = useState("wss://relay.damus.io, wss://relay.nostr.band, wss://nos.lol");
+	var [dmPolicy, setDmPolicy] = useState("allowlist");
+	var [allowlist, setAllowlist] = useState("");
+	var [advancedConfig, setAdvancedConfig] = useState("");
+	var [saving, setSaving] = useState(false);
+
+	function onSubmit(e) {
+		e.preventDefault();
+		if (!accountId.trim()) {
+			setError("Account ID is required.");
+			return;
+		}
+		if (!secretKey.trim()) {
+			setError("Secret key is required.");
+			return;
+		}
+		var advancedPatch = parseChannelConfigPatch(advancedConfig);
+		if (!advancedPatch.ok) {
+			setError(advancedPatch.error);
+			return;
+		}
+		setError(null);
+		setSaving(true);
+		var relayList = relays
+			.split(",")
+			.map((r) => r.trim())
+			.filter(Boolean);
+		var allowlistEntries = allowlist
+			.trim()
+			.split(/\n/)
+			.map((s) => s.trim())
+			.filter(Boolean);
+		var config = {
+			secret_key: secretKey.trim(),
+			relays: relayList,
+			dm_policy: dmPolicy,
+			allowed_pubkeys: allowlistEntries,
+		};
+		Object.assign(config, advancedPatch.value);
+		addChannel("nostr", accountId.trim(), config).then((res) => {
+			setSaving(false);
+			if (res?.ok) {
+				onConnected(accountId.trim(), "nostr");
+			} else {
+				setError((res?.error && (res.error.message || res.error.detail)) || "Failed to connect channel.");
+			}
+		});
+	}
+
+	return html`<form onSubmit=${onSubmit} class="flex flex-col gap-3">
+		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
+			<span class="font-medium text-[var(--text-strong)]">How to set up Nostr DMs</span>
+			<span>1. Generate or use an existing Nostr secret key (nsec1... or hex)</span>
+			<span>2. Configure relay URLs (defaults are provided)</span>
+			<span>3. Add allowed public keys (npub1... or hex) to the allowlist</span>
+			<span>4. Send a DM to the bot's public key from any Nostr client</span>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Account ID</label>
+			<input type="text" class="provider-key-input w-full"
+				value=${accountId} onInput=${(e) => setAccountId(e.target.value)}
+				placeholder="e.g. my-nostr-bot"
+				autocomplete="off"
+				autocapitalize="none"
+				autocorrect="off"
+				spellcheck="false"
+				name="nostr_account_id"
+				autofocus />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Secret Key</label>
+			<input type="password" class="provider-key-input w-full"
+				value=${secretKey} onInput=${(e) => setSecretKey(e.target.value)}
+				placeholder="nsec1... or 64-char hex"
+				autocomplete="new-password"
+				autocapitalize="none"
+				autocorrect="off"
+				spellcheck="false"
+				name="nostr_secret_key" />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Relays (comma-separated)</label>
+			<input type="text" class="provider-key-input w-full"
+				value=${relays} onInput=${(e) => setRelays(e.target.value)}
+				placeholder="wss://relay.damus.io, wss://nos.lol"
+				name="nostr_relays" />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">DM Policy</label>
+			<select class="channel-select w-full" value=${dmPolicy} onChange=${(e) => setDmPolicy(e.target.value)}>
+				<option value="allowlist">Allowlist only</option>
+				<option value="open">Open (anyone)</option>
+				<option value="disabled">Disabled</option>
+			</select>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Allowed Public Keys (one per line, npub1 or hex)</label>
+			<textarea class="provider-key-input w-full" rows="3"
+				value=${allowlist} onInput=${(e) => setAllowlist(e.target.value)}
+				placeholder="npub1abc123...\nnpub1def456..."
+				name="nostr_allowed_pubkeys" />
+		</div>
+		<${AdvancedConfigPatchField} value=${advancedConfig}
+			onInput=${(value) => setAdvancedConfig(value)} />
+		${error && html`<div class="text-xs text-[var(--error)]">${error}</div>`}
+		<button type="submit" class="provider-btn self-start" disabled=${saving}>
+			${saving ? "Connecting\u2026" : "Connect Nostr"}
+		</button>
+	</form>`;
 }
 
 function ChannelStep({ onNext, onBack }) {
@@ -3521,6 +3642,7 @@ function ChannelStep({ onNext, onBack }) {
 		${phase === "form" && selectedType === "msteams" && html`<${TeamsForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
 		${phase === "form" && selectedType === "discord" && html`<${DiscordForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
 		${phase === "form" && selectedType === "matrix" && html`<${MatrixForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
+		${phase === "form" && selectedType === "nostr" && html`<${NostrForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
 		${phase === "success" && html`<${ChannelSuccess} channelName=${connectedName} channelType=${connectedType} onAnother=${onAnother} />`}
 		<div class="flex flex-wrap items-center gap-3 mt-1">
 			<button type="button" class="provider-btn provider-btn-secondary" onClick=${showBackSelector ? () => setPhase("select") : onBack}>${t("common:actions.back")}</button>
