@@ -7,7 +7,7 @@
 
 pub use crate::sandbox::file_system::{
     MAX_SANDBOX_WRITE_BYTES, SandboxFileSystem, SandboxGrepMode, SandboxGrepOptions,
-    SandboxReadResult,
+    SandboxListFilesResult, SandboxReadResult,
 };
 
 #[cfg(test)]
@@ -61,7 +61,7 @@ pub async fn sandbox_list_files(
     backend: &Arc<dyn Sandbox>,
     id: &SandboxId,
     root: &str,
-) -> Result<Vec<String>> {
+) -> Result<SandboxListFilesResult> {
     CommandSandboxFileSystem::new(Arc::clone(backend), id.clone())
         .list_files(root)
         .await

@@ -277,11 +277,12 @@ impl AgentTool for GlobTool {
                 .to_str()
                 .ok_or_else(|| Error::message("Glob 'path' contains invalid UTF-8"))?;
             let sandbox_fs = sandbox_file_system_for_session(router, &session_key).await?;
-            let files = sandbox_fs.list_files(root_str).await?;
+            let listed = sandbox_fs.list_files(root_str).await?;
             let matcher: GlobMatcher = GlobPattern::new(&pattern)
                 .map_err(|e| Error::message(format!("invalid glob pattern '{pattern}': {e}")))?
                 .compile_matcher();
-            let mut matched: Vec<String> = files
+            let mut matched: Vec<String> = listed
+                .files
                 .into_iter()
                 .filter(|f| {
                     let relative = PathBuf::from(f)
@@ -299,10 +300,11 @@ impl AgentTool for GlobTool {
                     true
                 })
                 .collect();
-            let truncated = matched.len() > DEFAULT_GLOB_LIMIT;
-            if truncated {
+            let result_truncated = matched.len() > DEFAULT_GLOB_LIMIT;
+            if result_truncated {
                 matched.truncate(DEFAULT_GLOB_LIMIT);
             }
+            let truncated = listed.truncated || result_truncated;
             #[cfg(feature = "metrics")]
             counter!(
                 tools_metrics::EXECUTIONS_TOTAL,
@@ -310,11 +312,20 @@ impl AgentTool for GlobTool {
                 labels::SUCCESS => "true".to_string()
             )
             .increment(1);
-            return Ok(json!({
+            let mut payload = json!({
                 "paths": matched,
                 "truncated": truncated,
                 "root": root.to_string_lossy(),
-            }));
+            });
+            if listed.truncated {
+                let limit = listed.limit.unwrap_or(0);
+                payload["scan_truncated"] = json!(true);
+                payload["scan_limit"] = json!(limit);
+                payload["continuation_hint"] = json!(format!(
+                    "Sandbox file scan was capped at {limit} files. Narrow the search root or use a more specific glob pattern."
+                ));
+            }
+            return Ok(payload);
         }
 
         let workspace_root = self.workspace_root.clone();
@@ -351,7 +362,17 @@ impl AgentTool for GlobTool {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {
+        super::*,
+        crate::{
+            exec::ExecResult,
+            sandbox::{
+                SandboxConfig, SandboxMode, SandboxRouter,
+                file_system::{MAX_SANDBOX_LIST_FILES, test_helpers::MockSandbox},
+            },
+        },
+        std::sync::Arc,
+    };
 
     #[tokio::test]
     async fn glob_finds_matching_files() {
@@ -562,5 +583,45 @@ mod tests {
         let paths = value["paths"].as_array().unwrap();
         assert_eq!(paths.len(), 1);
         assert!(paths[0].as_str().unwrap().ends_with("a.rs"));
+    }
+
+    #[tokio::test]
+    async fn glob_sandbox_scan_truncation_returns_friendly_metadata() {
+        let stdout = (0..=MAX_SANDBOX_LIST_FILES)
+            .map(|index| format!("/workspace/file-{index}.rs"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mock = MockSandbox::new(vec![ExecResult {
+            stdout,
+            stderr: String::new(),
+            exit_code: 0,
+        }]);
+        let router = Arc::new(SandboxRouter::with_backend(
+            SandboxConfig {
+                mode: SandboxMode::All,
+                ..Default::default()
+            },
+            mock,
+        ));
+        let tool = GlobTool::new().with_sandbox_router(router);
+
+        let value = tool
+            .execute(json!({
+                "pattern": "*.rs",
+                "path": "/workspace",
+                "_session_key": "sandboxed",
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(value["scan_truncated"], true);
+        assert_eq!(value["scan_limit"], MAX_SANDBOX_LIST_FILES);
+        assert_eq!(value["truncated"], true);
+        assert!(
+            value["continuation_hint"]
+                .as_str()
+                .unwrap()
+                .contains("Sandbox file scan was capped")
+        );
     }
 }

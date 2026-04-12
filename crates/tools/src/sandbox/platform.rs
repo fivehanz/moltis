@@ -10,8 +10,8 @@ use {
         error::{Error, Result},
         exec::{ExecOpts, ExecResult},
         sandbox::file_system::{
-            SandboxReadResult, native_host_list_files, native_host_read_file,
-            native_host_write_file,
+            SandboxListFilesResult, SandboxReadResult, native_host_list_files,
+            native_host_read_file, native_host_write_file,
         },
     },
 };
@@ -294,7 +294,7 @@ impl Sandbox for RestrictedHostSandbox {
         native_host_write_file(file_path, content).await
     }
 
-    async fn list_files(&self, _id: &SandboxId, root: &str) -> Result<Vec<String>> {
+    async fn list_files(&self, _id: &SandboxId, root: &str) -> Result<SandboxListFilesResult> {
         native_host_list_files(root).await
     }
 

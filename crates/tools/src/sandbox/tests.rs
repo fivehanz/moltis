@@ -158,10 +158,11 @@ async fn assert_runtime_oci_file_transfers(cli: &str) -> Result<()> {
     assert_eq!(written, "written from host");
 
     let files = oci_container_list_files(cli, &container.name, "/tmp/moltis-e2e/list").await?;
-    assert_eq!(files, vec![
+    assert_eq!(files.files, vec![
         "/tmp/moltis-e2e/list/a.txt".to_string(),
         "/tmp/moltis-e2e/list/b.txt".to_string(),
     ]);
+    assert!(!files.truncated);
 
     Ok(())
 }
@@ -872,10 +873,11 @@ async fn test_docker_list_files_remaps_mounted_workspace_paths() {
         .list_files(&id, &guest_root.display().to_string())
         .await
         .unwrap();
-    assert_eq!(files, vec![
+    assert_eq!(files.files, vec![
         guest_root.join("nested/done.txt").display().to_string(),
         guest_root.join("todo.txt").display().to_string(),
     ]);
+    assert!(!files.truncated);
 }
 
 #[test]
@@ -1012,10 +1014,11 @@ async fn test_apple_container_home_list_remaps_mounted_host_paths() {
         .list_files(&id, &guest_root.display().to_string())
         .await
         .unwrap();
-    assert_eq!(files, vec![
+    assert_eq!(files.files, vec![
         guest_root.join("nested/done.txt").display().to_string(),
         guest_root.join("todo.txt").display().to_string(),
     ]);
+    assert!(!files.truncated);
 }
 
 #[tokio::test]
@@ -1079,10 +1082,11 @@ async fn test_no_sandbox_list_files_native() {
         .list_files(&id, &dir.path().display().to_string())
         .await
         .unwrap();
-    assert_eq!(files, vec![
+    assert_eq!(files.files, vec![
         first.display().to_string(),
         second.display().to_string(),
     ]);
+    assert!(!files.truncated);
 }
 
 #[cfg(unix)]
@@ -2538,10 +2542,11 @@ mod restricted_host_tests {
             .list_files(&id, &dir.path().display().to_string())
             .await
             .unwrap();
-        assert_eq!(files, vec![
+        assert_eq!(files.files, vec![
             first.display().to_string(),
             second.display().to_string(),
         ]);
+        assert!(!files.truncated);
     }
 
     #[cfg(unix)]

@@ -11,8 +11,8 @@ use crate::{
     error::Result,
     exec::{ExecOpts, ExecResult},
     sandbox::file_system::{
-        SandboxGrepOptions, SandboxReadResult, command_grep, command_list_files, command_read_file,
-        command_write_file,
+        SandboxGrepOptions, SandboxListFilesResult, SandboxReadResult, command_grep,
+        command_list_files, command_read_file, command_write_file,
     },
     wasm_limits::WasmToolLimits,
 };
@@ -315,7 +315,7 @@ pub trait Sandbox: Send + Sync {
     }
 
     /// List regular files inside the sandbox.
-    async fn list_files(&self, id: &SandboxId, root: &str) -> Result<Vec<String>> {
+    async fn list_files(&self, id: &SandboxId, root: &str) -> Result<SandboxListFilesResult> {
         command_list_files(self, id, root).await
     }
 

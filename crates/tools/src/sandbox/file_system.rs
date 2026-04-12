@@ -108,6 +108,34 @@ impl SandboxReadResult {
     }
 }
 
+/// Outcome of a sandbox list-files call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxListFilesResult {
+    pub files: Vec<String>,
+    pub truncated: bool,
+    pub limit: Option<usize>,
+}
+
+impl SandboxListFilesResult {
+    #[must_use]
+    pub fn complete(files: Vec<String>) -> Self {
+        Self {
+            files,
+            truncated: false,
+            limit: None,
+        }
+    }
+
+    #[must_use]
+    pub fn truncated(files: Vec<String>, limit: usize) -> Self {
+        Self {
+            files,
+            truncated: true,
+            limit: Some(limit),
+        }
+    }
+}
+
 /// Output-mode discriminator for sandbox grep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxGrepMode {
@@ -136,7 +164,7 @@ pub trait SandboxFileSystem: Send + Sync {
 
     async fn write_file(&self, file_path: &str, content: &[u8]) -> Result<Option<Value>>;
 
-    async fn list_files(&self, root: &str) -> Result<Vec<String>>;
+    async fn list_files(&self, root: &str) -> Result<SandboxListFilesResult>;
 
     async fn grep(&self, opts: SandboxGrepOptions) -> Result<Value>;
 }
@@ -277,9 +305,12 @@ pub async fn command_list_files<S: Sandbox + ?Sized>(
     backend: &S,
     id: &SandboxId,
     root: &str,
-) -> Result<Vec<String>> {
+) -> Result<SandboxListFilesResult> {
     let quoted = shell_single_quote(root);
-    let script = format!("find {quoted} -type f 2>/dev/null");
+    let script = format!(
+        "find {quoted} -type f 2>/dev/null | head -n {}",
+        MAX_SANDBOX_LIST_FILES + 1
+    );
     let result = backend.exec(id, &script, &default_opts()).await?;
     if result.exit_code != 0 && result.stdout.trim().is_empty() {
         let detail = if result.stderr.trim().is_empty() {
@@ -291,7 +322,7 @@ pub async fn command_list_files<S: Sandbox + ?Sized>(
             "sandbox list_files '{root}' failed: {detail}"
         )));
     }
-    parse_listed_files(&result.stdout, root, MAX_SANDBOX_LIST_FILES)
+    Ok(parse_listed_files(&result.stdout, MAX_SANDBOX_LIST_FILES))
 }
 
 /// Default command-based sandbox grep implementation used by the file service
@@ -431,7 +462,7 @@ impl SandboxFileSystem for CommandSandboxFileSystem {
         self.backend.write_file(&self.id, file_path, content).await
     }
 
-    async fn list_files(&self, root: &str) -> Result<Vec<String>> {
+    async fn list_files(&self, root: &str) -> Result<SandboxListFilesResult> {
         self.backend.list_files(&self.id, root).await
     }
 
@@ -735,20 +766,23 @@ fn build_single_file_tar(file_path: &str, content: &[u8]) -> Result<Vec<u8>> {
     })
 }
 
-fn parse_listed_files(stdout: &str, root: &str, cap: usize) -> Result<Vec<String>> {
+fn parse_listed_files(stdout: &str, cap: usize) -> SandboxListFilesResult {
     let mut files = stdout
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-    if files.len() > cap {
-        return Err(Error::message(format!(
-            "sandbox list_files '{root}' exceeded cap of {cap} files; narrow the path"
-        )));
+    let truncated = files.len() > cap;
+    if truncated {
+        files.truncate(cap);
     }
     files.sort();
-    Ok(files)
+    if truncated {
+        SandboxListFilesResult::truncated(files, cap)
+    } else {
+        SandboxListFilesResult::complete(files)
+    }
 }
 
 /// Native host-backed read implementation for sandbox backends whose paths
@@ -853,14 +887,22 @@ pub async fn native_host_write_file(file_path: &str, content: &[u8]) -> Result<O
 
 /// Native host-backed file listing implementation for sandbox backends whose
 /// paths are just host paths.
-pub async fn native_host_list_files(root: &str) -> Result<Vec<String>> {
+pub async fn native_host_list_files(root: &str) -> Result<SandboxListFilesResult> {
     let root = PathBuf::from(root);
-    tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+    tokio::task::spawn_blocking(move || -> Result<SandboxListFilesResult> {
         match std::fs::symlink_metadata(&root) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Vec::new()),
-            Ok(metadata) if metadata.is_file() => return Ok(vec![root.display().to_string()]),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Ok(SandboxListFilesResult::complete(Vec::new()));
+            },
+            Ok(metadata) if metadata.is_file() => {
+                return Ok(SandboxListFilesResult::complete(vec![
+                    root.display().to_string(),
+                ]));
+            },
             Ok(_) => {},
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(SandboxListFilesResult::complete(Vec::new()));
+            },
             Err(error) => {
                 return Err(Error::message(format!(
                     "sandbox list_files '{}' failed: {error}",
@@ -912,7 +954,7 @@ pub async fn native_host_list_files(root: &str) -> Result<Vec<String>> {
         }
 
         files.sort();
-        Ok(files)
+        Ok(SandboxListFilesResult::complete(files))
     })
     .await
     .map_err(|error| Error::message(format!("blocking list_files task failed: {error}")))?
@@ -961,6 +1003,22 @@ pub fn remap_host_files_to_guest(
     }
     guest_files.sort();
     Ok(guest_files)
+}
+
+pub fn remap_host_list_result_to_guest(
+    guest_root: &str,
+    host_root: &Path,
+    host_result: SandboxListFilesResult,
+) -> Result<SandboxListFilesResult> {
+    let guest_files = remap_host_files_to_guest(guest_root, host_root, host_result.files)?;
+    Ok(if host_result.truncated {
+        SandboxListFilesResult::truncated(
+            guest_files,
+            host_result.limit.unwrap_or(MAX_SANDBOX_LIST_FILES),
+        )
+    } else {
+        SandboxListFilesResult::complete(guest_files)
+    })
 }
 
 /// Copy-based read implementation for OCI-compatible container CLIs.
@@ -1093,11 +1151,11 @@ pub async fn oci_container_list_files(
     cli: &str,
     container_name: &str,
     root: &str,
-) -> Result<Vec<String>> {
+) -> Result<SandboxListFilesResult> {
     match oci_probe_file_kind(cli, container_name, root).await? {
-        OciPathKind::Missing => Ok(Vec::new()),
-        OciPathKind::File { .. } => Ok(vec![root.to_string()]),
-        OciPathKind::Other => Ok(Vec::new()),
+        OciPathKind::Missing => Ok(SandboxListFilesResult::complete(Vec::new())),
+        OciPathKind::File { .. } => Ok(SandboxListFilesResult::complete(vec![root.to_string()])),
+        OciPathKind::Other => Ok(SandboxListFilesResult::complete(Vec::new())),
         OciPathKind::Directory => {
             let quoted = shell_single_quote(root);
             let script = format!(
@@ -1111,7 +1169,7 @@ pub async fn oci_container_list_files(
                     "sandbox list_files '{root}' failed: {detail}"
                 )));
             }
-            parse_listed_files(&stdout, root, MAX_SANDBOX_LIST_FILES)
+            Ok(parse_listed_files(&stdout, MAX_SANDBOX_LIST_FILES))
         },
     }
 }
@@ -1263,14 +1321,16 @@ mod tests {
         let fs = CommandSandboxFileSystem::new(mock, test_id());
 
         let files = fs.list_files("/data").await.unwrap();
-        assert_eq!(files, vec!["/data/a.rs", "/data/b.rs"]);
+        assert_eq!(files.files, vec!["/data/a.rs", "/data/b.rs"]);
+        assert!(!files.truncated);
     }
 
     #[test]
-    fn parse_listed_files_rejects_outputs_over_cap() {
-        let error =
-            parse_listed_files("/data/a.rs\n/data/b.rs\n/data/c.rs\n", "/data", 2).unwrap_err();
-        assert!(error.to_string().contains("exceeded cap of 2 files"));
+    fn parse_listed_files_marks_outputs_over_cap_as_truncated() {
+        let result = parse_listed_files("/data/a.rs\n/data/b.rs\n/data/c.rs\n", 2);
+        assert_eq!(result.files, vec!["/data/a.rs", "/data/b.rs"]);
+        assert!(result.truncated);
+        assert_eq!(result.limit, Some(2));
     }
 
     #[tokio::test]

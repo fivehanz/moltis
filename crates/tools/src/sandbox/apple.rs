@@ -34,9 +34,9 @@ use crate::error::{Error, Result};
 use crate::exec::{ExecOpts, ExecResult};
 #[cfg(target_os = "macos")]
 use crate::sandbox::file_system::{
-    SandboxReadResult, command_list_files, command_read_file, command_write_file,
-    native_host_list_files, native_host_read_file, native_host_write_file,
-    remap_host_files_to_guest,
+    SandboxListFilesResult, SandboxReadResult, command_list_files, command_read_file,
+    command_write_file, native_host_list_files, native_host_read_file, native_host_write_file,
+    remap_host_list_result_to_guest,
 };
 
 /// Apple Container sandbox using the `container` CLI (macOS 26+, Apple Silicon).
@@ -1098,7 +1098,7 @@ impl Sandbox for AppleContainerSandbox {
         command_write_file(self, id, file_path, content).await
     }
 
-    async fn list_files(&self, id: &SandboxId, root: &str) -> Result<Vec<String>> {
+    async fn list_files(&self, id: &SandboxId, root: &str) -> Result<SandboxListFilesResult> {
         if let Some(host_path) = self.mounted_host_path(id, root) {
             let host_files = native_host_list_files(
                 host_path
@@ -1106,7 +1106,7 @@ impl Sandbox for AppleContainerSandbox {
                     .ok_or_else(|| Error::message("mounted host path contains invalid UTF-8"))?,
             )
             .await?;
-            return remap_host_files_to_guest(root, &host_path, host_files);
+            return remap_host_list_result_to_guest(root, &host_path, host_files);
         }
 
         command_list_files(self, id, root).await

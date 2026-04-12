@@ -26,9 +26,9 @@ use {
         error::{Error, Result},
         exec::{ExecOpts, ExecResult},
         sandbox::file_system::{
-            SandboxReadResult, native_host_list_files, native_host_read_file,
-            native_host_write_file, oci_container_list_files, oci_container_read_file,
-            oci_container_write_file, remap_host_files_to_guest,
+            SandboxListFilesResult, SandboxReadResult, native_host_list_files,
+            native_host_read_file, native_host_write_file, oci_container_list_files,
+            oci_container_read_file, oci_container_write_file, remap_host_list_result_to_guest,
         },
     },
 };
@@ -486,7 +486,7 @@ impl Sandbox for DockerSandbox {
         oci_container_write_file(self.cli, &container_name, file_path, content).await
     }
 
-    async fn list_files(&self, id: &SandboxId, root: &str) -> Result<Vec<String>> {
+    async fn list_files(&self, id: &SandboxId, root: &str) -> Result<SandboxListFilesResult> {
         if let Some(host_path) = self.mounted_host_path(id, root) {
             let host_files = native_host_list_files(
                 host_path
@@ -494,7 +494,7 @@ impl Sandbox for DockerSandbox {
                     .ok_or_else(|| Error::message("mounted host path contains invalid UTF-8"))?,
             )
             .await?;
-            return remap_host_files_to_guest(root, &host_path, host_files);
+            return remap_host_list_result_to_guest(root, &host_path, host_files);
         }
 
         let container_name = self.container_name(id);
@@ -550,7 +550,7 @@ impl Sandbox for NoSandbox {
         native_host_write_file(file_path, content).await
     }
 
-    async fn list_files(&self, _id: &SandboxId, root: &str) -> Result<Vec<String>> {
+    async fn list_files(&self, _id: &SandboxId, root: &str) -> Result<SandboxListFilesResult> {
         native_host_list_files(root).await
     }
 
