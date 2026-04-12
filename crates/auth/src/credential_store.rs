@@ -18,6 +18,12 @@ use {
 #[cfg(feature = "vault")]
 use moltis_vault::Vault;
 
+/// Pre-computed Argon2 hash used for constant-time dummy verification when no
+/// password is set. This prevents timing side channels that would reveal
+/// whether a password exists. The actual value doesn't matter — it will
+/// never match any real input.
+const DUMMY_ARGON2_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +39,22 @@ pub enum AuthMethod {
 #[derive(Debug, Clone)]
 pub struct AuthIdentity {
     pub method: AuthMethod,
+    /// Scopes granted to this identity. Empty for full access (password,
+    /// passkey, loopback). Populated for API keys with scope restrictions.
+    pub scopes: Vec<String>,
+}
+
+impl AuthIdentity {
+    /// Returns `true` if this identity has the given scope, or has
+    /// unrestricted access (password/passkey/loopback or unscooped API key).
+    pub fn has_scope(&self, scope: &str) -> bool {
+        // Non-API-key methods always have full access.
+        if self.method != AuthMethod::ApiKey {
+            return true;
+        }
+        // API keys with empty scopes have full access (legacy behavior).
+        self.scopes.is_empty() || self.scopes.iter().any(|s| s == scope)
+    }
 }
 
 /// A registered passkey entry (for listing in the UI).
@@ -161,6 +183,12 @@ pub struct CredentialStore {
 }
 
 impl CredentialStore {
+    // ── Sessions ─────────────────────────────────────────────────────────
+
+    /// Maximum number of concurrent active sessions. Oldest sessions are
+    /// evicted when the cap is reached.
+    const MAX_SESSIONS: i64 = 10;
+
     /// Open a database at the given path, reset all auth, and close it.
     pub async fn reset_from_db_path(db_path: &std::path::Path) -> anyhow::Result<()> {
         let db_url = format!("sqlite:{}", db_path.display());
@@ -276,7 +304,8 @@ impl CredentialStore {
                 key_prefix TEXT    NOT NULL,
                 created_at TEXT    NOT NULL DEFAULT (datetime('now')),
                 revoked_at TEXT,
-                scopes     TEXT
+                scopes     TEXT,
+                key_salt   TEXT
             )",
         )
         .execute(&self.pool)
@@ -287,6 +316,18 @@ impl CredentialStore {
                 token      TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 expires_at TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS auth_audit_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT    NOT NULL,
+                client_ip  TEXT,
+                detail     TEXT,
+                created_at TEXT    NOT NULL DEFAULT (datetime('now'))
             )",
         )
         .execute(&self.pool)
@@ -456,13 +497,22 @@ impl CredentialStore {
     }
 
     /// Verify a password against the stored hash.
+    ///
+    /// When no password is set, a dummy Argon2 verification is performed
+    /// to prevent timing side channels that would reveal whether a password
+    /// exists.
     pub async fn verify_password(&self, password: &str) -> anyhow::Result<bool> {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT password_hash FROM auth_password WHERE id = 1")
                 .fetch_optional(&self.pool)
                 .await?;
-        let Some((hash,)) = row else {
-            return Ok(false);
+        let hash = match row {
+            Some((h,)) => h,
+            None => {
+                // Perform dummy verification to avoid timing leak.
+                let _ = verify_password(password, DUMMY_ARGON2_HASH);
+                return Ok(false);
+            },
         };
         Ok(verify_password(password, &hash))
     }
@@ -491,10 +541,30 @@ impl CredentialStore {
         Ok(())
     }
 
-    // ── Sessions ─────────────────────────────────────────────────────────
-
     /// Create a new session token (30-day expiry).
+    ///
+    /// Enforces a cap of [`MAX_SESSIONS`] active (non-expired) sessions.
+    /// When the cap is reached, the oldest sessions are deleted to make room.
     pub async fn create_session(&self) -> anyhow::Result<String> {
+        // Clean up expired sessions first.
+        sqlx::query("DELETE FROM auth_sessions WHERE expires_at <= datetime('now')")
+            .execute(&self.pool)
+            .await?;
+
+        // Evict oldest sessions if we're at the cap.
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM auth_sessions")
+            .fetch_one(&self.pool)
+            .await?;
+        if count.0 >= Self::MAX_SESSIONS {
+            let to_delete = count.0 - Self::MAX_SESSIONS + 1;
+            sqlx::query(
+                "DELETE FROM auth_sessions WHERE token IN (SELECT token FROM auth_sessions ORDER BY created_at ASC LIMIT ?)",
+            )
+            .bind(to_delete)
+            .execute(&self.pool)
+            .await?;
+        }
+
         let token = generate_token();
         sqlx::query(
             "INSERT INTO auth_sessions (token, expires_at) VALUES (?, datetime('now', '+30 days'))",
@@ -536,7 +606,8 @@ impl CredentialStore {
     // ── API Keys ─────────────────────────────────────────────────────────
 
     /// Generate a new API key with optional scopes. Returns (id, raw_key).
-    /// The raw key is only shown once — we store only its SHA-256 hash.
+    /// The raw key is only shown once — we store its HMAC-SHA256 hash with
+    /// a per-key random salt.
     ///
     /// If `scopes` is None or empty, the key will have no access until scopes are set.
     pub async fn create_api_key(
@@ -546,7 +617,8 @@ impl CredentialStore {
     ) -> anyhow::Result<(i64, String)> {
         let raw_key = format!("mk_{}", generate_token());
         let prefix = &raw_key[..raw_key.len().min(11)]; // "mk_" + 8 chars
-        let hash = sha256_hex(&raw_key);
+        let salt = generate_token();
+        let hash = hmac_sha256_hex(&raw_key, &salt);
 
         // Store scopes as JSON array, or NULL for full access
         let scopes_json = scopes
@@ -554,12 +626,13 @@ impl CredentialStore {
             .map(|s| serde_json::to_string(s).unwrap_or_default());
 
         let result = sqlx::query(
-            "INSERT INTO api_keys (label, key_hash, key_prefix, scopes) VALUES (?, ?, ?, ?)",
+            "INSERT INTO api_keys (label, key_hash, key_prefix, scopes, key_salt) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(label)
         .bind(&hash)
         .bind(prefix)
         .bind(&scopes_json)
+        .bind(&salt)
         .execute(&self.pool)
         .await?;
         Ok((result.last_insert_rowid(), raw_key))
@@ -602,24 +675,36 @@ impl CredentialStore {
 
     /// Verify a raw API key. Returns `Some(ApiKeyVerification)` if valid,
     /// `None` if invalid or revoked.
+    ///
+    /// Supports both salted (HMAC-SHA256) and legacy unsalted (SHA-256) keys.
     pub async fn verify_api_key(
         &self,
         raw_key: &str,
     ) -> anyhow::Result<Option<ApiKeyVerification>> {
-        let hash = sha256_hex(raw_key);
-        let row: Option<(i64, Option<String>)> = sqlx::query_as(
-            "SELECT id, scopes FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL",
+        // Fetch all active keys and verify against each.
+        // The key set is small (typically <10), so this is acceptable.
+        let rows: Vec<(i64, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT id, key_hash, scopes, key_salt FROM api_keys WHERE revoked_at IS NULL",
         )
-        .bind(&hash)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await?;
 
-        Ok(row.map(|(key_id, scopes_json)| {
-            let scopes = scopes_json
-                .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-                .unwrap_or_default();
-            ApiKeyVerification { key_id, scopes }
-        }))
+        for (key_id, stored_hash, scopes_json, salt) in rows {
+            let matches = if let Some(ref s) = salt {
+                // Salted key: HMAC-SHA256.
+                hmac_sha256_hex(raw_key, s) == stored_hash
+            } else {
+                // Legacy unsalted key: plain SHA-256.
+                sha256_hex(raw_key) == stored_hash
+            };
+            if matches {
+                let scopes = scopes_json
+                    .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                    .unwrap_or_default();
+                return Ok(Some(ApiKeyVerification { key_id, scopes }));
+            }
+        }
+        Ok(None)
     }
 
     // ── Environment Variables ─────────────────────────────────────────────
@@ -1347,6 +1432,31 @@ impl CredentialStore {
             .await?;
         Ok(row.is_some())
     }
+
+    // ── Audit log ─────────────────────────────────────────────────────────
+
+    /// Record an authentication event for audit purposes.
+    pub async fn audit_log(&self, event_type: &str, client_ip: Option<&str>, detail: Option<&str>) {
+        let result = sqlx::query(
+            "INSERT INTO auth_audit_log (event_type, client_ip, detail) VALUES (?, ?, ?)",
+        )
+        .bind(event_type)
+        .bind(client_ip)
+        .bind(detail)
+        .execute(&self.pool)
+        .await;
+        if let Err(e) = result {
+            // Best-effort — never fail the auth flow because of logging.
+            tracing::debug!(error = %e, "failed to write audit log");
+        }
+
+        // Prune entries older than 90 days to prevent unbounded growth.
+        let _ = sqlx::query(
+            "DELETE FROM auth_audit_log WHERE created_at < datetime('now', '-90 days')",
+        )
+        .execute(&self.pool)
+        .await;
+    }
 }
 
 // ── EnvVarProvider impl ─────────────────────────────────────────────────────
@@ -1399,6 +1509,17 @@ fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn hmac_sha256_hex(input: &str, salt: &str) -> String {
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<Sha256>;
+    // HMAC-SHA256 accepts any key length, so this never fails in practice.
+    let Ok(mut mac) = HmacSha256::new_from_slice(salt.as_bytes()) else {
+        return sha256_hex(input);
+    };
+    mac.update(input.as_bytes());
+    format!("{:x}", mac.finalize().into_bytes())
 }
 
 // ── Legacy compat ────────────────────────────────────────────────────────────

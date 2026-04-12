@@ -7026,6 +7026,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "dashmap 6.1.0",
+ "hmac",
  "moltis-config",
  "moltis-tools",
  "moltis-vault",

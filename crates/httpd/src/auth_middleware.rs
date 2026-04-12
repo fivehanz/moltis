@@ -56,6 +56,7 @@ pub async fn check_auth(
         return if is_local {
             AuthResult::Allowed(AuthIdentity {
                 method: AuthMethod::Loopback,
+                scopes: Vec::new(),
             })
         } else {
             AuthResult::SetupRequired
@@ -66,6 +67,7 @@ pub async fn check_auth(
         return if is_local {
             AuthResult::Allowed(AuthIdentity {
                 method: AuthMethod::Loopback,
+                scopes: Vec::new(),
             })
         } else {
             AuthResult::SetupRequired
@@ -78,15 +80,17 @@ pub async fn check_auth(
     {
         return AuthResult::Allowed(AuthIdentity {
             method: AuthMethod::Password,
+            scopes: Vec::new(),
         });
     }
 
     // Check Bearer API key.
     if let Some(key) = bearer_token(headers)
-        && store.verify_api_key(key).await.ok().flatten().is_some()
+        && let Some(verification) = store.verify_api_key(key).await.ok().flatten()
     {
         return AuthResult::Allowed(AuthIdentity {
             method: AuthMethod::ApiKey,
+            scopes: verification.scopes,
         });
     }
 
@@ -151,6 +155,7 @@ pub async fn auth_gate(
                 // render without full auth (#310, #350).
                 request.extensions_mut().insert(AuthIdentity {
                     method: AuthMethod::Loopback,
+                    scopes: Vec::new(),
                 });
                 next.run(request).await
             } else {
@@ -185,6 +190,7 @@ pub async fn auth_gate(
                     debug!(path, remote = %addr, "auth bypass: local request during onboarding");
                     request.extensions_mut().insert(AuthIdentity {
                         method: AuthMethod::Loopback,
+                        scopes: Vec::new(),
                     });
                     return next.run(request).await;
                 }
@@ -344,6 +350,36 @@ where
     }
 }
 
+// ── RequireAdmin extractor ───────────────────────────────────────────────────
+
+/// Axum extractor that requires the `operator.admin` scope.
+///
+/// Use on routes that modify server configuration, restart the process,
+/// or manage credentials. Returns 403 if the authenticated identity lacks
+/// the required scope.
+pub struct RequireAdmin(pub AuthIdentity);
+
+impl<S> FromRequestParts<S> for RequireAdmin
+where
+    S: Send + Sync,
+    Arc<CredentialStore>: FromRef<S>,
+    Arc<GatewayState>: FromRef<S>,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let AuthSession(identity) = AuthSession::from_request_parts(parts, state).await?;
+        if identity.has_scope("operator.admin") {
+            Ok(RequireAdmin(identity))
+        } else {
+            Err((
+                StatusCode::FORBIDDEN,
+                "insufficient scope: operator.admin required",
+            ))
+        }
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Extract the Cookie header value.
@@ -428,6 +464,7 @@ mod tests {
             check_auth(&store, &headers, true).await,
             AuthResult::Allowed(AuthIdentity {
                 method: AuthMethod::Loopback,
+                ..
             })
         ));
         assert!(matches!(

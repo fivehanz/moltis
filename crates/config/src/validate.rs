@@ -408,6 +408,7 @@ fn build_schema_map() -> KnownKeys {
                 ("update_releases_url", Leaf),
                 ("db_pool_max_connections", Leaf),
                 ("shiki_cdn_url", Leaf),
+                ("terminal_enabled", Leaf),
             ])),
         ),
         ("providers", MapWithFields {
@@ -3321,5 +3322,22 @@ allow = ["web_search"]
             .filter(|d| d.category == "security" && d.path == "agents.presets")
             .count();
         assert_eq!(count, 1, "expected exactly one rolled-up warning");
+    }
+
+    #[test]
+    fn server_terminal_enabled_is_known_field() {
+        let toml = r#"
+[server]
+terminal_enabled = false
+"#;
+        let result = validate_toml_str(toml);
+        let unknown = result
+            .diagnostics
+            .iter()
+            .find(|d| d.category == "unknown-field" && d.path.contains("terminal_enabled"));
+        assert!(
+            unknown.is_none(),
+            "terminal_enabled should be a known field, got: {unknown:?}"
+        );
     }
 }

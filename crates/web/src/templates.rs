@@ -65,6 +65,7 @@ pub(crate) struct GonData {
     heartbeat_runs: Vec<moltis_cron::types::CronRunRecord>,
     voice_enabled: bool,
     graphql_enabled: bool,
+    terminal_enabled: bool,
     git_branch: Option<String>,
     mem: MemSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -454,6 +455,7 @@ pub(crate) async fn build_gon_data(gw: &GatewayState) -> GonData {
         heartbeat_runs,
         voice_enabled: cfg!(feature = "voice"),
         graphql_enabled: cfg!(feature = "graphql"),
+        terminal_enabled: gw.config.server.is_terminal_enabled(),
         git_branch: detect_git_branch(),
         mem: collect_mem_snapshot(),
         deploy_platform: gw.deploy_platform.clone(),

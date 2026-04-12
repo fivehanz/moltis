@@ -19,6 +19,7 @@ use moltis_gateway::{
 
 use crate::{
     auth_middleware::{AuthResult, AuthSession, SESSION_COOKIE, check_auth},
+    login_guard::LoginGuard,
     server::is_local_connection,
 };
 
@@ -28,6 +29,7 @@ pub struct AuthState {
     pub credential_store: Arc<CredentialStore>,
     pub webauthn_registry: Option<SharedWebAuthnRegistry>,
     pub gateway_state: Arc<GatewayState>,
+    pub login_guard: LoginGuard,
 }
 
 impl axum::extract::FromRef<AuthState> for Arc<CredentialStore> {
@@ -95,6 +97,37 @@ fn vault_routes() -> axum::Router<AuthState> {
 #[cfg(not(feature = "vault"))]
 fn vault_routes() -> axum::Router<AuthState> {
     axum::Router::new()
+}
+
+// ── Brute-force block response ────────────────────────────────────────────────
+
+fn blocked_response(reason: crate::login_guard::BlockReason) -> axum::response::Response {
+    use crate::login_guard::BlockReason;
+    let (message, retry_after) = match reason {
+        BlockReason::IpBanned { retry_after } => (
+            "too many failed attempts from this address — try again later",
+            retry_after,
+        ),
+        BlockReason::AccountLocked { retry_after } => (
+            "account temporarily locked due to suspicious activity — try again later",
+            retry_after,
+        ),
+    };
+    let retry_secs = retry_after.as_secs().max(1);
+    let mut resp = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(serde_json::json!({
+            "code": "LOGIN_BLOCKED",
+            "error": message,
+            "retry_after_seconds": retry_secs,
+        })),
+    )
+        .into_response();
+    if let Ok(val) = retry_secs.to_string().parse() {
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, val);
+    }
+    resp
 }
 
 // ── Status ───────────────────────────────────────────────────────────────────
@@ -173,13 +206,35 @@ async fn setup_handler(
         return (StatusCode::FORBIDDEN, "setup already completed").into_response();
     }
 
+    let client_ip = crate::request_throttle::resolve_client_ip(
+        &headers,
+        addr,
+        state.gateway_state.behind_proxy,
+    );
+    const SETUP_ACCOUNT: &str = "__setup__";
+
+    if let Some(block) = state.login_guard.check(client_ip, SETUP_ACCOUNT) {
+        return blocked_response(block);
+    }
+
     // Validate setup code if one was generated at startup.
     {
         let inner = state.gateway_state.inner.read().await;
-        if let Some(ref expected) = inner.setup_code
-            && body.setup_code.as_deref() != Some(expected.expose_secret().as_str())
-        {
-            return (StatusCode::FORBIDDEN, "invalid or missing setup code").into_response();
+        if let Some(ref expected) = inner.setup_code {
+            // Expire setup code after 30 minutes.
+            if let Some(created_at) = inner.setup_code_created_at
+                && created_at.elapsed() > std::time::Duration::from_secs(30 * 60)
+            {
+                return (
+                    StatusCode::GONE,
+                    "setup code has expired — restart the server to generate a new one",
+                )
+                    .into_response();
+            }
+            if body.setup_code.as_deref() != Some(expected.expose_secret().as_str()) {
+                state.login_guard.record_failure(client_ip, SETUP_ACCOUNT);
+                return (StatusCode::FORBIDDEN, "invalid or missing setup code").into_response();
+            }
         }
     }
 
@@ -196,10 +251,10 @@ async fn setup_handler(
                 .into_response();
         }
     } else {
-        if password.len() < 8 {
+        if password.len() < 12 {
             return (
                 StatusCode::BAD_REQUEST,
-                "password must be at least 8 characters",
+                "password must be at least 12 characters",
             )
                 .into_response();
         }
@@ -286,11 +341,29 @@ struct LoginRequest {
 
 async fn login_handler(
     State(state): State<AuthState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: axum::http::HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> impl IntoResponse {
+    let client_ip = crate::request_throttle::resolve_client_ip(
+        &headers,
+        addr,
+        state.gateway_state.behind_proxy,
+    );
+    const PASSWORD_ACCOUNT: &str = "__password__";
+
+    if let Some(block) = state.login_guard.check(client_ip, PASSWORD_ACCOUNT) {
+        return blocked_response(block);
+    }
+
+    let ip_str = client_ip.to_string();
     match state.credential_store.verify_password(&body.password).await {
         Ok(true) => {
+            state.login_guard.record_success(client_ip);
+            state
+                .credential_store
+                .audit_log("login_success", Some(&ip_str), None)
+                .await;
             // Best-effort vault unseal on successful login.
             #[cfg(feature = "vault")]
             if let Some(ref vault) = state.gateway_state.vault {
@@ -317,7 +390,16 @@ async fn login_handler(
                     .into_response(),
             }
         },
-        Ok(false) => (StatusCode::UNAUTHORIZED, "invalid password").into_response(),
+        Ok(false) => {
+            state
+                .login_guard
+                .record_failure(client_ip, PASSWORD_ACCOUNT);
+            state
+                .credential_store
+                .audit_log("login_failure", Some(&ip_str), None)
+                .await;
+            (StatusCode::UNAUTHORIZED, "invalid password").into_response()
+        },
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("auth error: {e}"),
@@ -355,7 +437,11 @@ async fn reset_auth_handler(
                 .await;
             let code = moltis_gateway::auth::generate_setup_code();
             tracing::info!("setup code: {code} (enter this in the browser to set your password)");
-            state.gateway_state.inner.write().await.setup_code = Some(secrecy::Secret::new(code));
+            {
+                let mut inner = state.gateway_state.inner.write().await;
+                inner.setup_code = Some(secrecy::Secret::new(code));
+                inner.setup_code_created_at = Some(std::time::Instant::now());
+            }
             let bp = state.gateway_state.behind_proxy;
             clear_session_response(&headers, bp, state.gateway_state.tls_active || bp)
         },
@@ -374,12 +460,14 @@ struct ChangePasswordRequest {
 async fn change_password_handler(
     _session: AuthSession,
     State(state): State<AuthState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<ChangePasswordRequest>,
 ) -> impl IntoResponse {
-    if body.new_password.len() < 8 {
+    if body.new_password.len() < 12 {
         return (
             StatusCode::BAD_REQUEST,
-            "new password must be at least 8 characters",
+            "new password must be at least 12 characters",
         )
             .into_response();
     }
@@ -432,6 +520,17 @@ async fn change_password_handler(
         };
     }
 
+    let client_ip = crate::request_throttle::resolve_client_ip(
+        &headers,
+        addr,
+        state.gateway_state.behind_proxy,
+    );
+    const PASSWORD_CHANGE_ACCOUNT: &str = "__password_change__";
+
+    if let Some(block) = state.login_guard.check(client_ip, PASSWORD_CHANGE_ACCOUNT) {
+        return blocked_response(block);
+    }
+
     let current_password = body.current_password.unwrap_or_default();
     match state
         .credential_store
@@ -439,6 +538,7 @@ async fn change_password_handler(
         .await
     {
         Ok(()) => {
+            state.login_guard.record_success(client_ip);
             // Best-effort vault password rotation.
             #[cfg(feature = "vault")]
             if let Some(ref vault) = state.gateway_state.vault {
@@ -459,6 +559,9 @@ async fn change_password_handler(
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("incorrect") {
+                state
+                    .login_guard
+                    .record_failure(client_ip, PASSWORD_CHANGE_ACCOUNT);
                 (StatusCode::FORBIDDEN, msg).into_response()
             } else {
                 (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
@@ -510,7 +613,17 @@ async fn create_api_key_handler(
         .create_api_key(body.label.trim(), body.scopes.as_deref())
         .await
     {
-        Ok((id, key)) => Json(serde_json::json!({ "id": id, "key": key })).into_response(),
+        Ok((id, key)) => {
+            state
+                .credential_store
+                .audit_log(
+                    "key_created",
+                    None,
+                    Some(&format!("id={id}, label={}", body.label.trim())),
+                )
+                .await;
+            Json(serde_json::json!({ "id": id, "key": key })).into_response()
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -521,7 +634,13 @@ async fn revoke_api_key_handler(
     axum::extract::Path(id): axum::extract::Path<i64>,
 ) -> impl IntoResponse {
     match state.credential_store.revoke_api_key(id).await {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(()) => {
+            state
+                .credential_store
+                .audit_log("key_revoked", None, Some(&format!("id={id}")))
+                .await;
+            Json(serde_json::json!({ "ok": true })).into_response()
+        },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -805,10 +924,22 @@ struct PasskeyAuthFinishRequest {
 
 async fn passkey_auth_finish_handler(
     State(state): State<AuthState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Host(host): Host,
     headers: axum::http::HeaderMap,
     Json(body): Json<PasskeyAuthFinishRequest>,
 ) -> impl IntoResponse {
+    let client_ip = crate::request_throttle::resolve_client_ip(
+        &headers,
+        addr,
+        state.gateway_state.behind_proxy,
+    );
+    const PASSKEY_ACCOUNT: &str = "__passkey__";
+
+    if let Some(block) = state.login_guard.check(client_ip, PASSKEY_ACCOUNT) {
+        return blocked_response(block);
+    }
+
     let Some(ref registry) = state.webauthn_registry else {
         return (StatusCode::NOT_IMPLEMENTED, "passkeys not configured").into_response();
     };
@@ -821,14 +952,20 @@ async fn passkey_auth_finish_handler(
     };
 
     match wa.finish_authentication(&body.challenge_id, &body.credential) {
-        Ok(_result) => match state.credential_store.create_session().await {
-            Ok(token) => {
-                let bp = state.gateway_state.behind_proxy;
-                session_response(token, &headers, bp, state.gateway_state.tls_active || bp)
-            },
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Ok(_result) => {
+            state.login_guard.record_success(client_ip);
+            match state.credential_store.create_session().await {
+                Ok(token) => {
+                    let bp = state.gateway_state.behind_proxy;
+                    session_response(token, &headers, bp, state.gateway_state.tls_active || bp)
+                },
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
         },
-        Err(e) => (StatusCode::UNAUTHORIZED, e.to_string()).into_response(),
+        Err(e) => {
+            state.login_guard.record_failure(client_ip, PASSKEY_ACCOUNT);
+            (StatusCode::UNAUTHORIZED, e.to_string()).into_response()
+        },
     }
 }
 

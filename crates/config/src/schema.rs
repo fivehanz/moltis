@@ -841,6 +841,14 @@ pub struct ServerConfig {
     /// Defaults to `https://esm.sh/shiki@3.2.1?bundle` when unset.
     /// Set to an alternative CDN or a self-hosted URL to override.
     pub shiki_cdn_url: Option<String>,
+    /// Enable or disable the host terminal in the web UI.
+    ///
+    /// Defaults to `true`. Set to `false` to prevent the web UI from
+    /// offering an unsandboxed shell. The `MOLTIS_TERMINAL_DISABLED`
+    /// environment variable (set to `1` or `true`) takes precedence over
+    /// this field and cannot be changed from the web UI config editor.
+    #[serde(default = "default_terminal_enabled")]
+    pub terminal_enabled: bool,
 }
 
 fn default_log_buffer_size() -> usize {
@@ -849,6 +857,10 @@ fn default_log_buffer_size() -> usize {
 
 fn default_db_pool_max_connections() -> u32 {
     5
+}
+
+fn default_terminal_enabled() -> bool {
+    true
 }
 
 impl Default for ServerConfig {
@@ -862,7 +874,23 @@ impl Default for ServerConfig {
             update_releases_url: None,
             db_pool_max_connections: default_db_pool_max_connections(),
             shiki_cdn_url: None,
+            terminal_enabled: default_terminal_enabled(),
         }
+    }
+}
+
+impl ServerConfig {
+    /// Returns whether the web UI terminal is enabled, accounting for the
+    /// `MOLTIS_TERMINAL_DISABLED` env-var override. When the env var is set
+    /// to `"1"` or `"true"` (case-insensitive), the terminal is disabled
+    /// regardless of the config file value.
+    pub fn is_terminal_enabled(&self) -> bool {
+        if let Ok(val) = std::env::var("MOLTIS_TERMINAL_DISABLED")
+            && (val.eq_ignore_ascii_case("true") || val == "1")
+        {
+            return false;
+        }
+        self.terminal_enabled
     }
 }
 
@@ -3890,5 +3918,28 @@ enabled = true
             serialized.contains("wire_api = \"responses\""),
             "non-default wire_api should be serialized"
         );
+    }
+
+    #[test]
+    fn terminal_enabled_defaults_to_true() {
+        let cfg: MoltisConfig = toml::from_str("").unwrap();
+        assert!(cfg.server.terminal_enabled);
+        // Note: is_terminal_enabled() is NOT tested here because it reads
+        // the MOLTIS_TERMINAL_DISABLED env var, which may be set in CI.
+    }
+
+    #[test]
+    fn terminal_enabled_parsed_from_config() {
+        let cfg: MoltisConfig = toml::from_str("[server]\nterminal_enabled = false\n").unwrap();
+        assert!(!cfg.server.terminal_enabled);
+    }
+
+    #[test]
+    fn terminal_disabled_via_config_reflects_in_helper() {
+        let cfg: MoltisConfig = toml::from_str("[server]\nterminal_enabled = false\n").unwrap();
+        // When the env var is not set, the helper returns the config value.
+        // (We cannot test the env-var override here because workspace lints
+        // deny unsafe code, and `std::env::set_var` is unsafe.)
+        assert!(!cfg.server.is_terminal_enabled());
     }
 }

@@ -36,6 +36,7 @@ const TERMINAL_WINDOWS_LIST_FAILED: &str = "TERMINAL_WINDOWS_LIST_FAILED";
 const TERMINAL_TMUX_UNAVAILABLE: &str = "TERMINAL_TMUX_UNAVAILABLE";
 const TERMINAL_WINDOW_NAME_INVALID: &str = "TERMINAL_WINDOW_NAME_INVALID";
 const TERMINAL_WINDOW_CREATE_FAILED: &str = "TERMINAL_WINDOW_CREATE_FAILED";
+const TERMINAL_DISABLED: &str = "TERMINAL_DISABLED";
 
 // ── Data structures ──────────────────────────────────────────────────────────
 
@@ -841,7 +842,17 @@ fn host_terminal_windows_payload(
 
 // ── HTTP handlers ────────────────────────────────────────────────────────────
 
-pub async fn api_terminal_windows_handler() -> impl IntoResponse {
+pub async fn api_terminal_windows_handler(State(state): State<AppState>) -> impl IntoResponse {
+    if !state.gateway.config.server.is_terminal_enabled() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(terminal_error(
+                TERMINAL_DISABLED,
+                "terminal has been disabled by the server administrator",
+            )),
+        )
+            .into_response();
+    }
     if !host_terminal_tmux_available() {
         return Json(serde_json::json!({
             "ok": true,
@@ -881,8 +892,19 @@ pub async fn api_terminal_windows_handler() -> impl IntoResponse {
 }
 
 pub async fn api_terminal_windows_create_handler(
+    State(state): State<AppState>,
     Json(payload): Json<HostTerminalCreateWindowRequest>,
 ) -> impl IntoResponse {
+    if !state.gateway.config.server.is_terminal_enabled() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(terminal_error(
+                TERMINAL_DISABLED,
+                "terminal has been disabled by the server administrator",
+            )),
+        )
+            .into_response();
+    }
     if !host_terminal_tmux_available() {
         return (
             StatusCode::CONFLICT,
@@ -965,6 +987,14 @@ pub async fn api_terminal_ws_upgrade_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    if !state.gateway.config.server.is_terminal_enabled() {
+        return (
+            StatusCode::FORBIDDEN,
+            "terminal has been disabled by the server administrator",
+        )
+            .into_response();
+    }
+
     // CSWSH protection: only same-origin browser upgrades are allowed.
     if let Some(origin) = headers
         .get(axum::http::header::ORIGIN)

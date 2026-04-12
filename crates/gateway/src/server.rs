@@ -3579,7 +3579,11 @@ pub async fn prepare_gateway_core(
         if !credential_store.is_setup_complete() && !credential_store.is_auth_disabled() {
             let code = std::env::var("MOLTIS_E2E_SETUP_CODE")
                 .unwrap_or_else(|_| auth::generate_setup_code());
-            state.inner.write().await.setup_code = Some(Secret::new(code.clone()));
+            {
+                let mut inner = state.inner.write().await;
+                inner.setup_code = Some(Secret::new(code.clone()));
+                inner.setup_code_created_at = Some(std::time::Instant::now());
+            }
             Some(code)
         } else {
             None

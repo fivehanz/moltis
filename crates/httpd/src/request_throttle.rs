@@ -284,7 +284,7 @@ fn rate_limited_response(path: String, retry_after: Duration) -> Response {
     response
 }
 
-fn resolve_client_ip(headers: &HeaderMap, addr: SocketAddr, behind_proxy: bool) -> IpAddr {
+pub fn resolve_client_ip(headers: &HeaderMap, addr: SocketAddr, behind_proxy: bool) -> IpAddr {
     if behind_proxy && let Some(ip) = extract_forwarded_ip(headers) {
         return ip;
     }

@@ -7,10 +7,13 @@ use {
     tracing::{debug, info, warn},
 };
 
-use moltis_protocol::{
-    ConnectParams, ConnectParamsV4, ErrorShape, EventFrame, Extensions, Features, GatewayFrame,
-    HANDSHAKE_TIMEOUT_MS, HelloAuth, HelloOk, KNOWN_EVENTS, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
-    Policy, ResponseFrame, ServerInfo, error_codes, roles, scopes,
+use {
+    moltis_gateway::auth::{AuthIdentity, AuthMethod},
+    moltis_protocol::{
+        ConnectParams, ConnectParamsV4, ErrorShape, EventFrame, Extensions, Features, GatewayFrame,
+        HANDSHAKE_TIMEOUT_MS, HelloAuth, HelloOk, KNOWN_EVENTS, MAX_PAYLOAD_BYTES,
+        PROTOCOL_VERSION, Policy, ResponseFrame, ServerInfo, error_codes, roles, scopes,
+    },
 };
 
 use moltis_gateway::{
@@ -38,7 +41,7 @@ pub async fn handle_connection(
     remote_addr: SocketAddr,
     accept_language: Option<String>,
     remote_ip: Option<String>,
-    header_authenticated: bool,
+    header_identity: Option<AuthIdentity>,
     is_local: bool,
 ) {
     let conn_id = uuid::Uuid::new_v4().to_string();
@@ -141,9 +144,14 @@ pub async fn handle_connection(
     //   - TCP source IP loopback check
     //
     // See CVE-2026-25253 for the analogous OpenClaw vulnerability.
-    let mut authenticated = header_authenticated;
+    let mut authenticated = header_identity.is_some();
     // Scopes from API key verification (if any).
-    let mut api_key_scopes: Option<Vec<String>> = None;
+    // When authenticated via HTTP header (cookie/bearer), scopes come from
+    // the AuthIdentity. API-key scopes are non-empty; password/loopback
+    // scopes are empty (= full access).
+    let mut api_key_scopes: Option<Vec<String>> = header_identity
+        .filter(|id| id.method == AuthMethod::ApiKey)
+        .map(|id| id.scopes);
     // Device token verification result (if any).
     let mut device_token_device_id: Option<String> = None;
 
@@ -242,7 +250,7 @@ pub async fn handle_connection(
         warn!(
             conn_id = %conn_id,
             is_local,
-            header_authenticated,
+            authenticated,
             setup_complete,
             has_api_key,
             has_password,

@@ -261,6 +261,8 @@ pub struct GatewayInner {
     /// One-time setup code displayed at startup, required during initial setup.
     /// Cleared after successful setup.
     pub setup_code: Option<secrecy::Secret<String>>,
+    /// When the setup code was created (for 30-minute expiry).
+    pub setup_code_created_at: Option<Instant>,
     /// Auto-update availability state from GitHub releases.
     pub update: crate::update_check::UpdateAvailability,
     /// Last error per run_id (short-lived, for send_sync to retrieve).
@@ -309,6 +311,7 @@ impl GatewayInner {
             discovered_hooks: Vec::new(),
             disabled_hooks: HashSet::new(),
             setup_code: None,
+            setup_code_created_at: None,
             update: crate::update_check::UpdateAvailability::default(),
             run_errors: HashMap::new(),
             #[cfg(feature = "metrics")]

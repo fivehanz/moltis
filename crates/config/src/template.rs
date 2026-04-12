@@ -25,6 +25,11 @@ bind = "127.0.0.1"                # Address to bind to ("0.0.0.0" for all interf
 port = {port}                           # Port number (auto-generated for this installation)
 http_request_logs = false              # Enable verbose Axum HTTP request/response logs (debugging)
 ws_request_logs = false                # Enable WebSocket RPC request/response logs (debugging)
+terminal_enabled = true                   # Enable interactive host terminal in Settings > Terminal
+                                          # Set to false to disable the unsandboxed shell in the web UI.
+                                          # NOTE: this can be re-enabled via the web UI config editor.
+                                          # For hard lockdown, set MOLTIS_TERMINAL_DISABLED=1 (env var
+                                          # takes precedence and cannot be changed from the web UI).
 update_releases_url = "https://www.moltis.org/releases.json"    # Releases manifest URL for update checks (override to use a custom URL)
 
 # ══════════════════════════════════════════════════════════════════════════════

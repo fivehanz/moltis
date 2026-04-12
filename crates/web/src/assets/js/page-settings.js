@@ -5555,7 +5555,16 @@ function SettingsPage() {
 					}
 					${
 						ps
-							? html`<${PageSection} key=${`${section}:${subPath}`} initFn=${ps.init} teardownFn=${ps.teardown} subPath=${subPath} />`
+							? section === "terminal" && gon.get("terminal_enabled") !== true
+								? html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-3 overflow-y-auto">
+									<h2 class="text-base font-medium text-[var(--text-strong)]">Terminal</h2>
+									<div class="text-xs text-[var(--muted)] max-w-form">
+										The host terminal has been disabled by the server administrator.
+										To re-enable it, set <code>terminal_enabled = true</code> under <code>[server]</code> in the configuration file,
+										or remove the <code>MOLTIS_TERMINAL_DISABLED</code> environment variable if it is set.
+									</div>
+								</div>`
+								: html`<${PageSection} key=${`${section}:${subPath}`} initFn=${ps.init} teardownFn=${ps.teardown} subPath=${subPath} />`
 							: null
 					}
 					${section === "identity" ? html`<${IdentitySection} />` : null}

@@ -373,6 +373,10 @@ where
             header::HeaderName::from_static("referrer-policy"),
             HeaderValue::from_static("strict-origin-when-cross-origin"),
         ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("camera=(), microphone=(self), geolocation=(), payment=()"),
+        ))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(cors);
 
@@ -454,6 +458,7 @@ fn build_gateway_base_internal(
             credential_store: Arc::clone(cred_store),
             webauthn_registry: webauthn_registry.clone(),
             gateway_state: Arc::clone(&state),
+            login_guard: crate::login_guard::LoginGuard::new(),
         };
         router = router.nest("/api/auth", auth_router().with_state(auth_state));
     }
@@ -556,6 +561,7 @@ fn build_gateway_base_internal(
             credential_store: Arc::clone(cred_store),
             webauthn_registry: webauthn_registry.clone(),
             gateway_state: Arc::clone(&state),
+            login_guard: crate::login_guard::LoginGuard::new(),
         };
         router = router.nest("/api/auth", auth_router().with_state(auth_state));
     }
@@ -654,6 +660,16 @@ pub fn finalize_gateway_app(
         app_state.clone(),
         crate::request_throttle::throttle_gate,
     ));
+    // HSTS: instruct browsers to always use HTTPS once they've connected securely.
+    let router = if app_state.gateway.is_secure() {
+        use axum::http::{HeaderValue, header};
+        router.layer(SetResponseHeaderLayer::overriding(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        ))
+    } else {
+        router
+    };
     let router = apply_middleware_stack(router, cors, http_request_logs);
     router.with_state(app_state)
 }
@@ -2601,6 +2617,12 @@ pub async fn start_gateway(
     if banner.sandbox_backend_name == "none" {
         lines.push("⚠ no container runtime found; commands run on host".into());
     }
+    // Warn when TLS is off and the server is not localhost-only.
+    if !tls_active && !is_localhost {
+        lines.push(
+            "⚠ TLS is disabled on a non-localhost bind address; session cookies will be sent over unencrypted HTTP".into(),
+        );
+    }
     // Display setup code if one was generated.
     if let Some(ref code) = banner.setup_code_display {
         lines.extend(startup_setup_code_lines(code));
@@ -2819,8 +2841,8 @@ async fn ws_upgrade_handler(
     let remote_ip = extract_ws_client_ip(&headers, addr).filter(|ip| is_public_ip(ip));
 
     let is_local = is_local_connection(&headers, addr, state.gateway.behind_proxy);
-    let header_authenticated =
-        websocket_header_authenticated(&headers, state.gateway.credential_store.as_ref(), is_local)
+    let header_identity =
+        websocket_header_authenticate(&headers, state.gateway.credential_store.as_ref(), is_local)
             .await;
     ws.on_upgrade(move |socket| {
         handle_connection(
@@ -2830,7 +2852,7 @@ async fn ws_upgrade_handler(
             addr,
             accept_language,
             remote_ip,
-            header_authenticated,
+            header_identity,
             is_local,
         )
     })
@@ -2923,19 +2945,17 @@ fn is_public_ip(ip: &str) -> bool {
 
 pub(crate) use moltis_auth::locality::is_local_connection;
 
-async fn websocket_header_authenticated(
+async fn websocket_header_authenticate(
     headers: &axum::http::HeaderMap,
     credential_store: Option<&Arc<auth::CredentialStore>>,
     is_local: bool,
-) -> bool {
-    let Some(store) = credential_store else {
-        return false;
-    };
+) -> Option<auth::AuthIdentity> {
+    let store = credential_store?;
 
-    matches!(
-        crate::auth_middleware::check_auth(store, headers, is_local).await,
-        crate::auth_middleware::AuthResult::Allowed(_)
-    )
+    match crate::auth_middleware::check_auth(store, headers, is_local).await {
+        crate::auth_middleware::AuthResult::Allowed(identity) => Some(identity),
+        _ => None,
+    }
 }
 
 /// Resolve the machine's primary outbound IP address.
