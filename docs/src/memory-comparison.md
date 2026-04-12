@@ -207,7 +207,6 @@ context. The implementation differs:
 
 ## What OpenClaw Has That Moltis Does Not (Yet)
 
-- **Manual `/compact` command** with user-specified instructions
 - **CLI memory commands** (`status`, `index`, `search`) for debugging
 - **Session pruning** (cache-TTL based trimming of old tool results)
 - **Gemini and Voyage embedding providers**
