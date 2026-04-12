@@ -725,40 +725,42 @@ reset_on_exit = true              # Reset serve/funnel when gateway shuts down
 # Configure the embedding provider for memory/RAG features.
 
 [memory]
-# style = "hybrid"               # High-level memory behavior:
+# style = "hybrid"               # High-level memory behavior (default = "hybrid"):
                                   #   "hybrid"      - Prompt MEMORY.md + memory_search/memory_get/memory_save
                                   #   "prompt-only" - Prompt MEMORY.md only, no memory tools
                                   #   "search-only" - Memory tools only, no prompt MEMORY.md injection
                                   #   "off"         - Disable prompt memory injection and memory tools
-# agent_write_mode = "hybrid"    # Where agent-authored memory writes can land:
+#                                  # Prompt freshness is configured separately in [chat].prompt_memory_mode
+# agent_write_mode = "hybrid"    # Where agent-authored memory writes can land (default = "hybrid"):
                                   #   "hybrid"      - Allow MEMORY.md and memory/<name>.md
                                   #   "prompt-only" - Allow MEMORY.md only
                                   #   "search-only" - Allow memory/<name>.md only
                                   #   "off"         - Disable agent-authored memory writes
-# user_profile_write_mode = "explicit-and-auto"  # How Moltis writes USER.md:
+# user_profile_write_mode = "explicit-and-auto"  # How Moltis writes USER.md (default = "explicit-and-auto"):
                                   #   "explicit-and-auto" - Settings saves plus silent timezone/location capture
                                   #   "explicit-only"     - Settings saves only, no silent timezone/location capture
                                   #   "off"               - Do not write USER.md, keep profile in moltis.toml only
-# backend = "builtin"            # Memory backend:
+# backend = "builtin"            # Memory backend (default = "builtin"):
                                   #   "builtin" - Built-in SQLite indexer and retriever
                                   #   "qmd"     - External QMD CLI backend
-# provider = "local"              # Embedding provider for the built-in backend:
+# provider = "auto"               # Embedding provider for the built-in backend (default = auto-detect):
                                   #   "local"   - Built-in local embeddings
                                   #   "ollama"  - Ollama server
                                   #   "openai"  - OpenAI API
                                   #   "custom"  - Custom endpoint
                                   #   (none)    - Auto-detect from available providers
                                   # Ignored while backend = "qmd"
-# disable_rag = false             # true => keyword-only search (no embeddings)
-# citations = "auto"              # Citation mode: "on", "off", or "auto"
-# llm_reranking = false           # Use the LLM to rerank search results
-# search_merge_strategy = "rrf"   # Merge strategy: "rrf" or "linear"
-# session_export = "on-new-or-reset"  # Session transcript export policy:
+# disable_rag = false             # true => keyword-only search, disables embedding retrieval
+# citations = "auto"              # Citation mode (default = "auto"): "on", "off", or "auto"
+# llm_reranking = false           # Use the LLM to rerank search results (only meaningful when RAG is enabled)
+# search_merge_strategy = "rrf"   # Merge strategy (default = "rrf"): "rrf" or "linear"
+# session_export = "on-new-or-reset"  # Session transcript export policy (default = "on-new-or-reset"):
                                   #   "on-new-or-reset" - Export transcripts on /new and /reset
                                   #   "off"             - Disable session transcript export
-# base_url = "http://localhost:11434/v1"  # Embedding API base (host, /v1, or /embeddings)
-# model = "nomic-embed-text"      # Embedding model name
-# api_key = "..."                 # API key (optional for local endpoints like Ollama)
+#                                  # Exported transcripts become searchable memory, not prompt memory
+# base_url = "http://localhost:11434/v1"  # Builtin backend only: embedding API base (host, /v1, or /embeddings)
+# model = "nomic-embed-text"      # Builtin backend only: embedding model name
+# api_key = "..."                 # Builtin backend only: API key (optional for local endpoints like Ollama)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CHANNELS

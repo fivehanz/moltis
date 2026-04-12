@@ -74,6 +74,15 @@ memory exists at all, and whether memory tools are exposed. Mode only matters
 when prompt memory is enabled. Frozen snapshots are stored in `session_state`,
 so they are session-scoped rather than a process-global cache.
 
+Defaults today:
+
+- `memory.style = "hybrid"`
+- `memory.agent_write_mode = "hybrid"`
+- `memory.user_profile_write_mode = "explicit-and-auto"`
+- `memory.backend = "builtin"`
+- `memory.session_export = "on-new-or-reset"`
+- `chat.prompt_memory_mode = "live-reload"`
+
 `memory.agent_write_mode` is a third axis:
 
 - `hybrid` allows agent-authored writes to both `MEMORY.md` and `memory/*.md`
@@ -100,6 +109,14 @@ knobs:
 
 - `citations`: `auto`, `on`, or `off`
 - `search_merge_strategy`: `rrf` or `linear`
+
+Two easy-to-miss interaction rules:
+
+- builtin embedding knobs such as `memory.provider`, `memory.base_url`,
+  `memory.model`, and `memory.api_key` do nothing while
+  `memory.backend = "qmd"`
+- `memory.session_export` affects searchable transcript files under
+  `memory/sessions/*.md`, not prompt memory injection
 
 The chat UI exposes the active prompt-memory mode in the toolbar and full
 context view. Frozen sessions can also refresh their snapshot manually without

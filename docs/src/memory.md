@@ -105,7 +105,8 @@ backend = "builtin"
 
 # Embedding provider for the built-in backend: "local", "ollama", "openai", "custom", or auto-detect
 # Ignored while backend = "qmd", but preserved for switching back later
-provider = "local"
+# Omit this field for the real default, which is auto-detect
+provider = "auto"
 
 # Disable RAG embeddings and force keyword-only search
 disable_rag = false
@@ -131,6 +132,20 @@ command = "qmd"
 max_results = 10
 timeout_ms = 30000
 ```
+
+Real defaults, if you leave the fields unset:
+
+- `style = "hybrid"`
+- `agent_write_mode = "hybrid"`
+- `user_profile_write_mode = "explicit-and-auto"`
+- `backend = "builtin"`
+- `provider = auto-detect` (unset, not hardcoded `local`)
+- `disable_rag = false`
+- `citations = "auto"`
+- `llm_reranking = false`
+- `search_merge_strategy = "rrf"`
+- `session_export = "on-new-or-reset"`
+- `[chat].prompt_memory_mode = "live-reload"`
 
 `style` is separate from `[chat].prompt_memory_mode`. Style controls whether
 `MEMORY.md` is injected and whether memory tools are exposed. Prompt memory
@@ -164,7 +179,33 @@ memory files:
 - `citations = "auto" | "on" | "off"`
 - `search_merge_strategy = "rrf" | "linear"`
 
+Interaction rules that matter in practice:
+
+- `provider`, `base_url`, `model`, and `api_key` only apply to
+  `backend = "builtin"`. QMD ignores them.
+- `[chat].prompt_memory_mode` only matters when `style` still allows prompt
+  memory, `hybrid` or `prompt-only`.
+- `llm_reranking` is only meaningful when RAG is enabled. If
+  `disable_rag = true`, memory falls back to keyword search.
+- `session_export` exports transcripts into searchable memory files. It does
+  not inject those transcripts into the prompt directly.
+
 Or via the web UI: **Settings > Memory**
+
+## Recipes
+
+Common combinations:
+
+| Goal | Settings |
+|------|----------|
+| Default everyday setup | `style = "hybrid"`, `backend = "builtin"`, `prompt_memory_mode = "live-reload"` |
+| Deterministic prompt memory | `style = "hybrid"`, `prompt_memory_mode = "frozen-at-session-start"` |
+| Search-only long-term memory | `style = "search-only"` |
+| Prompt-only memory, no recall tools | `style = "prompt-only"` |
+| Disable agent memory writes | `agent_write_mode = "off"` |
+| Keep `USER.md` from silent enrichment | `user_profile_write_mode = "explicit-only"` |
+| Keep user profile only in config | `user_profile_write_mode = "off"` |
+| QMD backend experiment | `backend = "qmd"` |
 
 ## Embedding Providers
 
