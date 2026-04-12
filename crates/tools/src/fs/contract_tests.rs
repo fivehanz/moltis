@@ -405,6 +405,46 @@ async fn re_read_loop_detection_fires_warning() {
 }
 
 #[tokio::test]
+async fn re_read_loop_detection_fires_warning_for_auto_paged_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("long.txt");
+    let long_line = "x".repeat(70_000);
+    tokio::fs::write(&path, format!("{long_line}\n"))
+        .await
+        .unwrap();
+
+    let state = new_fs_state(false);
+    let registry = build_registry_with_state(state);
+    let read = registry.get("Read").unwrap();
+
+    for _ in 0..2 {
+        let value = read
+            .execute(json!({
+                "file_path": path.to_str().unwrap(),
+                "_session_key": "s1",
+            }))
+            .await
+            .unwrap();
+        assert!(
+            value.get("loop_warning").is_none(),
+            "warning too early on auto-paged read: {value:?}"
+        );
+    }
+
+    let third = read
+        .execute(json!({
+            "file_path": path.to_str().unwrap(),
+            "_session_key": "s1",
+        }))
+        .await
+        .unwrap();
+    assert!(
+        third.get("loop_warning").is_some(),
+        "warning missing on auto-paged read: {third:?}"
+    );
+}
+
+#[tokio::test]
 async fn path_policy_denies_read_and_write() {
     let dir = tempfile::tempdir().unwrap();
     let real = tokio::fs::canonicalize(dir.path()).await.unwrap();

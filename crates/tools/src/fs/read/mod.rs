@@ -96,6 +96,35 @@ fn text_payload(
     Value::Object(payload)
 }
 
+fn maybe_add_loop_warning(
+    fs_state: Option<&FsState>,
+    payload: &mut Value,
+    file_path: &str,
+    offset: usize,
+    limit: usize,
+    session_key: &str,
+) {
+    let Some(state) = fs_state else {
+        return;
+    };
+    let guard = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let n = guard.consecutive_reads(session_key);
+    if n >= READ_LOOP_THRESHOLD
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert(
+            "loop_warning".into(),
+            json!(format!(
+                "This exact read (file_path={file_path}, offset={offset}, limit={limit}) \
+                 has been repeated {n} times with no intervening edit. The \
+                 file hasn't changed — stop re-reading it and make progress on the task."
+            )),
+        );
+    }
+}
+
 /// Native `Read` tool implementation.
 #[derive(Default)]
 pub struct ReadTool {
@@ -371,14 +400,23 @@ impl ReadTool {
             }
         }
 
-        Ok(text_payload(
+        let mut payload = text_payload(
             file_path,
             aggregated_content,
             total_lines,
             start_line,
             rendered_lines_total,
             truncated,
-        ))
+        );
+        maybe_add_loop_warning(
+            self.fs_state.as_ref(),
+            &mut payload,
+            file_path,
+            offset,
+            page_limit,
+            session_key,
+        );
+        Ok(payload)
     }
 
     /// Render raw file bytes into the typed Read payload.
@@ -475,24 +513,14 @@ impl ReadTool {
         // this method. Check the consecutive count (which was bumped
         // during that first record_read) and surface a warning if the
         // same (path, offset, limit) has been repeated too many times.
-        if let Some(ref state) = self.fs_state {
-            let guard = state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let n = guard.consecutive_reads(session_key);
-            if n >= READ_LOOP_THRESHOLD
-                && let Some(obj) = payload.as_object_mut()
-            {
-                obj.insert(
-                    "loop_warning".into(),
-                    json!(format!(
-                        "This exact read (file_path={file_path}, offset={offset}, limit={limit}) \
-                         has been repeated {n} times with no intervening edit. The \
-                         file hasn't changed — stop re-reading it and make progress on the task."
-                    )),
-                );
-            }
-        }
+        maybe_add_loop_warning(
+            self.fs_state.as_ref(),
+            &mut payload,
+            file_path,
+            offset,
+            limit,
+            session_key,
+        );
 
         payload
     }
