@@ -442,7 +442,6 @@ fn env_value_with_overrides(env_overrides: &HashMap<String, String>, key: &str) 
         })
 }
 
-
 fn summarize_model_ids_for_logs(sorted_model_ids: &[String], max_items: usize) -> Vec<String> {
     if max_items == 0 {
         return Vec::new();
@@ -1744,7 +1743,9 @@ pub async fn prepare_gateway_core(
     // Runtime env overrides from the settings UI (`/api/env`) layered after
     // config `[env]`. Process env remains highest precedence.
     let runtime_env_overrides = match credential_store.get_all_env_values().await {
-        Ok(db_env_vars) => crate::mcp_service::merge_env_overrides(&config_env_overrides, db_env_vars),
+        Ok(db_env_vars) => {
+            crate::mcp_service::merge_env_overrides(&config_env_overrides, db_env_vars)
+        },
         Err(error) => {
             warn!(%error, "failed to load persisted env overrides from credential store");
             config_env_overrides.clone()

@@ -11,8 +11,8 @@
 //! in secret-aware types and only expose sanitized display projections.
 
 pub mod auth;
-pub mod config_parsing;
 pub mod client;
+pub mod config_parsing;
 pub mod error;
 pub mod manager;
 pub mod registry;

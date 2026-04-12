@@ -10,8 +10,11 @@ use {
     serde_json::Value,
 };
 
-use crate::{McpServerConfig, TransportType, registry::McpOAuthConfig};
-use crate::error::{Error, Result};
+use crate::{
+    McpServerConfig, TransportType,
+    error::{Error, Result},
+    registry::McpOAuthConfig,
+};
 
 /// Extract an [`McpServerConfig`] from JSON params.
 ///
@@ -22,9 +25,7 @@ pub fn parse_server_config(
 ) -> Result<McpServerConfig> {
     let transport = match params.get("transport").and_then(|v| v.as_str()) {
         Some("sse") => TransportType::Sse,
-        Some("streamable-http" | "streamable_http" | "http") => {
-            TransportType::StreamableHttp
-        },
+        Some("streamable-http" | "streamable_http" | "http") => TransportType::StreamableHttp,
         Some(_) => TransportType::Stdio,
         None => existing
             .map(|cfg| cfg.transport)
@@ -233,7 +234,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.transport, TransportType::Sse);
-        assert_eq!(cfg.url.as_ref().map(|u| u.expose_secret().as_str()), Some("http://localhost:8080/mcp"));
+        assert_eq!(
+            cfg.url.as_ref().map(|u| u.expose_secret().as_str()),
+            Some("http://localhost:8080/mcp")
+        );
     }
 
     #[test]
@@ -271,7 +275,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.transport, TransportType::StreamableHttp);
-        assert_eq!(cfg.url.as_ref().map(|u| u.expose_secret().as_str()), Some("http://localhost:8080/mcp"));
+        assert_eq!(
+            cfg.url.as_ref().map(|u| u.expose_secret().as_str()),
+            Some("http://localhost:8080/mcp")
+        );
     }
 
     #[test]
@@ -298,7 +305,10 @@ mod tests {
             url: Some(Secret::new("http://example.com".to_string())),
             headers: {
                 let mut h = HashMap::new();
-                h.insert("Authorization".to_string(), Secret::new("Bearer old".to_string()));
+                h.insert(
+                    "Authorization".to_string(),
+                    Secret::new("Bearer old".to_string()),
+                );
                 h
             },
             oauth: None,
@@ -315,9 +325,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(cfg.display_name, Some("Updated Server".to_string()));
-        assert_eq!(cfg.url.as_ref().map(|u| u.expose_secret().as_str()), Some("http://example.com"));
         assert_eq!(
-            cfg.headers.get("Authorization").map(|h| h.expose_secret().as_str()),
+            cfg.url.as_ref().map(|u| u.expose_secret().as_str()),
+            Some("http://example.com")
+        );
+        assert_eq!(
+            cfg.headers
+                .get("Authorization")
+                .map(|h| h.expose_secret().as_str()),
             Some("Bearer old")
         );
     }
@@ -387,7 +402,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            cfg.headers.get("X-Replace").map(|h| h.expose_secret().as_str()),
+            cfg.headers
+                .get("X-Replace")
+                .map(|h| h.expose_secret().as_str()),
             Some("new")
         );
         // X-Keep should NOT be preserved — headers are fully replaced
@@ -406,7 +423,10 @@ mod tests {
             url: Some(Secret::new("http://example.com".to_string())),
             headers: {
                 let mut h = HashMap::new();
-                h.insert("Authorization".to_string(), Secret::new("Bearer old".to_string()));
+                h.insert(
+                    "Authorization".to_string(),
+                    Secret::new("Bearer old".to_string()),
+                );
                 h
             },
             oauth: None,
@@ -433,15 +453,12 @@ mod tests {
         .into_iter()
         .collect();
 
-        let merged = merge_env_overrides(
-            &base,
-            vec![
-                ("API_KEY".to_string(), "from-db".to_string()),
-                ("NEW_VAR".to_string(), "from-db".to_string()),
-                ("".to_string(), "ignored-empty-key".to_string()),
-                ("EMPTY_VAL".to_string(), "".to_string()),
-            ],
-        );
+        let merged = merge_env_overrides(&base, vec![
+            ("API_KEY".to_string(), "from-db".to_string()),
+            ("NEW_VAR".to_string(), "from-db".to_string()),
+            ("".to_string(), "ignored-empty-key".to_string()),
+            ("EMPTY_VAL".to_string(), "".to_string()),
+        ]);
 
         assert_eq!(merged.get("API_KEY").unwrap(), "from-config"); // base wins
         assert_eq!(merged.get("NEW_VAR").unwrap(), "from-db"); // new from additional

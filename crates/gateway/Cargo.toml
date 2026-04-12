@@ -31,6 +31,7 @@ moltis-cron            = { workspace = true }
 moltis-discord         = { workspace = true }
 moltis-matrix          = { optional = true, workspace = true }
 moltis-mcp             = { workspace = true }
+moltis-mcp-agent-bridge = { workspace = true }
 moltis-media           = { workspace = true }
 moltis-memory          = { workspace = true }
 moltis-metrics         = { optional = true, workspace = true }

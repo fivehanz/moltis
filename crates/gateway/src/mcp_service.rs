@@ -146,7 +146,6 @@ impl LiveMcpService {
     }
 }
 
-
 #[async_trait]
 impl McpService for LiveMcpService {
     async fn list(&self) -> ServiceResult {
@@ -165,8 +164,8 @@ impl McpService for LiveMcpService {
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(ToOwned::to_owned);
-        let config = parse_server_config(&params, None)
-            .map_err(|e| ServiceError::message(e.to_string()))?;
+        let config =
+            parse_server_config(&params, None).map_err(|e| ServiceError::message(e.to_string()))?;
         self.refresh_manager_env_overrides().await;
 
         // If a server with this name already exists, append a numeric suffix.
@@ -451,85 +450,5 @@ impl McpService for LiveMcpService {
     async fn update_request_timeout(&self, request_timeout_secs: u64) -> ServiceResult {
         self.manager.set_request_timeout_secs(request_timeout_secs);
         Ok(serde_json::json!({ "ok": true }))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use {
-        super::*,
-        moltis_mcp::McpRegistry,
-        secrecy::{ExposeSecret, Secret},
-    };
-
-
-    #[tokio::test]
-    async fn test_sync_mcp_tools_empty_manager() {
-        let manager = moltis_mcp::McpManager::new(McpRegistry::new());
-        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
-
-        sync_mcp_tools(&manager, &registry).await;
-
-        let reg = registry.read().await;
-        assert!(reg.list_schemas().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_sync_mcp_tools_removes_stale_tools() {
-        let manager = moltis_mcp::McpManager::new(McpRegistry::new());
-        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
-
-        // Manually register a fake MCP tool to simulate a stale entry.
-        {
-            let mut reg = registry.write().await;
-            reg.register_mcp(
-                Box::new(FakeTool("mcp__old__tool".into())),
-                "old".to_string(),
-            );
-        }
-
-        // Sync should remove it since there are no running MCP servers.
-        sync_mcp_tools(&manager, &registry).await;
-
-        let reg = registry.read().await;
-        assert!(reg.get("mcp__old__tool").is_none());
-    }
-
-    #[tokio::test]
-    async fn test_sync_preserves_non_mcp_tools() {
-        let manager = moltis_mcp::McpManager::new(McpRegistry::new());
-        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
-
-        {
-            let mut reg = registry.write().await;
-            reg.register(Box::new(FakeTool("exec".into())));
-        }
-
-        sync_mcp_tools(&manager, &registry).await;
-
-        let reg = registry.read().await;
-        assert!(reg.get("exec").is_some());
-    }
-
-    /// Minimal AgentTool implementation for testing.
-    struct FakeTool(String);
-
-    #[async_trait]
-    impl AgentTool for FakeTool {
-        fn name(&self) -> &str {
-            &self.0
-        }
-
-        fn description(&self) -> &str {
-            "fake"
-        }
-
-        fn parameters_schema(&self) -> Value {
-            serde_json::json!({})
-        }
-
-        async fn execute(&self, _params: Value) -> Result<Value> {
-            Ok(serde_json::json!({}))
-        }
     }
 }

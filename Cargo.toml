@@ -20,6 +20,7 @@ default-members = [
   "crates/httpd",
   "crates/matrix",
   "crates/mcp",
+  "crates/mcp-agent-bridge",
   "crates/media",
   "crates/memory",
   "crates/metrics",
@@ -337,6 +338,7 @@ moltis-graphql         = { path = "crates/graphql" }
 moltis-httpd           = { default-features = false, path = "crates/httpd" }
 moltis-matrix          = { path = "crates/matrix" }
 moltis-mcp             = { path = "crates/mcp" }
+moltis-mcp-agent-bridge = { path = "crates/mcp-agent-bridge" }
 moltis-media           = { path = "crates/media" }
 moltis-memory          = { path = "crates/memory" }
 moltis-metrics         = { path = "crates/metrics" }
