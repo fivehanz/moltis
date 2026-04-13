@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -83,6 +83,7 @@ use {moltis_channels::ChannelReplyTarget, moltis_sessions::session_events::Sessi
 
 use crate::{
     auth::{CredentialStore, ResolvedAuth},
+    broadcast::Broadcaster,
     nodes::NodeRegistry,
     pairing::{PairingState, PairingStore},
     services::GatewayServices,
@@ -391,9 +392,6 @@ pub struct GatewayState {
     /// Runtime GraphQL availability toggle.
     #[cfg(feature = "graphql")]
     pub graphql_enabled: AtomicBool,
-    /// Broadcast channel for GraphQL subscriptions. Events are `(event_name, payload)`.
-    #[cfg(feature = "graphql")]
-    pub graphql_broadcast: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
     /// Session event bus for cross-UI synchronisation (macOS ↔ web).
     pub session_event_bus: SessionEventBus,
     /// Cloud deploy platform (e.g. "flyio", "digitalocean"), read from
@@ -431,9 +429,6 @@ pub struct GatewayState {
     pub webhook_worker_tx: std::sync::OnceLock<mpsc::Sender<i64>>,
 
     // ── Atomics (lock-free) ─────────────────────────────────────────────────
-    /// Monotonically increasing sequence counter for broadcast events.
-    pub seq: AtomicU64,
-    /// Sequential counter for TTS test phrase round-robin picking.
     pub tts_phrase_counter: AtomicUsize,
     /// Live count of connected nodes.  Shared with `ExecTool` via the
     /// `GatewayNodeExecProvider` so `parameters_schema()` can check it
@@ -441,6 +436,10 @@ pub struct GatewayState {
     pub node_count: Arc<AtomicUsize>,
     /// Count of configured SSH targets exposed as remote execution options.
     pub ssh_target_count: Arc<AtomicUsize>,
+
+    // ── Broadcast state (lock-free) ─────────────────────────────────────────
+    /// Lock-free broadcast state (seq counter, GraphQL subscription channel).
+    pub broadcaster: Arc<Broadcaster>,
 
     // ── Mutable runtime state (single lock) ─────────────────────────────────
     /// All mutable runtime state, behind a single lock.
@@ -534,15 +533,10 @@ impl GatewayState {
             webhook_store: std::sync::OnceLock::new(),
             webhook_rate_limiter: moltis_webhooks::rate_limit::WebhookRateLimiter::default(),
             webhook_worker_tx: std::sync::OnceLock::new(),
-            seq: AtomicU64::new(0),
             tts_phrase_counter: AtomicUsize::new(0),
             node_count: Arc::new(AtomicUsize::new(0)),
             ssh_target_count: Arc::new(AtomicUsize::new(0)),
-            #[cfg(feature = "graphql")]
-            graphql_broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(256);
-                tx
-            },
+            broadcaster: Arc::new(Broadcaster::new()),
             inner: RwLock::new(GatewayInner::new(hook_registry)),
         })
     }
@@ -592,7 +586,7 @@ impl GatewayState {
     }
 
     pub fn next_seq(&self) -> u64 {
-        self.seq.fetch_add(1, Ordering::Relaxed) + 1
+        self.broadcaster.next_seq()
     }
 
     #[cfg(feature = "graphql")]
@@ -878,7 +872,7 @@ impl GatewayState {
         let mut inner = self.inner.write().await;
 
         // Build and serialize the notification frame.
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let seq = self.broadcaster.next_seq();
         let frame = EventFrame::new(
             "auth.credentials_changed",
             serde_json::json!({ "reason": reason }),

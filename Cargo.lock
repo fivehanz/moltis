@@ -7082,6 +7082,7 @@ dependencies = [
  "moltis-discord",
  "moltis-matrix",
  "moltis-mcp",
+ "moltis-mcp-agent-bridge",
  "moltis-media",
  "moltis-memory",
  "moltis-metrics",
@@ -7264,6 +7265,20 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "moltis-mcp-agent-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "moltis-agents",
+ "moltis-mcp",
+ "moltis-metrics",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
