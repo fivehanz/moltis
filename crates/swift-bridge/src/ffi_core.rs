@@ -5,8 +5,7 @@ use std::ffi::{CString, c_char};
 
 use {
     moltis_provider_setup::{
-        KeyStore, config_with_saved_keys, detect_auto_provider_sources_with_overrides,
-        known_providers,
+        KeyStore, detect_auto_provider_sources_with_overrides, known_providers,
     },
     secrecy::ExposeSecret,
 };
@@ -16,13 +15,10 @@ use crate::{
         LOG_CALLBACK, LogCallback, NETWORK_AUDIT_CALLBACK, NetworkAuditCallback,
         SESSION_EVENT_CALLBACK, SessionEventCallback, emit_log, emit_session_event,
     },
-    chat::{
-        BridgeStreamEvent, StreamCallback, StreamCallbackCtx, build_chat_response,
-        resolve_provider_for_model,
-    },
+    chat::build_chat_response,
     helpers::{
         config_dir_string, encode_error, encode_json, parse_ffi_request, read_c_string,
-        record_call, record_error, trace_call, with_ffi_boundary,
+        record_call, trace_call, with_ffi_boundary,
     },
     state::{BRIDGE, HTTPD, HttpdHandle, build_registry, stop_httpd_handle},
     types::*,

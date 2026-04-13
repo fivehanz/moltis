@@ -110,7 +110,12 @@ pub(super) async fn finalize_prepared_gateway(
         tailscale_reset_on_exit,
         app,
     } = args;
+    #[cfg(not(feature = "tls"))]
+    let _ = bind;
+    #[cfg(feature = "tls")]
     let mut app = app;
+    #[cfg(not(feature = "tls"))]
+    let app = app;
 
     // Resolve TLS configuration (only when compiled with the `tls` feature).
     #[cfg_attr(not(feature = "tls"), allow(unused_variables))]

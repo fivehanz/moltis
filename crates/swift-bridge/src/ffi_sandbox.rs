@@ -5,7 +5,6 @@ use std::{collections::HashMap, ffi::c_char};
 use moltis_tools::image_cache::ImageBuilder;
 
 use crate::{
-    callbacks::emit_log,
     helpers::{
         encode_error, encode_json, parse_ffi_request, record_call, record_error,
         sandbox_backend_name, sandbox_container_prefix, sandbox_effective_default_image,

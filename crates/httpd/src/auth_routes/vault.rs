@@ -1,4 +1,11 @@
-use super::*;
+#[cfg(feature = "vault")]
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+
+#[cfg(any(feature = "vault", test))]
+use super::AuthState;
+
+#[cfg(test)]
+use super::localhost_cookie_domain;
 
 // ── Vault handlers ──────────────────────────────────────────────────────────
 

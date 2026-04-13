@@ -2,8 +2,6 @@
 
 use std::ffi::c_char;
 
-use secrecy::ExposeSecret;
-
 use crate::{
     callbacks::emit_log,
     helpers::{

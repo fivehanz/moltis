@@ -1295,4 +1295,5 @@ async fn api_endpoint_rate_limited_after_high_request_volume() {
     assert_eq!(throttled.status(), 429);
 }
 
+#[path = "auth_middleware/more.rs"]
 mod more;
