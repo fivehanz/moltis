@@ -15,9 +15,8 @@ use std::sync::Arc;
 #[cfg(feature = "vault")]
 use moltis_vault::Vault;
 
-fn fixture_secret(tag: &str) -> String {
-    let digest = sha256_hex(tag);
-    format!("fixture-{tag}-{}", &digest[..12])
+fn fixture_secret(_tag: &str) -> String {
+    generate_token()
 }
 
 #[test]
