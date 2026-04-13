@@ -199,13 +199,9 @@ fn canonicalize_schema_for_openai_compat(schema: &serde_json::Value) -> serde_js
         )
 }
 
-/// Validate and normalize a JSON Schema document into the smaller subset used
-/// by OpenAI-compatible function-calling APIs.
-///
-/// The pipeline is:
-/// 1. Validate and canonicalize the raw schema with `json_schema_ast`
-/// 2. Apply recursive schema transforms with `schemars`
-/// 3. Retain only the OpenAI-compatible subset before strict-mode patching
+/// Validate and normalize a JSON Schema document into the OpenAI-compatible
+/// function-calling subset via `json_schema_ast` canonicalization plus
+/// recursive `schemars` transforms.
 pub fn sanitize_schema_for_openai_compat(schema: &mut serde_json::Value) {
     let canonical = canonicalize_schema_for_openai_compat(schema);
 
@@ -213,19 +209,14 @@ pub fn sanitize_schema_for_openai_compat(schema: &mut serde_json::Value) {
         *schema = canonical;
         return;
     };
-
     let mut replace_const = ReplaceConstValue::default();
     replace_const.transform(&mut transformed);
-
     let mut replace_unevaluated_properties = ReplaceUnevaluatedProperties::default();
     replace_unevaluated_properties.transform(&mut transformed);
-
     let mut replace_prefix_items = ReplacePrefixItems::default();
     replace_prefix_items.transform(&mut transformed);
-
     let mut remove_ref_siblings = RemoveRefSiblings::default();
     remove_ref_siblings.transform(&mut transformed);
-
     let mut subset_transform = RecursiveTransform(OpenAiSchemaSubsetTransform);
     subset_transform.transform(&mut transformed);
 
