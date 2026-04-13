@@ -7418,7 +7418,6 @@ dependencies = [
  "moltis-metrics",
  "moltis-msteams",
  "moltis-network-filter",
- "moltis-node-exec-types",
  "moltis-nostr",
  "moltis-oauth",
  "moltis-onboarding",
@@ -7727,17 +7726,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "moltis-node-exec-types"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "moltis-metrics",
- "serde",
- "tracing",
 ]
 
 [[package]]
@@ -8190,7 +8178,6 @@ dependencies = [
  "moltis-media",
  "moltis-metrics",
  "moltis-network-filter",
- "moltis-node-exec-types",
  "moltis-providers",
  "moltis-sessions",
  "moltis-skills",

@@ -26,7 +26,6 @@ default-members = [
   "crates/metrics",
   "crates/msteams",
   "crates/network-filter",
-  "crates/node-exec-types",
   "crates/node-host",
   "crates/nostr",
   "crates/oauth",
@@ -83,7 +82,6 @@ members = [
   "crates/memory",
   "crates/metrics",
   "crates/msteams",
-  "crates/node-exec-types",
   "crates/node-host",
   "crates/nostr",
   "crates/oauth",
@@ -346,7 +344,6 @@ moltis-memory           = { path = "crates/memory" }
 moltis-metrics          = { path = "crates/metrics" }
 moltis-msteams          = { path = "crates/msteams" }
 moltis-network-filter   = { default-features = false, path = "crates/network-filter" }
-moltis-node-exec-types  = { path = "crates/node-exec-types" }
 moltis-node-host        = { path = "crates/node-host" }
 moltis-nostr            = { path = "crates/nostr" }
 moltis-oauth            = { path = "crates/oauth" }

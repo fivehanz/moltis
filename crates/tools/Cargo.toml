@@ -29,7 +29,6 @@ ignore                = { optional = true, workspace = true }
 image                 = { workspace = true }
 ipnet                 = { workspace = true }
 moltis-agents         = { workspace = true }
-moltis-node-exec-types = { workspace = true }
 pdf-extract           = { optional = true, workspace = true }
 moltis-browser        = { workspace = true }
 moltis-common         = { workspace = true }
