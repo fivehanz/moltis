@@ -1,9 +1,8 @@
+#[cfg(feature = "vault")]
 use std::sync::Arc;
 
 #[cfg(feature = "vault")]
 use moltis_vault::Vault;
-
-use secrecy::Secret;
 
 use crate::credential_store::{CredentialStore, EnvVarEntry};
 

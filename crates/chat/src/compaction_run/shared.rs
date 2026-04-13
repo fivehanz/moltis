@@ -10,6 +10,8 @@ use {
     serde_json::Value,
 };
 
+use crate::types::now_ms;
+
 use super::CompactionRunError;
 
 /// Placeholder text injected when a bulky tool-result is pruned in place.
@@ -400,7 +402,7 @@ fn stub_tool_result(tool_call_id: &str) -> Value {
     let msg = PersistedMessage::Tool {
         tool_call_id: tool_call_id.to_string(),
         content: "[Result from earlier conversation — see context summary above]".to_string(),
-        created_at: Some(crate::now_ms()),
+        created_at: Some(now_ms()),
     };
     msg.to_value()
 }
@@ -440,7 +442,7 @@ pub(super) fn build_middle_marker(middle: &[Value]) -> Value {
 
     let msg = PersistedMessage::User {
         content: MessageContent::Text(body),
-        created_at: Some(crate::now_ms()),
+        created_at: Some(now_ms()),
         audio: None,
         documents: None,
         channel: None,
@@ -461,7 +463,7 @@ pub(super) fn build_middle_marker(middle: &[Value]) -> Value {
 pub(super) fn build_summary_message(body: &str) -> Value {
     let msg = PersistedMessage::User {
         content: MessageContent::Text(format!("[Conversation Summary]\n\n{body}")),
-        created_at: Some(crate::now_ms()),
+        created_at: Some(now_ms()),
         audio: None,
         documents: None,
         channel: None,

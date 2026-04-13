@@ -21,7 +21,7 @@ use {
 };
 
 #[allow(unused_imports)]
-use moltis_providers::{ProviderRegistry, local_gguf, local_llm, raw_model_id};
+use moltis_providers::{ProviderRegistry, local_gguf, local_llm, model_id::raw_model_id};
 
 #[allow(unused_imports)]
 use crate::{
@@ -30,7 +30,6 @@ use crate::{
     state::GatewayState,
 };
 
-#[derive(Debug, thiserror::Error)]
 mod cache;
 mod config;
 mod service;

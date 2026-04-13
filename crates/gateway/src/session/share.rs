@@ -1,8 +1,7 @@
-use super::{helpers::*, *};
+use super::*;
 
-#[async_trait]
-impl SessionService for LiveSessionService {
-    async fn share_create(&self, params: Value) -> ServiceResult {
+impl LiveSessionService {
+    pub(super) async fn share_create_impl(&self, params: Value) -> ServiceResult {
         let key = params
             .get("key")
             .and_then(|v| v.as_str())
@@ -99,7 +98,7 @@ impl SessionService for LiveSessionService {
         }))
     }
 
-    async fn share_list(&self, params: Value) -> ServiceResult {
+    pub(super) async fn share_list_impl(&self, params: Value) -> ServiceResult {
         let key = params
             .get("key")
             .and_then(|v| v.as_str())
@@ -132,7 +131,7 @@ impl SessionService for LiveSessionService {
         Ok(serde_json::json!(items))
     }
 
-    async fn share_revoke(&self, params: Value) -> ServiceResult {
+    pub(super) async fn share_revoke_impl(&self, params: Value) -> ServiceResult {
         let id = params
             .get("id")
             .and_then(|v| v.as_str())

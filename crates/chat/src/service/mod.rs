@@ -50,7 +50,7 @@ pub struct ActiveToolCall {
 }
 
 #[derive(Debug, Clone)]
-struct ActiveAssistantDraft {
+pub(crate) struct ActiveAssistantDraft {
     content: String,
     reasoning: String,
     model: String,
@@ -60,7 +60,7 @@ struct ActiveAssistantDraft {
 }
 
 impl ActiveAssistantDraft {
-    fn new(run_id: &str, model: &str, provider: &str, seq: Option<u64>) -> Self {
+    pub(crate) fn new(run_id: &str, model: &str, provider: &str, seq: Option<u64>) -> Self {
         Self {
             content: String::new(),
             reasoning: String::new(),
@@ -71,22 +71,22 @@ impl ActiveAssistantDraft {
         }
     }
 
-    fn append_text(&mut self, delta: &str) {
+    pub(crate) fn append_text(&mut self, delta: &str) {
         if !delta.is_empty() {
             self.content.push_str(delta);
         }
     }
 
-    fn set_reasoning(&mut self, reasoning: &str) {
+    pub(crate) fn set_reasoning(&mut self, reasoning: &str) {
         self.reasoning.clear();
         self.reasoning.push_str(reasoning);
     }
 
-    fn has_visible_content(&self) -> bool {
+    pub(crate) fn has_visible_content(&self) -> bool {
         !self.content.trim().is_empty() || !self.reasoning.trim().is_empty()
     }
 
-    fn to_persisted_message(&self) -> PersistedMessage {
+    pub(crate) fn to_persisted_message(&self) -> PersistedMessage {
         let reasoning = self.reasoning.trim();
         PersistedMessage::Assistant {
             content: self.content.clone(),
@@ -367,7 +367,7 @@ impl LiveChatService {
             .find_map(|(key, active_run_id)| (active_run_id == target_run_id).then(|| key.clone()))
     }
 
-    async fn wait_for_event_forwarder(
+    pub(crate) async fn wait_for_event_forwarder(
         active_event_forwarders: &Arc<RwLock<HashMap<String, tokio::task::JoinHandle<String>>>>,
         session_key: &str,
     ) -> String {

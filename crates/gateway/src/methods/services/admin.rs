@@ -1,4 +1,4 @@
-use super::*;
+use {super::*, crate::methods::voice};
 
 pub(super) fn register(reg: &mut MethodRegistry) {
     // Update
@@ -228,7 +228,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
             Box::new(|_ctx| {
                 Box::pin(async move {
                     let config = moltis_config::discover_and_load();
-                    let providers = super::voice::detect_voice_providers(&config).await;
+                    let providers = voice::detect_voice_providers(&config).await;
                     Ok(serde_json::json!(providers))
                 })
             }),
@@ -238,7 +238,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
             Box::new(|_ctx| {
                 Box::pin(async move {
                     let config = moltis_config::discover_and_load();
-                    Ok(super::voice::fetch_elevenlabs_catalog(&config).await)
+                    Ok(voice::fetch_elevenlabs_catalog(&config).await)
                 })
             }),
         );
@@ -267,7 +267,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         .and_then(|v| v.as_str())
                         .unwrap_or("stt");
 
-                    super::voice::toggle_voice_provider(provider, enabled, provider_type).map_err(
+                    voice::toggle_voice_provider(provider, enabled, provider_type).map_err(
                         |e| {
                             ErrorShape::new(
                                 error_codes::UNAVAILABLE,
@@ -552,7 +552,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                             _ => {},
                         }
 
-                        super::voice::apply_voice_provider_settings(cfg, provider, &ctx.params);
+                        voice::apply_voice_provider_settings(cfg, provider, &ctx.params);
                     })
                     .map_err(|e| {
                         ErrorShape::new(error_codes::UNAVAILABLE, format!("failed to save: {}", e))
@@ -584,7 +584,7 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         })?;
 
                     moltis_config::update_config(|cfg| {
-                        super::voice::apply_voice_provider_settings(cfg, provider, &ctx.params);
+                        voice::apply_voice_provider_settings(cfg, provider, &ctx.params);
                     })
                     .map_err(|e| {
                         ErrorShape::new(
@@ -672,18 +672,14 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                     let arch = std::env::consts::ARCH;
 
                     // Check Python version
-                    let python_info = super::voice::check_python_version().await;
+                    let python_info = voice::check_python_version().await;
 
                     // Check CUDA availability
-                    let cuda_info = super::voice::check_cuda_availability().await;
+                    let cuda_info = voice::check_cuda_availability().await;
 
                     // Determine compatibility
-                    let (compatible, reasons) = super::voice::check_voxtral_compatibility(
-                        os,
-                        arch,
-                        &python_info,
-                        &cuda_info,
-                    );
+                    let (compatible, reasons) =
+                        voice::check_voxtral_compatibility(os, arch, &python_info, &cuda_info);
 
                     Ok(serde_json::json!({
                         "os": os,

@@ -1,4 +1,4 @@
-use super::{helpers::*, *};
+use super::*;
 
 pub(super) async fn request_sender_approval(
     state: &Arc<tokio::sync::OnceCell<Arc<GatewayState>>>,
@@ -100,12 +100,11 @@ pub(super) async fn save_channel_attachment(
 }
 
 pub(super) async fn transcribe_voice(
-    &self,
+    state: &Arc<tokio::sync::OnceCell<Arc<GatewayState>>>,
     audio_data: &[u8],
     format: &str,
 ) -> ChannelResult<String> {
-    let state = self
-        .state
+    let state = state
         .get()
         .ok_or_else(|| ChannelError::unavailable("gateway not ready"))?;
 
@@ -130,7 +129,9 @@ pub(super) async fn transcribe_voice(
     Ok(text.to_string())
 }
 
-pub(super) async fn voice_stt_available(&self) -> bool {
+pub(super) async fn voice_stt_available(
+    state: &Arc<tokio::sync::OnceCell<Arc<GatewayState>>>,
+) -> bool {
     let Some(state) = state.get() else {
         return false;
     };
@@ -296,7 +297,7 @@ pub(super) async fn dispatch_to_chat_with_attachments(
 ) {
     if attachments.is_empty() {
         // No attachments, use the regular dispatch
-        super::dispatch::dispatch_to_chat(state, text, reply_to, meta).await;
+        dispatch::dispatch_to_chat(state, text, reply_to, meta).await;
         return;
     }
 
@@ -513,8 +514,7 @@ pub(super) async fn dispatch_command(
     reply_to: ChannelReplyTarget,
     sender_id: Option<&str>,
 ) -> ChannelResult<String> {
-    let state = self
-        .state
+    let state = state
         .get()
         .ok_or_else(|| ChannelError::unavailable("gateway not ready"))?;
     let session_metadata = state
@@ -1410,7 +1410,7 @@ pub(super) async fn dispatch_command(
 ///
 /// A `BTreeSet` makes the contract explicit: provider names are unique and
 /// returned in deterministic order for the Telegram `/model` inline keyboard.
-fn unique_providers(models: &[serde_json::Value]) -> Vec<String> {
+pub(super) fn unique_providers(models: &[serde_json::Value]) -> Vec<String> {
     models
         .iter()
         .filter_map(|m| m.get("provider").and_then(|v| v.as_str()).map(String::from))

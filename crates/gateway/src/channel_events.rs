@@ -390,7 +390,6 @@ async fn resolve_channel_agent_id(
 mod commands;
 mod control;
 mod dispatch;
-mod helpers;
 mod sink;
 #[cfg(test)]
 mod tests;
@@ -458,8 +457,10 @@ impl ChannelEventSink for GatewayChannelEventSink {
     async fn resolve_pending_location(
         &self,
         reply_to: &ChannelReplyTarget,
-    ) -> Option<moltis_common::hooks::Location> {
-        commands::resolve_pending_location(&self.state, reply_to).await
+        latitude: f64,
+        longitude: f64,
+    ) -> bool {
+        commands::resolve_pending_location(&self.state, reply_to, latitude, longitude).await
     }
 
     async fn dispatch_to_chat_with_attachments(
@@ -471,6 +472,19 @@ impl ChannelEventSink for GatewayChannelEventSink {
     ) {
         commands::dispatch_to_chat_with_attachments(&self.state, text, attachments, reply_to, meta)
             .await;
+    }
+
+    async fn dispatch_to_chat(
+        &self,
+        text: &str,
+        reply_to: ChannelReplyTarget,
+        meta: ChannelMessageMeta,
+    ) {
+        dispatch::dispatch_to_chat(&self.state, text, reply_to, meta).await;
+    }
+
+    async fn request_disable_account(&self, channel_type: &str, account_id: &str, reason: &str) {
+        control::request_disable_account(&self.state, channel_type, account_id, reason).await;
     }
 
     async fn dispatch_command(

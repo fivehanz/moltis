@@ -13,40 +13,34 @@ use {
     async_trait::async_trait,
     serde_json::Value,
     tokio::sync::RwLock,
-    tracing::{debug, info, warn},
+    tracing::{info, warn},
 };
 
 use {
     moltis_agents::{
-        UserContent,
+        ChatMessage, UserContent,
         model::values_to_chat_messages,
-        prompt::{PromptRuntimeContext, build_system_prompt_with_session_runtime_details},
+        prompt::{
+            PromptRuntimeContext, build_system_prompt_minimal_runtime_details,
+            build_system_prompt_with_session_runtime_details,
+        },
         tool_registry::ToolRegistry,
     },
-    moltis_config::{MessageQueueMode, ToolMode},
-    moltis_service_traits::{ChatService, ServiceResult},
-    moltis_sessions::{
-        ContentBlock, MessageContent, PersistedMessage, message::ImageUrl, metadata::SessionEntry,
-        store::SessionStore,
-    },
-    moltis_tools::policy::ToolPolicy,
+    moltis_config::ToolMode,
+    moltis_service_traits::{ChatService, ServiceError, ServiceResult},
+    moltis_sessions::{ContentBlock, MessageContent, PersistedMessage, metadata::SessionEntry},
+    moltis_tools::policy::{PolicyContext, ToolPolicy},
 };
 
 use crate::{
-    agent_loop::{
-        clear_unsupported_model, compact_session, mark_unsupported_model,
-        run_explicit_shell_command,
-    },
-    channels::{
-        deliver_channel_error, deliver_channel_replies, generate_tts_audio,
-        notify_channels_of_compaction, send_chat_push_notification, send_retry_status_to_channels,
-    },
+    agent_loop::{clear_unsupported_model, effective_tool_mode, mark_unsupported_model},
+    channels::notify_channels_of_compaction,
     chat_error::parse_chat_error,
-    compaction_run, error,
+    compaction_run,
+    memory_tools::AgentScopedMemoryWriter,
     message::{
-        apply_message_received_rewrite, apply_voice_reply_suffix, infer_reply_medium,
-        to_user_content, user_audio_path_from_params, user_documents_for_persistence,
-        user_documents_from_params,
+        apply_voice_reply_suffix, infer_reply_medium, to_user_content, user_audio_path_from_params,
+        user_documents_for_persistence, user_documents_from_params,
     },
     prompt::{
         apply_request_runtime_context, apply_runtime_tool_filters, build_policy_context,
@@ -62,7 +56,12 @@ use crate::{
 
 use super::*;
 
+#[async_trait]
 impl ChatService for LiveChatService {
+    async fn send(&self, params: Value) -> ServiceResult {
+        self.send_impl(params).await
+    }
+
     async fn send_sync(&self, params: Value) -> ServiceResult {
         let text = params
             .get("text")

@@ -1,4 +1,4 @@
-use super::*;
+use {super::*, crate::local_llm_setup::cache::LOCAL_LLM_PROVIDER_NAME};
 
 /// Single model entry in the local-llm config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,12 +32,12 @@ pub struct LocalLlmConfig {
 /// Legacy single-model config for migration.
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct LegacyLocalLlmConfig {
-    model_id: String,
-    model_path: Option<PathBuf>,
+    pub(super) model_id: String,
+    pub(super) model_path: Option<PathBuf>,
     #[serde(default)]
-    gpu_layers: u32,
+    pub(super) gpu_layers: u32,
     #[serde(default = "default_backend")]
-    backend: String,
+    pub(super) backend: String,
 }
 
 impl LocalLlmConfig {
@@ -113,7 +113,7 @@ impl LocalModelEntry {
         }
     }
 
-    fn custom_gguf_source(&self) -> Option<(&str, &str)> {
+    pub(super) fn custom_gguf_source(&self) -> Option<(&str, &str)> {
         if self.backend != "GGUF" {
             return None;
         }
@@ -121,7 +121,7 @@ impl LocalModelEntry {
         Some((self.hf_repo.as_deref()?, self.hf_filename.as_deref()?))
     }
 
-    fn resolved_model_path(
+    pub(super) fn resolved_model_path(
         &self,
         default_model_path: Option<&Path>,
         cache_dir: &Path,
@@ -142,7 +142,7 @@ impl LocalModelEntry {
         Ok(None)
     }
 
-    fn display_name(&self) -> String {
+    pub(super) fn display_name(&self) -> String {
         if let Some(def) = local_llm::models::find_model(&self.model_id) {
             return def.display_name.to_string();
         }

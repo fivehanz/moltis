@@ -2,32 +2,21 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
     sync::Arc,
-    time::Instant,
+    time::Duration,
 };
 
 use {
-    async_trait::async_trait,
     serde_json::Value,
-    tokio::sync::RwLock,
-    tracing::{debug, info, warn},
+    tokio::sync::OwnedSemaphorePermit,
+    tracing::{info, warn},
 };
 
 use {
-    moltis_agents::{
-        UserContent,
-        model::values_to_chat_messages,
-        prompt::{PromptRuntimeContext, build_system_prompt_with_session_runtime_details},
-        tool_registry::ToolRegistry,
-    },
-    moltis_config::{MessageQueueMode, ToolMode},
-    moltis_service_traits::{ChatService, ServiceResult},
-    moltis_sessions::{
-        ContentBlock, MessageContent, PersistedMessage, message::ImageUrl, metadata::SessionEntry,
-        store::SessionStore,
-    },
-    moltis_tools::policy::ToolPolicy,
+    moltis_agents::{AgentRunError, UserContent},
+    moltis_config::MessageQueueMode,
+    moltis_providers::model_id::raw_model_id,
+    moltis_service_traits::ServiceResult,
 };
 
 use crate::{
@@ -35,12 +24,8 @@ use crate::{
         clear_unsupported_model, compact_session, mark_unsupported_model,
         run_explicit_shell_command,
     },
-    channels::{
-        deliver_channel_error, deliver_channel_replies, generate_tts_audio,
-        notify_channels_of_compaction, send_chat_push_notification, send_retry_status_to_channels,
-    },
-    chat_error::parse_chat_error,
-    compaction_run, error,
+    channels::deliver_channel_error,
+    memory_tools::AgentScopedMemoryWriter,
     message::{
         apply_message_received_rewrite, apply_voice_reply_suffix, infer_reply_medium,
         to_user_content, user_audio_path_from_params, user_documents_for_persistence,
@@ -50,20 +35,18 @@ use crate::{
         apply_request_runtime_context, apply_runtime_tool_filters, build_policy_context,
         build_prompt_runtime_context, build_tool_context, clear_prompt_memory_snapshot,
         discover_skills_if_enabled, load_prompt_persona_for_agent, load_prompt_persona_for_session,
-        prompt_build_limits_from_config, resolve_prompt_agent_id,
+        prompt_build_limits_from_config, resolve_channel_runtime_context, resolve_prompt_agent_id,
     },
     run_with_tools::run_with_tools,
-    runtime::ChatRuntime,
     streaming::run_streaming,
     types::*,
 };
 
 use super::*;
 
-#[async_trait]
-impl ChatService for LiveChatService {
+impl LiveChatService {
     #[tracing::instrument(skip(self, params), fields(session_id))]
-    async fn send(&self, mut params: Value) -> ServiceResult {
+    pub(super) async fn send_impl(&self, mut params: Value) -> ServiceResult {
         // Support both text-only and multimodal content.
         // - "text": string → plain text message
         // - "content": array → multimodal content (text + images)

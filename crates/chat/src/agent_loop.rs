@@ -32,7 +32,7 @@ use crate::{
     types::*,
 };
 
-async fn mark_unsupported_model(
+pub(crate) async fn mark_unsupported_model(
     state: &Arc<dyn ChatRuntime>,
     model_store: &Arc<RwLock<DisabledModelsStore>>,
     model_id: &str,
@@ -89,7 +89,7 @@ async fn mark_unsupported_model(
     }
 }
 
-async fn clear_unsupported_model(
+pub(crate) async fn clear_unsupported_model(
     state: &Arc<dyn ChatRuntime>,
     model_store: &Arc<RwLock<DisabledModelsStore>>,
     model_id: &str,
@@ -119,7 +119,7 @@ async fn clear_unsupported_model(
     }
 }
 
-fn ordered_runner_event_callback() -> (
+pub(crate) fn ordered_runner_event_callback() -> (
     Box<dyn Fn(RunnerEvent) + Send + Sync>,
     mpsc::UnboundedReceiver<RunnerEvent>,
 ) {
@@ -135,7 +135,7 @@ fn ordered_runner_event_callback() -> (
 const CHANNEL_STREAM_BUFFER_SIZE: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ChannelReplyTargetKey {
+pub(crate) struct ChannelReplyTargetKey {
     channel_type: moltis_channels::ChannelType,
     account_id: String,
     chat_id: String,
@@ -164,7 +164,7 @@ struct ChannelStreamWorker {
 /// Workers are started eagerly so channel typing indicators remain active
 /// during long-running tool execution before the first text delta arrives.
 /// Stream-dedup only applies after at least one delta has been sent.
-struct ChannelStreamDispatcher {
+pub(crate) struct ChannelStreamDispatcher {
     outbound: Arc<dyn moltis_channels::plugin::ChannelStreamOutbound>,
     targets: Vec<moltis_channels::ChannelReplyTarget>,
     workers: Vec<ChannelStreamWorker>,
@@ -175,7 +175,10 @@ struct ChannelStreamDispatcher {
 }
 
 impl ChannelStreamDispatcher {
-    async fn for_session(state: &Arc<dyn ChatRuntime>, session_key: &str) -> Option<Self> {
+    pub(crate) async fn for_session(
+        state: &Arc<dyn ChatRuntime>,
+        session_key: &str,
+    ) -> Option<Self> {
         let outbound = state.channel_stream_outbound()?;
         let targets: Vec<moltis_channels::ChannelReplyTarget> = state
             .peek_channel_replies(session_key)
@@ -248,7 +251,7 @@ impl ChannelStreamDispatcher {
         }
     }
 
-    async fn send_delta(&mut self, delta: &str) {
+    pub(crate) async fn send_delta(&mut self, delta: &str) {
         if delta.is_empty() {
             return;
         }
@@ -262,7 +265,7 @@ impl ChannelStreamDispatcher {
         }
     }
 
-    async fn finish(&mut self) {
+    pub(crate) async fn finish(&mut self) {
         self.send_terminal(moltis_channels::StreamEvent::Done).await;
         self.join_workers().await;
     }
@@ -288,7 +291,7 @@ impl ChannelStreamDispatcher {
         }
     }
 
-    async fn completed_target_keys(&self) -> HashSet<ChannelReplyTargetKey> {
+    pub(crate) async fn completed_target_keys(&self) -> HashSet<ChannelReplyTargetKey> {
         if !self.sent_delta {
             return HashSet::new();
         }
@@ -296,7 +299,7 @@ impl ChannelStreamDispatcher {
     }
 }
 
-async fn run_explicit_shell_command(
+pub(crate) async fn run_explicit_shell_command(
     state: &Arc<dyn ChatRuntime>,
     run_id: &str,
     tool_registry: &Arc<RwLock<ToolRegistry>>,
@@ -918,7 +921,7 @@ fn install_agent_scoped_memory_tools(
 /// - `Native` — provider handles tool schemas via API (OpenAI function calling, etc.)
 /// - `Text` — tools are described in the prompt; the runner parses tool calls from text
 /// - `Off` — no tools at all
-fn effective_tool_mode(provider: &dyn moltis_agents::model::LlmProvider) -> ToolMode {
+pub(crate) fn effective_tool_mode(provider: &dyn moltis_agents::model::LlmProvider) -> ToolMode {
     match provider.tool_mode() {
         Some(ToolMode::Native) => ToolMode::Native,
         Some(ToolMode::Text) => ToolMode::Text,
@@ -933,7 +936,7 @@ fn effective_tool_mode(provider: &dyn moltis_agents::model::LlmProvider) -> Tool
     }
 }
 
-async fn compact_session(
+pub(crate) async fn compact_session(
     store: &Arc<SessionStore>,
     session_key: &str,
     config: &moltis_config::CompactionConfig,

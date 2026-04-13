@@ -1,4 +1,8 @@
-use super::{config::*, *};
+use super::{
+    cache::{detect_mlx_installers, is_mlx_installed, spawn_download_progress_broadcaster},
+    config::*,
+    *,
+};
 
 /// Status of the local LLM provider.
 #[derive(Debug, Clone, Serialize)]
@@ -60,11 +64,11 @@ impl LiveLocalLlmService {
     }
 }
 
-fn has_enough_ram(total_ram_gb: u32, required_ram_gb: u32) -> bool {
+pub(super) fn has_enough_ram(total_ram_gb: u32, required_ram_gb: u32) -> bool {
     total_ram_gb >= required_ram_gb
 }
 
-fn insufficient_ram_error(
+pub(super) fn insufficient_ram_error(
     model_display_name: &str,
     required_ram_gb: u32,
     total_ram_gb: u32,
@@ -97,7 +101,7 @@ fn gguf_acceleration_name(sys: &local_gguf::system_info::SystemInfo) -> Option<S
     }
 }
 
-fn gguf_backend_description(sys: &local_gguf::system_info::SystemInfo) -> String {
+pub(super) fn gguf_backend_description(sys: &local_gguf::system_info::SystemInfo) -> String {
     match gguf_acceleration_name(sys) {
         Some(acceleration) => format!("Cross-platform, {acceleration} GPU acceleration"),
         None if sys.has_gpu() => "Cross-platform, GPU acceleration".to_string(),
@@ -105,7 +109,10 @@ fn gguf_backend_description(sys: &local_gguf::system_info::SystemInfo) -> String
     }
 }
 
-fn gguf_backend_note(sys: &local_gguf::system_info::SystemInfo, mlx_available: bool) -> String {
+pub(super) fn gguf_backend_note(
+    sys: &local_gguf::system_info::SystemInfo,
+    mlx_available: bool,
+) -> String {
     if mlx_available {
         return "MLX recommended (native Apple Silicon optimization)".to_string();
     }
@@ -814,20 +821,20 @@ async fn search_huggingface(
 
 /// HuggingFace model info from API response.
 #[derive(Debug, serde::Deserialize)]
-struct HfModelInfo {
+pub(super) struct HfModelInfo {
     /// Model ID (e.g., "TheBloke/Llama-2-7B-GGUF")
     /// The API returns both "id" and "modelId" fields with the same value.
-    id: String,
+    pub(super) id: String,
     /// Number of downloads
     #[serde(default)]
-    downloads: u64,
+    pub(super) downloads: u64,
     /// Number of likes
     #[serde(default)]
-    likes: u64,
+    pub(super) likes: u64,
     /// Created timestamp
     #[serde(default, rename = "createdAt")]
-    created_at: Option<String>,
+    pub(super) created_at: Option<String>,
     /// Model tags
     #[serde(default)]
-    tags: Vec<String>,
+    pub(super) tags: Vec<String>,
 }

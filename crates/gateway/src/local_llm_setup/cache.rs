@@ -1,5 +1,6 @@
 use super::*;
 
+#[derive(Debug, thiserror::Error)]
 pub enum LocalModelCacheError {
     #[error("{message}")]
     Message { message: String },

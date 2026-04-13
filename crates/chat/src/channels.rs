@@ -8,9 +8,17 @@ use {
     tracing::{debug, info, warn},
 };
 
-use crate::{agent_loop::ChannelReplyTargetKey, compaction_run, runtime::ChatRuntime, types::*};
+use moltis_sessions::store::SessionStore;
 
-async fn send_chat_push_notification(state: &Arc<dyn ChatRuntime>, session_key: &str, text: &str) {
+use crate::{
+    agent_loop::ChannelReplyTargetKey, compaction_run, error, runtime::ChatRuntime, types::*,
+};
+
+pub(crate) async fn send_chat_push_notification(
+    state: &Arc<dyn ChatRuntime>,
+    session_key: &str,
+    text: &str,
+) {
     // Create a short summary of the response (first 100 chars)
     let summary = if text.len() > 100 {
         format!("{}…", truncate_at_char_boundary(text, 100))
@@ -38,7 +46,7 @@ async fn send_chat_push_notification(state: &Arc<dyn ChatRuntime>, session_key: 
 /// response text back to each originating channel via outbound.
 /// Each delivery runs in its own spawned task so slow network calls
 /// don't block each other or the chat pipeline.
-async fn deliver_channel_replies(
+pub(crate) async fn deliver_channel_replies(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     text: &str,
@@ -286,7 +294,7 @@ fn format_channel_compaction_notice(
 /// reply to them afterward. Uses `send_text_silent` so the channel
 /// integration doesn't count it toward user-visible interactive replies
 /// (no TTS, no delivery receipts beyond the channel's own).
-async fn notify_channels_of_compaction(
+pub(crate) async fn notify_channels_of_compaction(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     outcome: &compaction_run::CompactionOutcome,
@@ -332,7 +340,7 @@ async fn notify_channels_of_compaction(
 
 /// Send a short retry status update to pending channel targets without draining
 /// them. The final reply (or terminal error) will still use the same targets.
-async fn send_retry_status_to_channels(
+pub(crate) async fn send_retry_status_to_channels(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     error_obj: &Value,
@@ -378,7 +386,11 @@ async fn send_retry_status_to_channels(
 }
 
 /// Drain pending channel targets for a session and send a terminal error message.
-async fn deliver_channel_error(state: &Arc<dyn ChatRuntime>, session_key: &str, error_obj: &Value) {
+pub(crate) async fn deliver_channel_error(
+    state: &Arc<dyn ChatRuntime>,
+    session_key: &str,
+    error_obj: &Value,
+) {
     let targets = state.drain_channel_replies(session_key).await;
     let status_log = state.drain_channel_status_log(session_key).await;
     if targets.is_empty() {
@@ -702,7 +714,7 @@ struct TtsConvertResponse {
 /// Uses the session-level TTS override if configured, otherwise the global TTS
 /// config. Returns raw audio bytes (OGG format) on success, `None` if TTS is
 /// disabled or generation fails.
-async fn generate_tts_audio(
+pub(crate) async fn generate_tts_audio(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     text: &str,
@@ -809,7 +821,7 @@ async fn build_tts_payload(
 /// Buffer a tool execution status into the channel status log for a session.
 /// The buffered entries are appended as a collapsible logbook when the final
 /// response is delivered, instead of being sent as separate messages.
-async fn send_tool_status_to_channels(
+pub(crate) async fn send_tool_status_to_channels(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     tool_name: &str,
@@ -828,7 +840,7 @@ async fn send_tool_status_to_channels(
 /// Buffer a tool error result into the channel status log for a session.
 /// Called from `ToolCallEnd` for failed tool calls only — success is implicit
 /// and does not need a separate log entry.
-async fn send_tool_result_to_channels(
+pub(crate) async fn send_tool_result_to_channels(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     tool_name: &str,
@@ -1012,7 +1024,7 @@ fn truncate_url(url: &str) -> String {
 
 /// Send a screenshot to all pending channel targets for a session.
 /// Uses `peek_channel_replies` so targets remain for the final text response.
-async fn send_screenshot_to_channels(
+pub(crate) async fn send_screenshot_to_channels(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     screenshot_data: &str,
@@ -1093,7 +1105,7 @@ async fn send_screenshot_to_channels(
 
 /// Send a document payload to all pending channel targets for a session.
 /// Uses `peek_channel_replies` so targets remain for the final text response.
-async fn dispatch_document_to_channels(
+pub(crate) async fn dispatch_document_to_channels(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     payload: moltis_common::types::ReplyPayload,
@@ -1148,7 +1160,7 @@ async fn dispatch_document_to_channels(
 }
 
 /// Build a `ReplyPayload` from a data URI (legacy path).
-fn document_payload_from_data_uri(
+pub(crate) fn document_payload_from_data_uri(
     data_uri: &str,
     filename: Option<&str>,
     caption: Option<&str>,
@@ -1175,7 +1187,7 @@ fn document_payload_from_data_uri(
 
 /// Build a `ReplyPayload` by reading from the session media directory.
 /// Returns `None` if the store is unavailable or the read fails.
-async fn document_payload_from_ref(
+pub(crate) async fn document_payload_from_ref(
     session_store: Option<&Arc<SessionStore>>,
     session_key: &str,
     media_ref: &str,
@@ -1229,7 +1241,7 @@ async fn document_payload_from_ref(
 
 /// Send a native location pin to all pending channel targets for a session.
 /// Uses `peek_channel_replies` so targets remain for the final text response.
-async fn send_location_to_channels(
+pub(crate) async fn send_location_to_channels(
     state: &Arc<dyn ChatRuntime>,
     session_key: &str,
     latitude: f64,

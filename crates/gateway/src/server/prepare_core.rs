@@ -3,13 +3,26 @@ use {
         helpers::{
             StartupMemProbe, approval_manager_from_config, env_flag_enabled,
             log_startup_config_storage_diagnostics, log_startup_model_inventory,
-            restore_saved_local_llm_models, validate_proxy_tls_configuration,
+            maybe_deliver_cron_output, restore_saved_local_llm_models,
+            validate_proxy_tls_configuration,
         },
+        init_channels, init_memory,
         prepared::PreparedGatewayCore,
+        startup::deferred_openclaw_status,
+        workspace::{
+            seed_default_workspace_markdown_files, sync_persona_into_preset,
+            warn_on_workspace_prompt_file_truncation,
+        },
     },
     crate::{
-        approval::LiveExecApprovalService, auth, chat::LiveModelService,
-        provider_setup::LiveProviderSetupService, services::GatewayServices,
+        approval::LiveExecApprovalService,
+        auth,
+        broadcast::{BroadcastOpts, broadcast},
+        chat::LiveModelService,
+        provider_setup::LiveProviderSetupService,
+        services::GatewayServices,
+        session::LiveSessionService,
+        state::GatewayState,
     },
     moltis_projects::ProjectStore,
     moltis_providers::ProviderRegistry,
@@ -1399,7 +1412,7 @@ pub async fn prepare_gateway_core(
     super::hooks::seed_dcg_guard_hook().await;
     let persisted_disabled = crate::methods::load_disabled_hooks();
     let (hook_registry, discovered_hooks_info) =
-        discover_and_build_hooks(&persisted_disabled, Some(&session_store)).await;
+        crate::server::discover_and_build_hooks(&persisted_disabled, Some(&session_store)).await;
 
     #[cfg(feature = "fs-tools")]
     let shared_fs_state = if config.tools.fs.track_reads {
@@ -1488,7 +1501,7 @@ pub async fn prepare_gateway_core(
         #[cfg(feature = "vault")]
         vault,
         #[cfg(feature = "trusted-network")]
-        audit_buffer_for_broadcast,
+        audit_buffer: audit_buffer_for_broadcast,
         #[cfg(feature = "trusted-network")]
         proxy_shutdown_tx,
         #[cfg(feature = "tailscale")]

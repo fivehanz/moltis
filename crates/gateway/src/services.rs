@@ -1302,11 +1302,6 @@ fn set_skill_trusted(params: &Value, trusted: bool) -> ServiceResult {
     Ok(serde_json::json!({ "source": source, "skill": skill_name, "trusted": trusted }))
 }
 
-mod browser;
-mod gateway;
-
-pub use {browser::RealBrowserService, gateway::GatewayServices};
-
 #[cfg(test)]
 mod tests {
     use super::*;

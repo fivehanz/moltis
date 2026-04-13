@@ -1,3 +1,5 @@
+#![allow(clippy::module_inception)]
+
 use super::{cache::*, config::*, service::*, *};
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]

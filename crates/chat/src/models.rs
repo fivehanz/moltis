@@ -18,7 +18,7 @@ use {
 };
 
 use {
-    moltis_providers::{ProviderRegistry, raw_model_id},
+    moltis_providers::{ProviderRegistry, model_id::raw_model_id},
     moltis_service_traits::{ModelService, ServiceError, ServiceResult},
 };
 

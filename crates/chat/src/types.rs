@@ -573,7 +573,7 @@ pub fn model_matches_allowlist(model: &moltis_providers::ModelInfo, patterns: &[
         return true;
     }
     let full = normalize_model_key(&model.id);
-    let raw = normalize_model_key(moltis_providers::raw_model_id(&model.id));
+    let raw = normalize_model_key(moltis_providers::model_id::raw_model_id(&model.id));
     let display = normalize_model_key(&model.display_name);
     patterns.iter().any(|p| {
         allowlist_pattern_matches_key(p, &full)
@@ -1021,7 +1021,7 @@ pub(crate) fn suggest_model_ids(
     }
 
     let requested_provider = model_id_provider(requested_model_id).map(str::to_ascii_lowercase);
-    let requested_raw = moltis_providers::raw_model_id(requested_model_id);
+    let requested_raw = moltis_providers::model_id::raw_model_id(requested_model_id);
     let requested_norm = normalize_model_lookup_key(requested_model_id);
     let requested_raw_norm = normalize_model_lookup_key(requested_raw);
 
@@ -1034,7 +1034,7 @@ pub(crate) fn suggest_model_ids(
                 .zip(candidate_provider.as_deref())
                 .is_some_and(|(left, right)| left == right);
 
-            let candidate_raw = moltis_providers::raw_model_id(candidate);
+            let candidate_raw = moltis_providers::model_id::raw_model_id(candidate);
             let candidate_norm = normalize_model_lookup_key(candidate);
             let candidate_raw_norm = normalize_model_lookup_key(candidate_raw);
 

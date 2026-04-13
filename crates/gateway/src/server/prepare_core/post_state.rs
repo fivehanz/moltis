@@ -4,6 +4,7 @@ use std::{
 };
 
 use {
+    async_trait::async_trait,
     secrecy::{ExposeSecret, Secret},
     tracing::{debug, info, warn},
 };
@@ -29,10 +30,10 @@ use crate::{
 #[cfg(feature = "tailscale")]
 use crate::tailscale::{TailscaleMode, validate_tailscale_config};
 
-use super::{
+use crate::server::{
     helpers::{
-        StartupMemProbe, env_flag_enabled, fs_tools_host_warning_message,
-        restore_saved_local_llm_models,
+        StartupMemProbe, env_flag_enabled, env_value_with_overrides, fs_tools_host_warning_message,
+        instance_slug, restore_saved_local_llm_models, start_skill_hot_reload_watcher,
     },
     prepared::PreparedGatewayCore,
     startup::deferred_openclaw_status,
@@ -44,7 +45,7 @@ pub(super) struct PostStateInputs {
     pub config: moltis_config::MoltisConfig,
     pub log_buffer: Option<crate::logs::LogBuffer>,
     pub data_dir: PathBuf,
-    pub resolved_auth: crate::auth::ResolvedAuth,
+    pub resolved_auth: auth::ResolvedAuth,
     pub deploy_platform: Option<String>,
     pub session_event_bus: SessionEventBus,
     pub services: GatewayServices,
@@ -59,8 +60,8 @@ pub(super) struct PostStateInputs {
     pub live_model_service: Arc<LiveModelService>,
     pub provider_setup_service: Arc<LiveProviderSetupService>,
     pub live_mcp: Arc<crate::mcp_service::LiveMcpService>,
-    pub memory_manager: Option<Arc<moltis_memory::runtime::DynMemoryRuntime>>,
-    pub credential_store: Arc<crate::auth::CredentialStore>,
+    pub memory_manager: Option<moltis_memory::runtime::DynMemoryRuntime>,
+    pub credential_store: Arc<auth::CredentialStore>,
     pub db_pool: sqlx::SqlitePool,
     pub session_store: Arc<SessionStore>,
     pub session_metadata: Arc<SqliteSessionMetadata>,
@@ -93,11 +94,30 @@ pub(super) struct PostStateInputs {
     pub tailscale_reset_on_exit_override: Option<bool>,
 }
 
+struct CredentialEnvVarProvider {
+    store: Arc<auth::CredentialStore>,
+}
+
+#[async_trait]
+impl moltis_tools::exec::EnvVarProvider for CredentialEnvVarProvider {
+    async fn get_env_vars(&self) -> Vec<(String, Secret<String>)> {
+        match self.store.get_all_env_values().await {
+            Ok(values) => values
+                .into_iter()
+                .map(|(key, value)| (key, Secret::new(value)))
+                .collect(),
+            Err(error) => {
+                warn!(error = %error, "failed to load runtime env overrides for tools");
+                Vec::new()
+            },
+        }
+    }
+}
+
 async fn build_webauthn_registry(
     config: &moltis_config::MoltisConfig,
     port: u16,
-) -> anyhow::Result<Option<Arc<tokio::sync::RwLock<crate::auth_webauthn::SharedWebAuthnRegistry>>>>
-{
+) -> anyhow::Result<Option<crate::auth_webauthn::SharedWebAuthnRegistry>> {
     let default_scheme = if config.tls.enabled {
         "https"
     } else {
@@ -151,7 +171,7 @@ async fn build_webauthn_registry(
         .collect();
         try_add("localhost", &localhost_origin, &moltis_localhost);
 
-        let instance_slug_value = super::helpers::instance_slug(config);
+        let instance_slug_value = instance_slug(config);
         if instance_slug_value != "localhost" {
             let bot_origin = format!("{default_scheme}://{instance_slug_value}:{port}");
             try_add(&instance_slug_value, &bot_origin, &[]);
@@ -411,16 +431,6 @@ pub(super) async fn complete_startup(
         Err(error) => warn!(%error, "failed to load ssh target count"),
     }
 
-    #[cfg(feature = "tailscale")]
-    if explicit_rp_id.is_none()
-        && let Some(wa_registry) = webauthn_registry.as_ref()
-    {
-        crate::server::startup::spawn_webauthn_tailscale_registration(
-            Arc::clone(&state),
-            Arc::clone(wa_registry),
-        );
-    }
-
     {
         let mut inner = state.inner.write().await;
         inner.discovered_hooks = discovered_hooks_info;
@@ -563,7 +573,10 @@ pub(super) async fn complete_startup(
     {
         let broadcaster: Arc<dyn moltis_tools::exec::ApprovalBroadcaster> =
             Arc::new(GatewayApprovalBroadcaster::new(Arc::clone(&state)));
-        let env_provider: Arc<dyn moltis_tools::exec::EnvVarProvider> = credential_store.clone();
+        let env_provider: Arc<dyn moltis_tools::exec::EnvVarProvider> =
+            Arc::new(CredentialEnvVarProvider {
+                store: Arc::clone(&credential_store),
+            });
         let eq = cron_service.events_queue().clone();
         let cs = Arc::clone(&cron_service);
         let exec_cb: moltis_tools::exec::ExecCompletionFn = Arc::new(move |event| {
@@ -689,12 +702,7 @@ pub(super) async fn complete_startup(
                 .api_key
                 .as_ref()
                 .map(|s| s.expose_secret().clone())
-                .or_else(|| {
-                    super::helpers::env_value_with_overrides(
-                        &runtime_env_overrides,
-                        "BRAVE_API_KEY",
-                    )
-                })
+                .or_else(|| env_value_with_overrides(&runtime_env_overrides, "BRAVE_API_KEY"))
                 .filter(|k| !k.trim().is_empty());
             if let Err(e) = moltis_tools::wasm_tool_runner::register_wasm_tools(
                 &mut tool_registry,
@@ -804,7 +812,7 @@ pub(super) async fn complete_startup(
 
         {
             let node_info_provider: Arc<dyn moltis_node_exec_types::NodeInfoProvider> =
-                Arc::new(crate::node_exec::GatewayNodeExecProvider::new(
+                Arc::new(crate::node_exec::GatewayNodeInfoProvider::new(
                     Arc::clone(&state),
                     config.tools.exec.ssh_target.clone(),
                 ));
@@ -1116,8 +1124,7 @@ pub(super) async fn complete_startup(
     {
         let watcher_state = Arc::clone(&state);
         tokio::spawn(async move {
-            let (mut watcher, mut rx) = match super::helpers::start_skill_hot_reload_watcher().await
-            {
+            let (mut watcher, mut rx) = match start_skill_hot_reload_watcher().await {
                 Ok(started) => started,
                 Err(error) => {
                     tracing::warn!("skills: failed to start file watcher: {error}");
@@ -1141,7 +1148,7 @@ pub(super) async fn complete_startup(
                     event,
                     moltis_skills::watcher::SkillWatchEvent::ManifestChanged
                 ) {
-                    match super::helpers::start_skill_hot_reload_watcher().await {
+                    match start_skill_hot_reload_watcher().await {
                         Ok((new_watcher, new_rx)) => {
                             watcher = new_watcher;
                             rx = new_rx;

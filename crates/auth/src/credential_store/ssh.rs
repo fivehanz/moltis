@@ -1,16 +1,9 @@
 use std::convert::TryFrom;
 
-use secrecy::{ExposeSecret, Secret};
-
-#[cfg(feature = "vault")]
-use std::sync::Arc;
-
-#[cfg(feature = "vault")]
-use moltis_vault::Vault;
+use secrecy::Secret;
 
 use crate::credential_store::{
     CredentialStore, SshAuthMode, SshKeyEntry, SshResolvedTarget, SshTargetEntry,
-    util::generate_token,
 };
 
 impl CredentialStore {

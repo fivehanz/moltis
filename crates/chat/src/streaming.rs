@@ -1,26 +1,40 @@
 //! Streaming mode (no tools) - `run_streaming` with retry logic.
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use {
     serde_json::Value,
     tokio::sync::RwLock,
     tokio_stream::StreamExt,
-    tracing::{debug, info, warn},
+    tracing::{info, warn},
 };
 
 use {
     moltis_agents::{
-        UserContent,
+        ChatMessage, UserContent,
         model::{StreamEvent, values_to_chat_messages},
-        prompt::build_system_prompt_minimal_runtime_details,
+        prompt::{PromptRuntimeContext, build_system_prompt_minimal_runtime_details},
     },
-    moltis_sessions::PersistedMessage,
+    moltis_sessions::{PersistedMessage, store::SessionStore},
 };
 
 use crate::{
-    channels::send_retry_status_to_channels, chat_error::parse_chat_error,
-    models::DisabledModelsStore, runtime::ChatRuntime, types::*,
+    agent_loop::{ChannelStreamDispatcher, clear_unsupported_model, mark_unsupported_model},
+    channels::{
+        deliver_channel_error, deliver_channel_replies, generate_tts_audio,
+        send_chat_push_notification, send_retry_status_to_channels,
+    },
+    chat_error::parse_chat_error,
+    message::apply_voice_reply_suffix,
+    models::DisabledModelsStore,
+    prompt::prompt_build_limits_from_config,
+    runtime::ChatRuntime,
+    service::ActiveAssistantDraft,
+    types::*,
 };
 
 const STREAM_RETRYABLE_SERVER_PATTERNS: &[&str] = &[
@@ -93,7 +107,7 @@ fn next_stream_retry_delay_ms(
     None
 }
 
-async fn run_streaming(
+pub(crate) async fn run_streaming(
     persona: PromptPersona,
     state: &Arc<dyn ChatRuntime>,
     model_store: &Arc<RwLock<DisabledModelsStore>>,

@@ -55,10 +55,9 @@ fn restore_saved_local_llm_models_rehydrates_custom_models_after_registry_rebuil
             .any(|model| model.provider == "openai")
     );
     assert!(
-        rebuilt_registry
-            .list_models()
-            .iter()
-            .any(|model| moltis_providers::raw_model_id(&model.id) == saved_entry.model_id)
+        rebuilt_registry.list_models().iter().any(
+            |model| moltis_providers::model_id::raw_model_id(&model.id) == saved_entry.model_id
+        )
     );
 }
 
@@ -100,9 +99,8 @@ fn restore_saved_local_llm_models_skips_when_local_provider_is_disabled() {
     );
 
     assert!(
-        !rebuilt_registry
-            .list_models()
-            .iter()
-            .any(|model| moltis_providers::raw_model_id(&model.id) == saved_entry.model_id)
+        !rebuilt_registry.list_models().iter().any(
+            |model| moltis_providers::model_id::raw_model_id(&model.id) == saved_entry.model_id
+        )
     );
 }

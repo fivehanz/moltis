@@ -1,8 +1,7 @@
-use super::{helpers::*, *};
+use super::*;
 
-#[async_trait]
-impl SessionService for LiveSessionService {
-    async fn delete(&self, params: Value) -> ServiceResult {
+impl LiveSessionService {
+    pub(super) async fn delete_impl(&self, params: Value) -> ServiceResult {
         let key = params
             .get("key")
             .and_then(|v| v.as_str())
@@ -92,7 +91,7 @@ impl SessionService for LiveSessionService {
         Ok(serde_json::json!({ "ok": true }))
     }
 
-    async fn fork(&self, params: Value) -> ServiceResult {
+    pub(super) async fn fork_impl(&self, params: Value) -> ServiceResult {
         let parent_key = params
             .get("key")
             .and_then(|v| v.as_str())
@@ -197,7 +196,7 @@ impl SessionService for LiveSessionService {
         }))
     }
 
-    async fn branches(&self, params: Value) -> ServiceResult {
+    pub(super) async fn branches_impl(&self, params: Value) -> ServiceResult {
         let key = params
             .get("key")
             .and_then(|v| v.as_str())
@@ -219,7 +218,7 @@ impl SessionService for LiveSessionService {
         Ok(serde_json::json!(items))
     }
 
-    async fn search(&self, params: Value) -> ServiceResult {
+    pub(super) async fn search_impl(&self, params: Value) -> ServiceResult {
         let query = params
             .get("query")
             .and_then(|v| v.as_str())
@@ -260,11 +259,11 @@ impl SessionService for LiveSessionService {
         Ok(serde_json::json!(enriched))
     }
 
-    async fn mark_seen(&self, key: &str) {
+    pub(super) async fn mark_seen_impl(&self, key: &str) {
         self.metadata.mark_seen(key).await;
     }
 
-    async fn clear_all(&self) -> ServiceResult {
+    pub(super) async fn clear_all_impl(&self) -> ServiceResult {
         let all = self.metadata.list().await;
         let mut deleted = 0u32;
 
@@ -281,7 +280,7 @@ impl SessionService for LiveSessionService {
 
             // Reuse delete logic via params.
             let params = serde_json::json!({ "key": entry.key, "force": true });
-            if let Err(e) = self.delete(params).await {
+            if let Err(e) = self.delete_impl(params).await {
                 warn!(session = %entry.key, error = %e, "clear_all: failed to delete session");
                 continue;
             }
@@ -297,7 +296,7 @@ impl SessionService for LiveSessionService {
         Ok(serde_json::json!({ "deleted": deleted }))
     }
 
-    async fn run_detail(&self, params: Value) -> ServiceResult {
+    pub(super) async fn run_detail_impl(&self, params: Value) -> ServiceResult {
         let session_key = params
             .get("sessionKey")
             .and_then(|v| v.as_str())

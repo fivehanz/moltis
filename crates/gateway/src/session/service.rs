@@ -1,19 +1,19 @@
-use super::{helpers::*, *};
+use super::*;
 
 /// Live session service backed by JSONL store + SQLite metadata.
 pub struct LiveSessionService {
-    store: Arc<SessionStore>,
-    metadata: Arc<SqliteSessionMetadata>,
-    agent_persona_store: Option<Arc<AgentPersonaStore>>,
-    tts_service: Option<Arc<dyn TtsService>>,
-    share_store: Option<Arc<ShareStore>>,
-    sandbox_router: Option<Arc<SandboxRouter>>,
-    project_store: Option<Arc<dyn ProjectStore>>,
-    hook_registry: Option<Arc<HookRegistry>>,
-    state_store: Option<Arc<SessionStateStore>>,
-    browser_service: Option<Arc<dyn crate::services::BrowserService>>,
+    pub(super) store: Arc<SessionStore>,
+    pub(super) metadata: Arc<SqliteSessionMetadata>,
+    pub(super) agent_persona_store: Option<Arc<AgentPersonaStore>>,
+    pub(super) tts_service: Option<Arc<dyn TtsService>>,
+    pub(super) share_store: Option<Arc<ShareStore>>,
+    pub(super) sandbox_router: Option<Arc<SandboxRouter>>,
+    pub(super) project_store: Option<Arc<dyn ProjectStore>>,
+    pub(super) hook_registry: Option<Arc<HookRegistry>>,
+    pub(super) state_store: Option<Arc<SessionStateStore>>,
+    pub(super) browser_service: Option<Arc<dyn crate::services::BrowserService>>,
     #[cfg(feature = "fs-tools")]
-    fs_state: Option<FsState>,
+    pub(super) fs_state: Option<FsState>,
 }
 
 impl LiveSessionService {
@@ -83,7 +83,7 @@ impl LiveSessionService {
         self
     }
 
-    async fn default_agent_id(&self) -> String {
+    pub(super) async fn default_agent_id(&self) -> String {
         if let Some(ref store) = self.agent_persona_store {
             return store
                 .default_id()
@@ -93,7 +93,7 @@ impl LiveSessionService {
         "main".to_string()
     }
 
-    async fn resolve_agent_id_for_entry(
+    pub(super) async fn resolve_agent_id_for_entry(
         &self,
         entry: &moltis_sessions::metadata::SessionEntry,
         patch_if_invalid: bool,
@@ -185,6 +185,50 @@ impl LiveSessionService {
 
 #[async_trait]
 impl SessionService for LiveSessionService {
+    async fn voice_generate(&self, params: Value) -> ServiceResult {
+        self.voice_generate_impl(params).await
+    }
+
+    async fn share_create(&self, params: Value) -> ServiceResult {
+        self.share_create_impl(params).await
+    }
+
+    async fn share_list(&self, params: Value) -> ServiceResult {
+        self.share_list_impl(params).await
+    }
+
+    async fn share_revoke(&self, params: Value) -> ServiceResult {
+        self.share_revoke_impl(params).await
+    }
+
+    async fn delete(&self, params: Value) -> ServiceResult {
+        self.delete_impl(params).await
+    }
+
+    async fn search(&self, params: Value) -> ServiceResult {
+        self.search_impl(params).await
+    }
+
+    async fn fork(&self, params: Value) -> ServiceResult {
+        self.fork_impl(params).await
+    }
+
+    async fn branches(&self, params: Value) -> ServiceResult {
+        self.branches_impl(params).await
+    }
+
+    async fn run_detail(&self, params: Value) -> ServiceResult {
+        self.run_detail_impl(params).await
+    }
+
+    async fn clear_all(&self) -> ServiceResult {
+        self.clear_all_impl().await
+    }
+
+    async fn mark_seen(&self, key: &str) {
+        self.mark_seen_impl(key).await;
+    }
+
     async fn list(&self) -> ServiceResult {
         let all = self.metadata.list().await;
 

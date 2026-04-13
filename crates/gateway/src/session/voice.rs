@@ -1,8 +1,7 @@
-use super::{helpers::*, *};
+use super::*;
 
-#[async_trait]
-impl SessionService for LiveSessionService {
-    async fn voice_generate(&self, params: Value) -> ServiceResult {
+impl LiveSessionService {
+    pub(super) async fn voice_generate_impl(&self, params: Value) -> ServiceResult {
         let p: VoiceGenerateParams = parse_params(params)?;
         let key = &p.key;
         let target = p.target().map_err(ServiceError::message)?;
