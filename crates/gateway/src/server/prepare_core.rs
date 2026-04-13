@@ -38,6 +38,7 @@ use {
     },
     tracing::{debug, info, warn},
 };
+mod log_persistence;
 mod post_state;
 /// Prepare the core gateway: load config, run migrations, wire services,
 /// spawn background tasks, and return the core state without any HTTP layer.
@@ -374,34 +375,7 @@ pub async fn prepare_gateway_core(
 
     let openclaw_startup_status = deferred_openclaw_status();
 
-    // Enable log persistence so entries survive restarts.
-    if let Some(ref buf) = log_buffer {
-        let log_buffer_for_persistence = buf.clone();
-        let persistence_path = data_dir.join("logs.jsonl");
-        tokio::spawn(async move {
-            let started = std::time::Instant::now();
-            match tokio::task::spawn_blocking(move || {
-                log_buffer_for_persistence.enable_persistence(persistence_path.clone());
-                persistence_path
-            })
-            .await
-            {
-                Ok(path) => {
-                    debug!(
-                        path = %path.display(),
-                        elapsed_ms = started.elapsed().as_millis(),
-                        "startup log persistence initialized"
-                    );
-                },
-                Err(error) => {
-                    warn!(
-                        %error,
-                        "startup log persistence initialization worker failed"
-                    );
-                },
-            }
-        });
-    }
+    log_persistence::spawn_startup_log_persistence(log_buffer.as_ref(), &data_dir);
     let db_path = data_dir.join("moltis.db");
     let db_pool = {
         use {

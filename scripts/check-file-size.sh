@@ -7,17 +7,17 @@ set -euo pipefail
 MAX_LINES=1500
 
 # Files queued for decomposition — remove as they're split below the limit.
-ALLOW=()
+ALLOW_LIST=$'
+'
 
 # Check if a file is in the allowlist (bash 3.2 compatible).
 is_allowed() {
   local needle="$1"
-  for f in "${ALLOW[@]}"; do
-    if [[ "$f" == "$needle" ]]; then
-      return 0
-    fi
-  done
-  return 1
+  [[ "$ALLOW_LIST" == *$'\n'"$needle"$'\n'* ]]
+}
+
+allowlisted_count() {
+  printf '%s' "$ALLOW_LIST" | awk 'NF { count += 1 } END { print count + 0 }'
 }
 
 violations=0
@@ -46,4 +46,4 @@ if [[ $violations -gt 0 ]]; then
   exit 1
 fi
 
-echo "All Rust files within $MAX_LINES-line limit (${#ALLOW[@]} allowlisted)."
+echo "All Rust files within $MAX_LINES-line limit ($(allowlisted_count) allowlisted)."
