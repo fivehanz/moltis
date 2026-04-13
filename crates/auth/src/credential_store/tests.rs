@@ -753,7 +753,7 @@ async fn test_env_var_plaintext_when_vault_sealed() {
 #[cfg(feature = "vault")]
 #[tokio::test]
 async fn test_env_var_decrypt_round_trip() {
-    let vault_password = fixture_secret("vault-env-round-trip-password");
+    let vault_password = generate_token();
     let api_token = fixture_secret("vault-env-round-trip-api-token");
     let (store, _vault) = vault_store(&vault_password).await;
 
