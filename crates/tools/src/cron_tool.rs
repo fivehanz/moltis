@@ -674,6 +674,12 @@ impl AgentTool for CronTool {
     }
 
     fn parameters_schema(&self) -> Value {
+        let time_field = |description: &str| {
+            json!({
+                "type": ["integer", "string"],
+                "description": description
+            })
+        };
         json!({
             "type": "object",
             "properties": {
@@ -688,28 +694,31 @@ impl AgentTool for CronTool {
                     "properties": {
                         "name": { "type": "string", "description": "Human-readable job name" },
                         "schedule": {
-                            "type": "object",
+                            "type": ["object", "string", "integer"],
                             "description": "Schedule object. For one-off jobs use {kind:'at', delay_ms} where delay_ms is milliseconds from now (e.g. 600000 for 10 min) — never compute at_ms yourself. For recurring use {kind:'every', every_ms} or {kind:'cron', expr, tz?}.",
                             "properties": {
                                 "kind": { "type": "string", "enum": ["at", "every", "cron"] },
-                                "delay_ms": { "type": "integer", "description": "Milliseconds from now to run the job (server resolves to absolute time). Preferred over at_ms." },
-                                "at_ms": { "type": "integer", "description": "Absolute epoch milliseconds. Use delay_ms instead unless you have an exact timestamp." },
-                                "every_ms": { "type": "integer", "description": "Used when kind='every'" },
-                                "anchor_ms": { "type": "integer", "description": "Optional anchor when kind='every'" },
+                                "delay_ms": time_field("Milliseconds from now to run the job. Accepts integer milliseconds or a duration string like '10m'. Preferred over at_ms."),
+                                "at_ms": time_field("Absolute epoch milliseconds or ISO-8601 timestamp. Use delay_ms instead unless you have an exact timestamp."),
+                                "every_ms": time_field("Recurring interval when kind='every'. Accepts integer milliseconds or a duration string like '15m'."),
+                                "anchor_ms": time_field("Optional anchor when kind='every'. Accepts epoch milliseconds or ISO-8601 timestamp."),
                                 "expr": { "type": "string", "description": "Cron expression used when kind='cron'" },
                                 "tz": { "type": "string", "description": "Optional timezone used when kind='cron'" }
                             },
                             "required": ["kind"]
                         },
                         "payload": {
-                            "type": "object",
+                            "type": ["object", "string"],
                             "description": "What to do. Use {kind:'systemEvent', text} for main-session reminders or {kind:'agentTurn', message, model?, timeout_secs?, deliver?, channel?, to?}. `payload.model` selects the LLM for that job. This tool also accepts a shorthand message string at runtime.",
                             "properties": {
                                 "kind": { "type": "string", "enum": ["systemEvent", "agentTurn"] },
                                 "text": { "type": "string" },
                                 "message": { "type": "string" },
                                 "model": { "type": "string" },
-                                "timeout_secs": { "type": "integer" },
+                                "timeout_secs": {
+                                    "type": ["integer", "string"],
+                                    "description": "Optional timeout in seconds. Accepts an integer number of seconds or a duration string like '2m'."
+                                },
                                 "deliver": { "type": "boolean", "description": "Set to true to deliver the agent output to a channel (e.g. Telegram) after the run. Requires channel and to." },
                                 "channel": { "type": "string", "description": "Channel account identifier for delivery (e.g. the Telegram bot username like 'my_telegram_bot'). Required when deliver=true." },
                                 "to": { "type": "string", "description": "Recipient chat ID for delivery (e.g. '123456789' for Telegram). Required when deliver=true." }
@@ -1055,6 +1064,44 @@ mod tests {
         assert_eq!(updated["schedule"]["expr"], "*/15 * * * *");
     }
 
+    #[test]
+    fn test_parameters_schema_advertises_flexible_schedule_inputs() {
+        let tool = make_tool();
+        let schema = tool.parameters_schema();
+        let schedule = &schema["properties"]["job"]["properties"]["schedule"];
+
+        assert_eq!(schedule["type"], json!(["object", "string", "integer"]));
+        assert_eq!(
+            schedule["properties"]["delay_ms"]["type"],
+            json!(["integer", "string"])
+        );
+        assert_eq!(
+            schedule["properties"]["at_ms"]["type"],
+            json!(["integer", "string"])
+        );
+        assert_eq!(
+            schedule["properties"]["every_ms"]["type"],
+            json!(["integer", "string"])
+        );
+        assert_eq!(
+            schedule["properties"]["anchor_ms"]["type"],
+            json!(["integer", "string"])
+        );
+    }
+
+    #[test]
+    fn test_parameters_schema_advertises_shorthand_payload_string() {
+        let tool = make_tool();
+        let schema = tool.parameters_schema();
+        let payload = &schema["properties"]["job"]["properties"]["payload"];
+
+        assert_eq!(payload["type"], json!(["object", "string"]));
+        assert_eq!(
+            payload["properties"]["timeout_secs"]["type"],
+            json!(["integer", "string"])
+        );
+    }
+
     #[tokio::test]
     async fn test_add_accepts_alias_fields_and_duration_strings() {
         let tool = make_tool();
@@ -1205,16 +1252,16 @@ mod tests {
     }
 
     #[test]
-    fn test_parameters_schema_has_no_one_of() {
-        fn contains_one_of(value: &Value) -> bool {
+    fn test_parameters_schema_has_no_one_of_or_any_of() {
+        fn contains_disallowed_union(value: &Value) -> bool {
             match value {
                 Value::Object(obj) => {
-                    if obj.contains_key("oneOf") {
+                    if obj.contains_key("oneOf") || obj.contains_key("anyOf") {
                         return true;
                     }
-                    obj.values().any(contains_one_of)
+                    obj.values().any(contains_disallowed_union)
                 },
-                Value::Array(items) => items.iter().any(contains_one_of),
+                Value::Array(items) => items.iter().any(contains_disallowed_union),
                 _ => false,
             }
         }
@@ -1222,8 +1269,8 @@ mod tests {
         let tool = make_tool();
         let schema = tool.parameters_schema();
         assert!(
-            !contains_one_of(&schema),
-            "cron tool schema must avoid oneOf for OpenAI Responses API compatibility"
+            !contains_disallowed_union(&schema),
+            "cron tool schema must avoid oneOf/anyOf for native tool-calling compatibility"
         );
     }
 

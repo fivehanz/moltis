@@ -168,12 +168,16 @@ impl ToolRegistry {
     }
 
     pub fn list_schemas(&self) -> Vec<serde_json::Value> {
-        let mut schemas: Vec<serde_json::Value> =
-            self.tools.values().map(entry_to_schema).collect();
+        let mut schemas: Vec<serde_json::Value> = self
+            .tools
+            .iter()
+            .filter(|(name, _)| is_public_tool_name(name))
+            .map(|(_, entry)| entry_to_schema(entry))
+            .collect();
 
         let activated = self.activated.lock().unwrap_or_else(|e| e.into_inner());
         for (name, entry) in activated.iter() {
-            if !self.tools.contains_key(name) {
+            if !self.tools.contains_key(name) && is_public_tool_name(name) {
                 schemas.push(entry_to_schema(entry));
             }
         }
@@ -193,10 +197,15 @@ impl ToolRegistry {
 
     /// List registered tool names (static + activated).
     pub fn list_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        let mut names: Vec<String> = self
+            .tools
+            .keys()
+            .filter(|name| is_public_tool_name(name))
+            .cloned()
+            .collect();
         let activated = self.activated.lock().unwrap_or_else(|e| e.into_inner());
         for name in activated.keys() {
-            if !self.tools.contains_key(name) {
+            if !self.tools.contains_key(name) && is_public_tool_name(name) {
                 names.push(name.clone());
             }
         }
@@ -284,6 +293,10 @@ impl ToolRegistry {
             activated: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+}
+
+fn is_public_tool_name(name: &str) -> bool {
+    !name.ends_with("_wasm")
 }
 
 fn entry_to_schema(e: &ToolEntry) -> serde_json::Value {
@@ -467,16 +480,6 @@ mod tests {
             .expect("mcp tool should exist");
         assert_eq!(mcp["source"], "mcp");
         assert_eq!(mcp["mcpServer"], "github");
-
-        let wasm = schemas
-            .iter()
-            .find(|s| s["name"] == "calc_wasm")
-            .expect("wasm tool should exist");
-        assert_eq!(wasm["source"], "wasm");
-        assert_eq!(
-            wasm["componentHash"],
-            "abababababababababababababababababababababababababababababababab"
-        );
     }
 
     #[test]
@@ -491,6 +494,30 @@ mod tests {
 
         let names = registry.list_names();
         assert_eq!(names, vec!["exec".to_string(), "web_fetch".to_string()]);
+    }
+
+    #[test]
+    fn test_wasm_suffix_tools_are_hidden_from_public_lists() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(DummyTool {
+            name: "exec".to_string(),
+        }));
+        registry.register_wasm(
+            Box::new(DummyTool {
+                name: "web_search_wasm".to_string(),
+            }),
+            [0xAB; 32],
+        );
+
+        assert_eq!(registry.list_names(), vec!["exec".to_string()]);
+        assert!(registry.get("web_search_wasm").is_some());
+
+        let schemas = registry.list_schemas();
+        assert!(
+            schemas
+                .iter()
+                .all(|schema| schema["name"] != "web_search_wasm")
+        );
     }
 
     #[test]

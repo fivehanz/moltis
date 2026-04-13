@@ -154,18 +154,14 @@ pub fn validate_tool_args(schema: &Value, args: &Value) -> Result<(), ToolArgErr
             if actual_val.is_null() {
                 continue;
             }
-            let Some(expected_type) = prop_schema
-                .as_object()
-                .and_then(|o| o.get("type"))
-                .and_then(Value::as_str)
-            else {
+            let Some(expected_type) = prop_schema.as_object().and_then(|o| o.get("type")) else {
                 continue; // No declared type → nothing to check.
             };
             let actual_type = value_type_name(actual_val);
             if !type_matches(expected_type, actual_val) {
                 type_mismatches.push(TypeMismatch {
                     field: field.clone(),
-                    expected: expected_type.to_string(),
+                    expected: expected_type_name(expected_type),
                     actual: actual_type.to_string(),
                 });
             }
@@ -183,7 +179,18 @@ pub fn validate_tool_args(schema: &Value, args: &Value) -> Result<(), ToolArgErr
     })
 }
 
-fn type_matches(expected: &str, value: &Value) -> bool {
+fn type_matches(expected: &Value, value: &Value) -> bool {
+    match expected {
+        Value::String(expected) => type_matches_single(expected, value),
+        Value::Array(expected_types) => expected_types
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|expected| type_matches_single(expected, value)),
+        _ => true,
+    }
+}
+
+fn type_matches_single(expected: &str, value: &Value) -> bool {
     match expected {
         "string" => value.is_string(),
         "number" => value.is_number(),
@@ -202,6 +209,21 @@ fn type_matches(expected: &str, value: &Value) -> bool {
         "null" => value.is_null(),
         // Unknown/complex types (unions, $ref, etc.): don't claim a mismatch.
         _ => true,
+    }
+}
+
+fn expected_type_name(expected: &Value) -> String {
+    match expected {
+        Value::String(single) => single.clone(),
+        Value::Array(types) => {
+            let labels: Vec<&str> = types.iter().filter_map(Value::as_str).collect();
+            if labels.is_empty() {
+                "unknown".to_string()
+            } else {
+                labels.join(" | ")
+            }
+        },
+        _ => "unknown".to_string(),
     }
 }
 
@@ -386,6 +408,56 @@ mod tests {
         let err = validate_tool_args(&schema, &json!({"timeout": 30.5})).unwrap_err();
         assert_eq!(err.type_mismatches.len(), 1);
         assert_eq!(err.type_mismatches[0].field, "timeout");
+    }
+
+    #[test]
+    fn union_type_array_accepts_any_matching_type() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "schedule": { "type": ["object", "string", "integer"] },
+                "maybe_null": { "type": ["string", "null"] }
+            },
+            "required": ["schedule"]
+        });
+
+        assert!(
+            validate_tool_args(
+                &schema,
+                &json!({"schedule": {"kind": "at"}, "maybe_null": "ok"})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_tool_args(
+                &schema,
+                &json!({"schedule": "0 9 * * *", "maybe_null": null})
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_tool_args(
+                &schema,
+                &json!({"schedule": 1_700_000_000_000u64, "maybe_null": "ok"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn union_type_array_reports_mismatch_when_nothing_matches() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "schedule": { "type": ["object", "string", "integer"] }
+            },
+            "required": ["schedule"]
+        });
+
+        let err = validate_tool_args(&schema, &json!({"schedule": false})).unwrap_err();
+        assert_eq!(err.type_mismatches.len(), 1);
+        assert_eq!(err.type_mismatches[0].expected, "object | string | integer");
+        assert_eq!(err.type_mismatches[0].actual, "boolean");
     }
 
     #[test]

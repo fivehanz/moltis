@@ -87,6 +87,26 @@ fn sanitize_tool_name(name: &str) -> Cow<'_, str> {
     }
 }
 
+fn legacy_public_tool_alias(name: &str) -> Option<&str> {
+    name.strip_suffix("_wasm").filter(|base| !base.is_empty())
+}
+
+fn resolve_tool_lookup<'a>(
+    tools: &ToolRegistry,
+    name: &'a str,
+) -> (
+    Option<Arc<dyn crate::tool_registry::AgentTool>>,
+    Cow<'a, str>,
+) {
+    if let Some(alias) = legacy_public_tool_alias(name)
+        && let Some(tool) = tools.get(alias)
+    {
+        return (Some(tool), Cow::Owned(alias.to_string()));
+    }
+
+    (tools.get(name), Cow::Borrowed(name))
+}
+
 const MALFORMED_TOOL_RETRY_PROMPT: &str = "Your tool call was malformed. Retry with exact format:\n\
      ```tool_call\n{\"tool\": \"name\", \"arguments\": {...}}\n```";
 const EMPTY_TOOL_NAME_RETRY_PROMPT: &str = "Your structured tool call had an empty tool name. Retry the same tool call using the intended tool's exact name and the same arguments.";
@@ -1299,14 +1319,17 @@ pub async fn run_agent_loop_with_context(
                 if *sanitized != tc.name {
                     debug!(original = %tc.name, sanitized = %sanitized, "sanitized mangled tool name");
                 }
-                let tool = tools.get(&sanitized);
+                let (tool, resolved_name) = resolve_tool_lookup(tools, sanitized.as_ref());
+                if resolved_name.as_ref() != sanitized.as_ref() {
+                    debug!(original = %sanitized, resolved = %resolved_name, "resolved legacy tool alias");
+                }
                 let mut args = tc.arguments.clone();
 
                 // Dispatch BeforeToolCall hook — may block or modify arguments.
                 let hook_registry = hook_registry.clone();
                 let session_key = session_key_for_hooks.clone();
                 let channel_for_hooks = channel_for_hooks.clone();
-                let tc_name = sanitized.to_string();
+                let tc_name = resolved_name.to_string();
                 let _tc_id = tc.id.clone();
 
                 if let Some(ref ctx) = tool_context
@@ -1342,7 +1365,7 @@ pub async fn run_agent_loop_with_context(
                     if let Some(cb) = on_event {
                         cb(RunnerEvent::ToolCallStart {
                             id: tc.id.clone(),
-                            name: tc.name.clone(),
+                            name: tc_name.clone(),
                             arguments: args.clone(),
                         });
                     }
@@ -2218,13 +2241,16 @@ pub async fn run_agent_loop_streaming(
                 if *sanitized != tc.name {
                     debug!(original = %tc.name, sanitized = %sanitized, "sanitized mangled tool name");
                 }
-                let tool = tools.get(&sanitized);
+                let (tool, resolved_name) = resolve_tool_lookup(tools, sanitized.as_ref());
+                if resolved_name.as_ref() != sanitized.as_ref() {
+                    debug!(original = %sanitized, resolved = %resolved_name, "resolved legacy tool alias");
+                }
                 let mut args = tc.arguments.clone();
 
                 let hook_registry = hook_registry.clone();
                 let session_key = session_key_for_hooks.clone();
                 let channel_for_hooks = channel_for_hooks.clone();
-                let tc_name = sanitized.to_string();
+                let tc_name = resolved_name.to_string();
 
                 if let Some(ref ctx) = tool_context
                     && let (Some(args_obj), Some(ctx_obj)) = (args.as_object_mut(), ctx.as_object())
@@ -2256,7 +2282,7 @@ pub async fn run_agent_loop_streaming(
                     if let Some(cb) = on_event {
                         cb(RunnerEvent::ToolCallStart {
                             id: tc.id.clone(),
-                            name: tc.name.clone(),
+                            name: tc_name.clone(),
                             arguments: args.clone(),
                         });
                     }
@@ -7290,6 +7316,54 @@ mod tests {
         // "functions_" with no trailing name should produce an empty string,
         // which is handled by find_empty_tool_name_call / EMPTY_TOOL_NAME_RETRY_PROMPT.
         assert_eq!(sanitize_tool_name("functions_"), "");
+    }
+
+    #[test]
+    fn legacy_public_tool_alias_strips_wasm_suffix() {
+        assert_eq!(
+            legacy_public_tool_alias("web_search_wasm"),
+            Some("web_search")
+        );
+        assert_eq!(legacy_public_tool_alias("calc_wasm"), Some("calc"));
+        assert_eq!(legacy_public_tool_alias("web_search"), None);
+    }
+
+    #[test]
+    fn resolve_tool_lookup_prefers_public_alias_when_both_exist() {
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(LargeResultTool {
+            tool_name: "web_search",
+            payload: "public".into(),
+        }));
+        tools.register_wasm(
+            Box::new(LargeResultTool {
+                tool_name: "web_search_wasm",
+                payload: "legacy".into(),
+            }),
+            [0x11; 32],
+        );
+
+        let (tool, resolved_name) = resolve_tool_lookup(&tools, "web_search_wasm");
+        let tool = tool.expect("resolved tool should exist");
+        assert_eq!(resolved_name, "web_search");
+        assert_eq!(tool.name(), "web_search");
+    }
+
+    #[test]
+    fn resolve_tool_lookup_falls_back_to_legacy_name_when_no_public_tool_exists() {
+        let mut tools = ToolRegistry::new();
+        tools.register_wasm(
+            Box::new(LargeResultTool {
+                tool_name: "web_search_wasm",
+                payload: "legacy".into(),
+            }),
+            [0x22; 32],
+        );
+
+        let (tool, resolved_name) = resolve_tool_lookup(&tools, "web_search_wasm");
+        let tool = tool.expect("legacy tool should exist");
+        assert_eq!(resolved_name, "web_search_wasm");
+        assert_eq!(tool.name(), "web_search_wasm");
     }
 
     // ── Auto-continue tests ──────────────────────────────────────────
