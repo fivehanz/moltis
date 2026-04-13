@@ -215,12 +215,48 @@ jobs:
             -- --ignored \
             --test-threads=1
 
+  provider-e2e-scenarios:
+    name: Provider E2E Scenarios
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    continue-on-error: true
+    env:
+      Z_API_KEY: ${{ secrets.Z_API_KEY }}
+      ALIBABA_CODING_API_KEY: ${{ secrets.ALIBABA_CODING_API_KEY }}
+      ALIBABA_CODING_BASE_URL: ${{ secrets.ALIBABA_CODING_BASE_URL }}
+      SERIALIZATION_TEST_ZAI_MODEL: glm-5
+      SERIALIZATION_TEST_ALIBABA_MODEL: qwen3.5-plus
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          shared-key: provider-e2e-scenarios-v1
+          cache-all-crates: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential clang libclang-dev pkg-config
+
+      - name: Run provider E2E scenarios
+        run: ./scripts/run-provider-e2e-daily.sh
+
   summary:
     name: Integration Summary
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: provider-tests
+    needs:
+      - provider-tests
+      - provider-e2e-scenarios
     if: always()
     steps:
       - name: Report

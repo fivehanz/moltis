@@ -13,6 +13,10 @@ format:
 format-check:
     cargo +{{nightly_toolchain}} fmt --all -- --check
 
+# Run live provider E2E scenarios (sources .envrc when present).
+provider-e2e-daily:
+    ./scripts/run-provider-e2e-daily.sh
+
 # Verify Cargo.lock is in sync with workspace manifests.
 lockfile-check:
     cargo fetch --locked
