@@ -1484,9 +1484,9 @@ mod tests {
 
         sanitize_schema_for_openai_compat(&mut schema);
 
-        let tuple_items = schema["properties"]["tuple"]["items"]
-            .as_array()
-            .expect("tuple items should remain an array");
+        let Some(tuple_items) = schema["properties"]["tuple"]["items"].as_array() else {
+            panic!("tuple items should remain an array");
+        };
         assert!(tuple_items[0].get("not").is_none());
         assert!(tuple_items[1].get("patternProperties").is_none());
     }
