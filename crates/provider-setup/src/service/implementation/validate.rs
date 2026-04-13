@@ -257,7 +257,7 @@ impl LiveProviderSetupService {
             }));
         }
 
-        if let Some(requested_model) = selected_model {
+        let models_payload = if let Some(requested_model) = selected_model {
             let requested_model = normalize_ollama_model_id(requested_model.trim());
             let installed = discovered_models
                 .iter()
@@ -280,28 +280,40 @@ impl LiveProviderSetupService {
                     "error": error,
                 }));
             }
+            discovered_models
+                .iter()
+                .map(|installed_model| {
+                    let response_model = if ollama_model_matches(installed_model, requested_model) {
+                        requested_model
+                    } else {
+                        installed_model.as_str()
+                    };
+                    serde_json::json!({
+                        "id": format!("ollama::{response_model}"),
+                        "displayName": response_model,
+                        "provider": "ollama",
+                        "supportsTools": true,
+                    })
+                })
+                .collect()
         } else {
-            self.emit_validation_progress(
-                validation_provider_name,
-                request_id,
-                "complete",
-                progress_payload(serde_json::json!({
-                    "message": "Discovered installed Ollama models.",
-                    "modelCount": discovered_models.len(),
-                })),
-            )
-            .await;
-            return Ok(serde_json::json!({
-                "valid": true,
-                "models": ollama_models_payload(&discovered_models),
-            }));
-        }
+            ollama_models_payload(&discovered_models)
+        };
 
-        // If we reach here, the selected model was found in Ollama.
-        // Fall through to the common validation path (handled by caller).
-        // This case is actually unreachable because both branches above
-        // return, but we return a sensible default for clarity.
-        Ok(serde_json::json!({ "valid": true }))
+        self.emit_validation_progress(
+            validation_provider_name,
+            request_id,
+            "complete",
+            progress_payload(serde_json::json!({
+                "message": "Discovered installed Ollama models.",
+                "modelCount": discovered_models.len(),
+            })),
+        )
+        .await;
+        Ok(serde_json::json!({
+            "valid": true,
+            "models": models_payload,
+        }))
     }
 
     /// Discover models from a custom OpenAI-compatible endpoint.
