@@ -1,5 +1,8 @@
 use std::{collections::HashMap, path::Path as FsPath, sync::Arc};
 
+#[cfg(feature = "local-embeddings")]
+use std::path::PathBuf;
+
 use {
     secrecy::ExposeSecret,
     tracing::{info, warn},

@@ -569,6 +569,7 @@ exit 0
             index_name: "test-index".into(),
             env_overrides: HashMap::new(),
         });
+        *manager.available.write().await = Some(true);
 
         manager.refresh_index(true).await.unwrap();
 
@@ -594,6 +595,7 @@ exit 0
             index_name: "search-index".into(),
             ..Default::default()
         });
+        *manager.available.write().await = Some(true);
 
         let results = manager.hybrid_search("auth flow", 5, false).await.unwrap();
         assert_eq!(results.len(), 1);
