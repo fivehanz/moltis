@@ -107,6 +107,70 @@ fn make_nullable(schema: &mut serde_json::Value) {
     }
 }
 
+const OPENAI_UNSUPPORTED_SCHEMA_KEYWORDS: &[&str] = &[
+    "not",
+    "if",
+    "then",
+    "else",
+    "dependentSchemas",
+    "dependentRequired",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "patternProperties",
+    "propertyNames",
+    "contains",
+    "minContains",
+    "maxContains",
+];
+
+/// Recursively strip JSON Schema keywords that OpenAI-compatible tool schemas
+/// reject in strict function-calling mode.
+///
+/// This keeps the schema permissive instead of failing the entire request when
+/// an MCP server advertises a valid draft-2020-12 schema that the provider does
+/// not accept.
+pub fn sanitize_schema_for_openai_compat(schema: &mut serde_json::Value) {
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+
+    for keyword in OPENAI_UNSUPPORTED_SCHEMA_KEYWORDS {
+        obj.remove(*keyword);
+    }
+
+    if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        for prop_schema in props.values_mut() {
+            sanitize_schema_for_openai_compat(prop_schema);
+        }
+    }
+
+    if let Some(items) = obj.get_mut("items") {
+        sanitize_schema_for_openai_compat(items);
+    }
+
+    for key in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+        if let Some(variants) = obj.get_mut(key).and_then(|v| v.as_array_mut()) {
+            for variant in variants {
+                sanitize_schema_for_openai_compat(variant);
+            }
+        }
+    }
+
+    if let Some(additional) = obj.get_mut("additionalProperties")
+        && additional.is_object()
+    {
+        sanitize_schema_for_openai_compat(additional);
+    }
+
+    for key in ["$defs", "definitions"] {
+        if let Some(definitions) = obj.get_mut(key).and_then(|v| v.as_object_mut()) {
+            for definition in definitions.values_mut() {
+                sanitize_schema_for_openai_compat(definition);
+            }
+        }
+    }
+}
+
 /// Recursively patch schema for OpenAI strict mode compliance.
 ///
 /// OpenAI's strict mode requires:
@@ -226,6 +290,7 @@ pub fn to_openai_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
         .filter_map(|t| {
             // Clone parameters and patch for strict mode
             let mut params = t["parameters"].clone();
+            sanitize_schema_for_openai_compat(&mut params);
             patch_schema_for_strict_mode(&mut params);
 
             let name = t["name"].as_str()?.to_string();
@@ -273,6 +338,7 @@ pub fn to_responses_api_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Va
         .filter_map(|t| {
             // Clone parameters and patch for strict mode
             let mut params = t["parameters"].clone();
+            sanitize_schema_for_openai_compat(&mut params);
             patch_schema_for_strict_mode(&mut params);
 
             let name = t["name"].as_str()?.to_string();
@@ -1111,7 +1177,10 @@ pub fn parse_responses_completion(resp: &serde_json::Value) -> CompletionRespons
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_responses_completion, parse_tool_calls};
+    use super::{
+        parse_responses_completion, parse_tool_calls, sanitize_schema_for_openai_compat,
+        to_responses_api_tools,
+    };
 
     #[test]
     fn parse_tool_calls_preserves_native_falsy_types() {
@@ -1206,5 +1275,108 @@ mod tests {
         assert_eq!(result.tool_calls[0].arguments["offset"], 0);
         assert_eq!(result.tool_calls[0].arguments["multiline"], false);
         assert!(result.tool_calls[0].arguments["type"].is_null());
+    }
+
+    #[test]
+    fn responses_tools_strip_nested_not_schemas() {
+        let tools = vec![serde_json::json!({
+            "name": "mcp__attio__list-attribute-definitions",
+            "description": "Attio test tool",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "anyOf": [
+                            {
+                                "anyOf": [
+                                    {
+                                        "not": {
+                                            "const": ""
+                                        }
+                                    },
+                                    {
+                                        "type": "string"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ]
+                    }
+                }
+            }
+        })];
+
+        let converted = to_responses_api_tools(&tools);
+        let params = &converted[0]["parameters"];
+        let encoded = params.to_string();
+
+        assert_eq!(converted[0]["strict"], true);
+        assert!(!encoded.contains("\"not\""));
+        assert_eq!(params["type"], "object");
+        assert_eq!(params["additionalProperties"], false);
+        assert_eq!(params["required"], serde_json::json!(["query"]));
+    }
+
+    #[test]
+    fn sanitize_schema_for_openai_compat_strips_recursive_unsupported_keywords() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "config": {
+                    "type": "object",
+                    "properties": {
+                        "mode": { "type": "string" }
+                    },
+                    "if": {
+                        "required": ["mode"]
+                    },
+                    "then": {
+                        "properties": {
+                            "enabled": { "type": "boolean" }
+                        }
+                    },
+                    "else": {
+                        "properties": {
+                            "enabled": { "type": "boolean" }
+                        }
+                    },
+                    "dependentSchemas": {
+                        "mode": {
+                            "properties": {
+                                "extra": { "type": "string" }
+                            }
+                        }
+                    },
+                    "patternProperties": {
+                        "^x-": { "type": "string" }
+                    },
+                    "items": {
+                        "not": {
+                            "type": "integer"
+                        }
+                    }
+                }
+            }
+        });
+
+        sanitize_schema_for_openai_compat(&mut schema);
+        let encoded = schema.to_string();
+
+        for keyword in [
+            "\"if\"",
+            "\"then\"",
+            "\"else\"",
+            "\"dependentSchemas\"",
+            "\"patternProperties\"",
+            "\"not\"",
+        ] {
+            assert!(!encoded.contains(keyword), "{keyword} should be removed");
+        }
+        assert_eq!(
+            schema["properties"]["config"]["properties"]["mode"]["type"],
+            "string"
+        );
     }
 }
