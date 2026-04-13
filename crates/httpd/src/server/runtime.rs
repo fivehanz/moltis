@@ -1,4 +1,4 @@
-use super::*;
+use {super::*, axum::routing::get};
 
 pub(super) struct FinalizeGatewayArgs<'a> {
     pub bind: &'a str,

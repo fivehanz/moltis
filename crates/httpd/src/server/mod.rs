@@ -16,7 +16,6 @@ use {
         extract::{ConnectInfo, State, WebSocketUpgrade},
         http::StatusCode,
         response::{IntoResponse, Json},
-        routing::get,
     },
     tracing::{info, warn},
 };
