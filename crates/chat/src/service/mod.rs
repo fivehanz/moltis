@@ -162,6 +162,36 @@ pub(crate) fn build_tool_call_assistant_message(
     }
 }
 
+pub(crate) fn build_persisted_assistant_message(
+    assistant_output: AssistantTurnOutput,
+    model: Option<String>,
+    provider: Option<String>,
+    seq: Option<u64>,
+    run_id: Option<String>,
+) -> PersistedMessage {
+    PersistedMessage::Assistant {
+        content: assistant_output.text,
+        created_at: Some(now_ms()),
+        model,
+        provider,
+        input_tokens: Some(assistant_output.input_tokens),
+        output_tokens: Some(assistant_output.output_tokens),
+        cache_read_tokens: Some(assistant_output.cache_read_tokens),
+        cache_write_tokens: Some(assistant_output.cache_write_tokens),
+        duration_ms: Some(assistant_output.duration_ms),
+        request_input_tokens: Some(assistant_output.request_input_tokens),
+        request_output_tokens: Some(assistant_output.request_output_tokens),
+        request_cache_read_tokens: Some(assistant_output.request_cache_read_tokens),
+        request_cache_write_tokens: Some(assistant_output.request_cache_write_tokens),
+        tool_calls: None,
+        reasoning: assistant_output.reasoning,
+        llm_api_response: assistant_output.llm_api_response,
+        audio: assistant_output.audio_path,
+        seq,
+        run_id,
+    }
+}
+
 pub(crate) async fn persist_tool_history_pair(
     session_store: &Arc<SessionStore>,
     session_key: &str,
@@ -548,5 +578,116 @@ impl LiveChatService {
             worktree_dir,
         };
         Some(ctx.to_prompt_section())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::{
+            ActiveAssistantDraft, build_persisted_assistant_message,
+            build_tool_call_assistant_message,
+        },
+        crate::types::AssistantTurnOutput,
+        moltis_sessions::PersistedMessage,
+    };
+
+    #[test]
+    fn active_assistant_draft_omits_cache_usage_fields() {
+        let mut draft = ActiveAssistantDraft::new("run-1", "gpt-4.1", "openai", Some(7));
+        draft.append_text("hello");
+        draft.set_reasoning("thinking");
+
+        let message = draft.to_persisted_message();
+
+        match message {
+            PersistedMessage::Assistant {
+                cache_read_tokens,
+                cache_write_tokens,
+                request_cache_read_tokens,
+                request_cache_write_tokens,
+                seq,
+                run_id,
+                ..
+            } => {
+                assert_eq!(cache_read_tokens, None);
+                assert_eq!(cache_write_tokens, None);
+                assert_eq!(request_cache_read_tokens, None);
+                assert_eq!(request_cache_write_tokens, None);
+                assert_eq!(seq, Some(7));
+                assert_eq!(run_id.as_deref(), Some("run-1"));
+            },
+            _ => panic!("expected assistant message"),
+        }
+    }
+
+    #[test]
+    fn tool_call_assistant_message_omits_cache_usage_fields() {
+        let message = build_tool_call_assistant_message(
+            "tool-1",
+            "exec",
+            Some(serde_json::json!({"cmd": "ls"})),
+            Some(3),
+            Some("run-1"),
+        );
+
+        match message {
+            PersistedMessage::Assistant {
+                cache_read_tokens,
+                cache_write_tokens,
+                request_cache_read_tokens,
+                request_cache_write_tokens,
+                tool_calls,
+                ..
+            } => {
+                assert_eq!(cache_read_tokens, None);
+                assert_eq!(cache_write_tokens, None);
+                assert_eq!(request_cache_read_tokens, None);
+                assert_eq!(request_cache_write_tokens, None);
+                assert_eq!(tool_calls.expect("tool call").len(), 1);
+            },
+            _ => panic!("expected assistant message"),
+        }
+    }
+
+    #[test]
+    fn persisted_assistant_message_includes_cache_usage_fields() {
+        let message = build_persisted_assistant_message(
+            AssistantTurnOutput {
+                text: "hello".to_string(),
+                input_tokens: 1200,
+                output_tokens: 80,
+                cache_read_tokens: 1050,
+                cache_write_tokens: 4,
+                duration_ms: 250,
+                request_input_tokens: 900,
+                request_output_tokens: 60,
+                request_cache_read_tokens: 850,
+                request_cache_write_tokens: 2,
+                audio_path: None,
+                reasoning: Some("thinking".to_string()),
+                llm_api_response: None,
+            },
+            Some("gpt-4.1".to_string()),
+            Some("openai".to_string()),
+            Some(7),
+            Some("run-1".to_string()),
+        );
+
+        match message {
+            PersistedMessage::Assistant {
+                cache_read_tokens,
+                cache_write_tokens,
+                request_cache_read_tokens,
+                request_cache_write_tokens,
+                ..
+            } => {
+                assert_eq!(cache_read_tokens, Some(1050));
+                assert_eq!(cache_write_tokens, Some(4));
+                assert_eq!(request_cache_read_tokens, Some(850));
+                assert_eq!(request_cache_write_tokens, Some(2));
+            },
+            _ => panic!("expected assistant message"),
+        }
     }
 }

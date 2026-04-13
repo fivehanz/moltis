@@ -469,51 +469,38 @@ pub(crate) async fn run_explicit_shell_command(
         .await;
     }
 
-    let final_payload = ChatFinalBroadcast {
-        run_id: run_id.to_string(),
-        session_key: session_key.to_string(),
-        state: "final",
-        text: final_text.clone(),
-        model: String::new(),
-        provider: String::new(),
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        duration_ms: started.elapsed().as_millis() as u64,
-        request_input_tokens: Some(0),
-        request_output_tokens: Some(0),
-        request_cache_read_tokens: Some(0),
-        request_cache_write_tokens: Some(0),
-        message_index: user_message_index + 3, /* +1 tool call assistant, +1 tool result, +1 final assistant */
-        reply_medium: ReplyMedium::Text,
-        iterations: Some(1),
-        tool_calls_made: Some(1),
-        audio: None,
-        audio_warning: None,
-        reasoning: None,
-        seq: client_seq,
-    };
+    let final_payload = build_chat_final_broadcast(
+        run_id,
+        session_key,
+        final_text.clone(),
+        String::new(),
+        String::new(),
+        moltis_agents::model::Usage::default(),
+        started.elapsed().as_millis() as u64,
+        Some(moltis_agents::model::Usage::default()),
+        user_message_index + 3, // +1 tool call assistant, +1 tool result, +1 final assistant
+        ReplyMedium::Text,
+        Some(1),
+        Some(1),
+        None,
+        None,
+        None,
+        client_seq,
+    );
     #[allow(clippy::unwrap_used)] // serializing known-valid struct
     let payload = serde_json::to_value(&final_payload).unwrap();
     terminal_runs.write().await.insert(run_id.to_string());
     broadcast(state, "chat", payload, BroadcastOpts::default()).await;
 
-    AssistantTurnOutput {
-        text: final_text,
-        input_tokens: 0,
-        output_tokens: 0,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        duration_ms: started.elapsed().as_millis() as u64,
-        request_input_tokens: 0,
-        request_output_tokens: 0,
-        request_cache_read_tokens: 0,
-        request_cache_write_tokens: 0,
-        audio_path: None,
-        reasoning: None,
-        llm_api_response: None,
-    }
+    build_assistant_turn_output(
+        final_text,
+        moltis_agents::model::Usage::default(),
+        started.elapsed().as_millis() as u64,
+        moltis_agents::model::Usage::default(),
+        None,
+        None,
+        None,
+    )
 }
 
 /// Resolve the effective tool mode for a provider.

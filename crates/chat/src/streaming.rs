@@ -361,31 +361,24 @@ pub(crate) async fn run_streaming(
                         None
                     };
 
-                    let final_payload = ChatFinalBroadcast {
-                        run_id: run_id.to_string(),
-                        session_key: session_key.to_string(),
-                        state: "final",
-                        text: accumulated.clone(),
-                        model: provider.id().to_string(),
-                        provider: provider_name.to_string(),
-                        input_tokens: usage.input_tokens,
-                        output_tokens: usage.output_tokens,
-                        cache_read_tokens: usage.cache_read_tokens,
-                        cache_write_tokens: usage.cache_write_tokens,
-                        duration_ms: run_started.elapsed().as_millis() as u64,
-                        request_input_tokens: Some(usage.input_tokens),
-                        request_output_tokens: Some(usage.output_tokens),
-                        request_cache_read_tokens: Some(usage.cache_read_tokens),
-                        request_cache_write_tokens: Some(usage.cache_write_tokens),
-                        message_index: assistant_message_index,
-                        reply_medium: desired_reply_medium,
-                        iterations: None,
-                        tool_calls_made: None,
-                        audio: audio_path.clone(),
+                    let final_payload = build_chat_final_broadcast(
+                        run_id,
+                        session_key,
+                        accumulated.clone(),
+                        provider.id().to_string(),
+                        provider_name.to_string(),
+                        usage.clone(),
+                        run_started.elapsed().as_millis() as u64,
+                        Some(usage.clone()),
+                        assistant_message_index,
+                        desired_reply_medium,
+                        None,
+                        None,
+                        audio_path.clone(),
                         audio_warning,
-                        reasoning: reasoning.clone(),
-                        seq: client_seq,
-                    };
+                        reasoning.clone(),
+                        client_seq,
+                    );
                     #[allow(clippy::unwrap_used)] // serializing known-valid struct
                     let payload_val = serde_json::to_value(&final_payload).unwrap();
                     terminal_runs.write().await.insert(run_id.to_string());
@@ -409,21 +402,15 @@ pub(crate) async fn run_streaming(
                     }
                     let llm_api_response =
                         (!raw_llm_responses.is_empty()).then_some(Value::Array(raw_llm_responses));
-                    return Some(AssistantTurnOutput {
-                        text: accumulated,
-                        input_tokens: usage.input_tokens,
-                        output_tokens: usage.output_tokens,
-                        cache_read_tokens: usage.cache_read_tokens,
-                        cache_write_tokens: usage.cache_write_tokens,
-                        duration_ms: run_started.elapsed().as_millis() as u64,
-                        request_input_tokens: usage.input_tokens,
-                        request_output_tokens: usage.output_tokens,
-                        request_cache_read_tokens: usage.cache_read_tokens,
-                        request_cache_write_tokens: usage.cache_write_tokens,
+                    return Some(build_assistant_turn_output(
+                        accumulated,
+                        usage.clone(),
+                        run_started.elapsed().as_millis() as u64,
+                        usage,
                         audio_path,
                         reasoning,
                         llm_api_response,
-                    });
+                    ));
                 },
                 StreamEvent::Error(msg) => {
                     let error_obj = parse_chat_error(&msg, Some(provider_name));

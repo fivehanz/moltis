@@ -7,7 +7,10 @@ use {
     serde_json::Value,
 };
 
-use moltis_config::{AgentMemoryWriteMode, MemoryStyle, PromptMemoryMode};
+use {
+    moltis_agents::model::Usage,
+    moltis_config::{AgentMemoryWriteMode, MemoryStyle, PromptMemoryMode},
+};
 
 /// Placeholder to match the old `BroadcastOpts` pattern. All fields are ignored;
 /// the trait's `broadcast` always uses default behaviour.
@@ -107,6 +110,7 @@ pub(crate) struct ChatErrorBroadcast {
     pub seq: Option<u64>,
 }
 
+#[derive(Clone)]
 pub(crate) struct AssistantTurnOutput {
     pub text: String,
     pub input_tokens: u32,
@@ -121,6 +125,78 @@ pub(crate) struct AssistantTurnOutput {
     pub audio_path: Option<String>,
     pub reasoning: Option<String>,
     pub llm_api_response: Option<Value>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_chat_final_broadcast(
+    run_id: &str,
+    session_key: &str,
+    text: String,
+    model: String,
+    provider: String,
+    usage: Usage,
+    duration_ms: u64,
+    request_usage: Option<Usage>,
+    message_index: usize,
+    reply_medium: ReplyMedium,
+    iterations: Option<usize>,
+    tool_calls_made: Option<usize>,
+    audio: Option<String>,
+    audio_warning: Option<String>,
+    reasoning: Option<String>,
+    seq: Option<u64>,
+) -> ChatFinalBroadcast {
+    ChatFinalBroadcast {
+        run_id: run_id.to_string(),
+        session_key: session_key.to_string(),
+        state: "final",
+        text,
+        model,
+        provider,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_write_tokens: usage.cache_write_tokens,
+        duration_ms,
+        request_input_tokens: request_usage.as_ref().map(|usage| usage.input_tokens),
+        request_output_tokens: request_usage.as_ref().map(|usage| usage.output_tokens),
+        request_cache_read_tokens: request_usage.as_ref().map(|usage| usage.cache_read_tokens),
+        request_cache_write_tokens: request_usage.as_ref().map(|usage| usage.cache_write_tokens),
+        message_index,
+        reply_medium,
+        iterations,
+        tool_calls_made,
+        audio,
+        audio_warning,
+        reasoning,
+        seq,
+    }
+}
+
+pub(crate) fn build_assistant_turn_output(
+    text: String,
+    usage: Usage,
+    duration_ms: u64,
+    request_usage: Usage,
+    audio_path: Option<String>,
+    reasoning: Option<String>,
+    llm_api_response: Option<Value>,
+) -> AssistantTurnOutput {
+    AssistantTurnOutput {
+        text,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_write_tokens: usage.cache_write_tokens,
+        duration_ms,
+        request_input_tokens: request_usage.input_tokens,
+        request_output_tokens: request_usage.output_tokens,
+        request_cache_read_tokens: request_usage.cache_read_tokens,
+        request_cache_write_tokens: request_usage.cache_write_tokens,
+        audio_path,
+        reasoning,
+        llm_api_response,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -201,7 +277,13 @@ pub(crate) fn session_token_usage_from_messages(messages: &[Value]) -> SessionTo
 
 #[cfg(test)]
 mod tests {
-    use super::session_token_usage_from_messages;
+    use {
+        super::{
+            ReplyMedium, build_assistant_turn_output, build_chat_final_broadcast,
+            session_token_usage_from_messages,
+        },
+        moltis_agents::model::Usage,
+    };
 
     #[test]
     fn session_token_usage_tracks_cached_tokens() {
@@ -240,6 +322,76 @@ mod tests {
         assert_eq!(usage.current_request_output_tokens, 25);
         assert_eq!(usage.current_request_cache_read_tokens, 100);
         assert_eq!(usage.current_request_cache_write_tokens, 2);
+    }
+
+    #[test]
+    fn build_chat_final_broadcast_includes_cache_usage() {
+        let usage = Usage {
+            input_tokens: 1200,
+            output_tokens: 80,
+            cache_read_tokens: 1050,
+            cache_write_tokens: 4,
+        };
+        let request_usage = Usage {
+            input_tokens: 900,
+            output_tokens: 60,
+            cache_read_tokens: 850,
+            cache_write_tokens: 2,
+        };
+
+        let payload = build_chat_final_broadcast(
+            "run-1",
+            "main",
+            "hello".to_string(),
+            "gpt-4.1".to_string(),
+            "openai".to_string(),
+            usage,
+            250,
+            Some(request_usage),
+            7,
+            ReplyMedium::Text,
+            Some(2),
+            Some(1),
+            None,
+            None,
+            Some("thinking".to_string()),
+            Some(42),
+        );
+
+        assert_eq!(payload.cache_read_tokens, 1050);
+        assert_eq!(payload.cache_write_tokens, 4);
+        assert_eq!(payload.request_cache_read_tokens, Some(850));
+        assert_eq!(payload.request_cache_write_tokens, Some(2));
+        assert_eq!(payload.message_index, 7);
+        assert_eq!(payload.seq, Some(42));
+    }
+
+    #[test]
+    fn build_assistant_turn_output_copies_cache_usage() {
+        let output = build_assistant_turn_output(
+            "hello".to_string(),
+            Usage {
+                input_tokens: 1200,
+                output_tokens: 80,
+                cache_read_tokens: 1050,
+                cache_write_tokens: 4,
+            },
+            250,
+            Usage {
+                input_tokens: 900,
+                output_tokens: 60,
+                cache_read_tokens: 850,
+                cache_write_tokens: 2,
+            },
+            None,
+            Some("thinking".to_string()),
+            None,
+        );
+
+        assert_eq!(output.cache_read_tokens, 1050);
+        assert_eq!(output.cache_write_tokens, 4);
+        assert_eq!(output.request_cache_read_tokens, 850);
+        assert_eq!(output.request_cache_write_tokens, 2);
     }
 }
 

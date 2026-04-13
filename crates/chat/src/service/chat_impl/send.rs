@@ -30,7 +30,7 @@ use crate::{
     types::*,
 };
 
-use super::*;
+use {super::*, crate::service::build_persisted_assistant_message};
 
 impl LiveChatService {
     #[tracing::instrument(skip(self, params), fields(session_id))]
@@ -378,27 +378,13 @@ impl LiveChatService {
                 )
                 .await;
 
-                let assistant_msg = PersistedMessage::Assistant {
-                    content: assistant_output.text,
-                    created_at: Some(now_ms()),
-                    model: None,
-                    provider: None,
-                    input_tokens: Some(assistant_output.input_tokens),
-                    output_tokens: Some(assistant_output.output_tokens),
-                    cache_read_tokens: Some(assistant_output.cache_read_tokens),
-                    cache_write_tokens: Some(assistant_output.cache_write_tokens),
-                    duration_ms: Some(assistant_output.duration_ms),
-                    request_input_tokens: Some(assistant_output.request_input_tokens),
-                    request_output_tokens: Some(assistant_output.request_output_tokens),
-                    request_cache_read_tokens: Some(assistant_output.request_cache_read_tokens),
-                    request_cache_write_tokens: Some(assistant_output.request_cache_write_tokens),
-                    tool_calls: None,
-                    reasoning: assistant_output.reasoning,
-                    llm_api_response: assistant_output.llm_api_response,
-                    audio: assistant_output.audio_path,
-                    seq: client_seq,
-                    run_id: Some(run_id_clone.clone()),
-                };
+                let assistant_msg = build_persisted_assistant_message(
+                    assistant_output,
+                    None,
+                    None,
+                    client_seq,
+                    Some(run_id_clone.clone()),
+                );
                 if let Err(e) = session_store
                     .append(&session_key_clone, &assistant_msg.to_value())
                     .await
@@ -1158,27 +1144,13 @@ impl LiveChatService {
 
             // Persist assistant response (even empty ones — needed for LLM history coherence).
             if let Some(assistant_output) = assistant_text {
-                let assistant_msg = PersistedMessage::Assistant {
-                    content: assistant_output.text,
-                    created_at: Some(now_ms()),
-                    model: Some(model_id.clone()),
-                    provider: Some(provider_name.clone()),
-                    input_tokens: Some(assistant_output.input_tokens),
-                    output_tokens: Some(assistant_output.output_tokens),
-                    cache_read_tokens: Some(assistant_output.cache_read_tokens),
-                    cache_write_tokens: Some(assistant_output.cache_write_tokens),
-                    duration_ms: Some(assistant_output.duration_ms),
-                    request_input_tokens: Some(assistant_output.request_input_tokens),
-                    request_output_tokens: Some(assistant_output.request_output_tokens),
-                    request_cache_read_tokens: Some(assistant_output.request_cache_read_tokens),
-                    request_cache_write_tokens: Some(assistant_output.request_cache_write_tokens),
-                    tool_calls: None,
-                    reasoning: assistant_output.reasoning,
-                    llm_api_response: assistant_output.llm_api_response,
-                    audio: assistant_output.audio_path,
-                    seq: client_seq,
-                    run_id: Some(run_id_clone.clone()),
-                };
+                let assistant_msg = build_persisted_assistant_message(
+                    assistant_output,
+                    Some(model_id.clone()),
+                    Some(provider_name.clone()),
+                    client_seq,
+                    Some(run_id_clone.clone()),
+                );
                 if let Err(e) = session_store
                     .append(&session_key_clone, &assistant_msg.to_value())
                     .await

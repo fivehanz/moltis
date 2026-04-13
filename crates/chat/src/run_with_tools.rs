@@ -1022,31 +1022,24 @@ pub(crate) async fn run_with_tools(
                 None
             };
 
-            let final_payload = ChatFinalBroadcast {
-                run_id: run_id.to_string(),
-                session_key: session_key.to_string(),
-                state: "final",
-                text: display_text.clone(),
-                model: provider_ref.id().to_string(),
-                provider: provider_name.to_string(),
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_read_tokens: usage.cache_read_tokens,
-                cache_write_tokens: usage.cache_write_tokens,
-                duration_ms: run_started.elapsed().as_millis() as u64,
-                request_input_tokens: Some(request_usage.input_tokens),
-                request_output_tokens: Some(request_usage.output_tokens),
-                request_cache_read_tokens: Some(request_usage.cache_read_tokens),
-                request_cache_write_tokens: Some(request_usage.cache_write_tokens),
-                message_index: assistant_message_index,
-                reply_medium: desired_reply_medium,
-                iterations: Some(iterations),
-                tool_calls_made: Some(tool_calls_made),
-                audio: audio_path.clone(),
+            let final_payload = build_chat_final_broadcast(
+                run_id,
+                session_key,
+                display_text.clone(),
+                provider_ref.id().to_string(),
+                provider_name.to_string(),
+                usage.clone(),
+                run_started.elapsed().as_millis() as u64,
+                Some(request_usage.clone()),
+                assistant_message_index,
+                desired_reply_medium,
+                Some(iterations),
+                Some(tool_calls_made),
+                audio_path.clone(),
                 audio_warning,
-                reasoning: reasoning.clone(),
-                seq: client_seq,
-            };
+                reasoning.clone(),
+                client_seq,
+            );
             #[allow(clippy::unwrap_used)] // serializing known-valid struct
             let payload_val = serde_json::to_value(&final_payload).unwrap();
             terminal_runs.write().await.insert(run_id.to_string());
@@ -1068,21 +1061,15 @@ pub(crate) async fn run_with_tools(
                 )
                 .await;
             }
-            Some(AssistantTurnOutput {
-                text: display_text,
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_read_tokens: usage.cache_read_tokens,
-                cache_write_tokens: usage.cache_write_tokens,
-                duration_ms: run_started.elapsed().as_millis() as u64,
-                request_input_tokens: request_usage.input_tokens,
-                request_output_tokens: request_usage.output_tokens,
-                request_cache_read_tokens: request_usage.cache_read_tokens,
-                request_cache_write_tokens: request_usage.cache_write_tokens,
+            Some(build_assistant_turn_output(
+                display_text,
+                usage,
+                run_started.elapsed().as_millis() as u64,
+                request_usage,
                 audio_path,
                 reasoning,
                 llm_api_response,
-            })
+            ))
         },
         Err(e) => {
             let error_str = e.to_string();
