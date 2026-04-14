@@ -19,6 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260414.01] - 2026-04-14
+### Changed
+- [node-exec] Merge node exec types into owners
+- [web] Remove prompt memory toolbar from chat header
+
+
+### Fixed
+- [web] Harden flaky e2e tests for cron delete and identity autosave
+- [sandbox] Mask /proc and /sys host metadata in Docker/Podman containers
+- [sandbox] Address PR review — strengthen test assertions
+- [channels] Use rand::RngExt for random_range after rand 0.10 upgrade
+- Update rand 0.10 imports across workspace
+- [onboarding] Surface local-llm and LM Studio in recommended providers
+- [auth] Update password minimum length strings from 8 to 12 characters
+
 ## [20260413.06] - 2026-04-13
 ### Fixed
 - [web] Gate openai live e2e server on api key
