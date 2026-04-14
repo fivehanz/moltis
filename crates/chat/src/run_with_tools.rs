@@ -144,6 +144,7 @@ pub(crate) async fn run_with_tools(
             runtime_context,
             persona.memory_text.as_deref(),
             prompt_limits,
+            persona.guidelines_text.as_deref(),
         )
         .prompt
     } else {
@@ -158,6 +159,7 @@ pub(crate) async fn run_with_tools(
             runtime_context,
             persona.memory_text.as_deref(),
             prompt_limits,
+            persona.guidelines_text.as_deref(),
         )
         .prompt
     };

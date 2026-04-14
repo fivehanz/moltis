@@ -1041,3 +1041,31 @@ enabled = true
         "[memory] must come after channel sub-tables"
     );
 }
+
+
+#[test]
+fn load_guidelines_md_for_agent_falls_back_to_root() {
+    let _guard = DATA_DIR_TEST_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    set_data_dir(dir.path().to_path_buf());
+
+    let docs_dir = dir.path().join("docs/moltis");
+    std::fs::create_dir_all(&docs_dir).unwrap();
+    std::fs::write(docs_dir.join("GUIDELINES.md"), "Root guidelines").unwrap();
+    assert_eq!(
+        load_guidelines_md_for_agent("test-agent").as_deref(),
+        Some("Root guidelines")
+    );
+
+    let agent_dir = dir.path().join("agents/test-agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("GUIDELINES.md"), "Agent-specific guidelines")
+        .unwrap();
+    assert_eq!(
+        load_guidelines_md_for_agent("test-agent").as_deref(),
+        Some("Agent-specific guidelines")
+    );
+
+    clear_data_dir();
+}
+
