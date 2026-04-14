@@ -3394,11 +3394,7 @@ function WhatsAppForm({ onConnected, error, setError }) {
 
 	function onStartPairing(e) {
 		e.preventDefault();
-		var id = accountId.trim();
-		if (!id) {
-			setError("Account ID is required.");
-			return;
-		}
+		var id = accountId.trim() || "main";
 		var advancedPatch = parseChannelConfigPatch(advancedConfig);
 		if (!advancedPatch.ok) {
 			setError(advancedPatch.error);
@@ -3476,19 +3472,18 @@ function WhatsAppForm({ onConnected, error, setError }) {
 	return html`<form onSubmit=${onStartPairing} class="flex flex-col gap-3">
 		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
 			<span class="font-medium text-[var(--text-strong)]">Link your WhatsApp</span>
-			<span>1. Choose an account ID below (any name you like)</span>
-			<span>2. Click "Start Pairing" to generate a QR code</span>
-			<span>3. Open WhatsApp > Settings > Linked Devices > Link a Device</span>
-			<span>4. Scan the QR code to connect</span>
+			<span>1. Click "Start Pairing" to generate a QR code</span>
+			<span>2. Open WhatsApp > Settings > Linked Devices > Link a Device</span>
+			<span>3. Scan the QR code to connect</span>
 			<span class="mt-1 italic">Only new messages will be processed — past conversations are not synced.</span>
 		</div>
 		<div>
-			<label class="text-xs text-[var(--muted)] mb-1 block">Account ID</label>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Account ID (optional)</label>
 			<input type="text" class="provider-key-input w-full"
 				value=${accountId} onInput=${(e) => setAccountId(e.target.value)}
-				placeholder="e.g. my-whatsapp"
+				placeholder="main"
 				autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"
-				name="whatsapp_account_id" autofocus />
+				name="whatsapp_account_id" />
 		</div>
 		<div>
 			<label class="text-xs text-[var(--muted)] mb-1 block">DM Policy</label>

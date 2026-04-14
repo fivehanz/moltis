@@ -1752,11 +1752,7 @@ function AddWhatsAppModal() {
 
 	function onStartPairing(e) {
 		e.preventDefault();
-		var accountId = accountDraft.value.trim();
-		if (!accountId) {
-			error.value = "Account ID is required.";
-			return;
-		}
+		var accountId = accountDraft.value.trim() || "main";
 		var form = e.target.closest(".channel-form");
 		var advancedPatch = parseChannelConfigPatch(advancedConfigPatch.value);
 		if (!advancedPatch.ok) {
@@ -1867,7 +1863,7 @@ function AddWhatsAppModal() {
         </div>
         <${ConnectionModeHint} type="whatsapp" />
         <label class="text-xs text-[var(--muted)]">Account ID</label>
-        <input data-field="accountId" type="text" placeholder="e.g. my-whatsapp" class="channel-input"
+        <input data-field="accountId" type="text" placeholder="main" class="channel-input"
           value=${accountDraft.value}
           onInput=${(e) => {
 						accountDraft.value = e.target.value;
