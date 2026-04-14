@@ -1128,36 +1128,68 @@ async fn chat_history_query_forwards_session_key() {
     assert_eq!(params["sessionKey"], "sess1");
 }
 
-#[tokio::test]
-async fn chat_send_requires_session_key() {
+/// Helper: assert that a query/mutation missing a required arg returns a GraphQL error.
+async fn assert_requires_session_key(query: &str, label: &str) {
     let mock = MockDispatch::new();
     let (schema, _) = build_test_schema(mock);
-
-    let res = schema
-        .execute(Request::new(
-            r#"mutation { chat { send(message: "Hello") { ok } } }"#,
-        ))
-        .await;
-
+    let res = schema.execute(Request::new(query)).await;
     assert!(
         !res.errors.is_empty(),
-        "send without sessionKey should fail"
+        "{label} without sessionKey should fail"
     );
 }
 
 #[tokio::test]
+async fn chat_send_requires_session_key() {
+    assert_requires_session_key(
+        r#"mutation { chat { send(message: "Hello") { ok } } }"#,
+        "send",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn chat_abort_requires_session_key() {
+    assert_requires_session_key(r#"mutation { chat { abort { ok } } }"#, "abort").await;
+}
+
+#[tokio::test]
+async fn chat_cancel_queued_requires_session_key() {
+    assert_requires_session_key(
+        r#"mutation { chat { cancelQueued { ok } } }"#,
+        "cancelQueued",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn chat_clear_requires_session_key() {
+    assert_requires_session_key(r#"mutation { chat { clear { ok } } }"#, "clear").await;
+}
+
+#[tokio::test]
+async fn chat_compact_requires_session_key() {
+    assert_requires_session_key(r#"mutation { chat { compact { ok } } }"#, "compact").await;
+}
+
+#[tokio::test]
 async fn chat_history_requires_session_key() {
-    let mock = MockDispatch::new();
-    let (schema, _) = build_test_schema(mock);
+    assert_requires_session_key(r#"query { chat { history } }"#, "history").await;
+}
 
-    let res = schema
-        .execute(Request::new(r#"query { chat { history } }"#))
-        .await;
+#[tokio::test]
+async fn chat_context_requires_session_key() {
+    assert_requires_session_key(r#"query { chat { context } }"#, "context").await;
+}
 
-    assert!(
-        !res.errors.is_empty(),
-        "history without sessionKey should fail"
-    );
+#[tokio::test]
+async fn chat_raw_prompt_requires_session_key() {
+    assert_requires_session_key(r#"query { chat { rawPrompt { prompt } } }"#, "rawPrompt").await;
+}
+
+#[tokio::test]
+async fn chat_full_context_requires_session_key() {
+    assert_requires_session_key(r#"query { chat { fullContext } }"#, "fullContext").await;
 }
 
 #[tokio::test]
@@ -1166,10 +1198,8 @@ async fn chat_event_subscription_requires_session_key() {
     let (schema, _) = build_test_schema(mock);
 
     let mut stream = schema.execute_stream(Request::new(r#"subscription { chatEvent { data } }"#));
-    let resp = timeout(Duration::from_millis(100), stream.next())
-        .await
-        .expect("timeout")
-        .expect("subscription response");
+    // Validation errors are synchronous — the stream yields immediately then terminates.
+    let resp = stream.next().await.expect("subscription response");
 
     assert!(
         !resp.errors.is_empty(),
@@ -1438,11 +1468,16 @@ async fn chat_event_subscription_filters_by_session_key() {
     ));
     let _ = timeout(Duration::from_millis(20), stream.next()).await;
 
+    // Different session — should be skipped.
     tx.send((
         "chat".to_string(),
         json!({ "sessionKey": "other", "text": "skip" }),
     ))
     .expect("broadcast other");
+    // No sessionKey in payload — should be dropped.
+    tx.send(("chat".to_string(), json!({ "text": "no-key" })))
+        .expect("broadcast no-key");
+    // Matching session — should be delivered.
     tx.send((
         "chat".to_string(),
         json!({ "sessionKey": "s1", "text": "deliver" }),

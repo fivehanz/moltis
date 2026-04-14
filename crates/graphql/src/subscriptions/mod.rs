@@ -32,10 +32,10 @@ impl SubscriptionRoot {
         Ok(async_stream::stream! {
             while let Ok((event_name, payload)) = rx.recv().await {
                 if event_name == "chat" {
-                    if let Some(event_sk) = payload.get("sessionKey").and_then(|v| v.as_str())
-                        && event_sk != session_key
-                    {
-                        continue;
+                    match payload.get("sessionKey").and_then(|v| v.as_str()) {
+                        Some(event_sk) if event_sk != session_key => continue,
+                        None => continue,
+                        _ => {}
                     }
                     yield GenericEvent::from(payload);
                 }
