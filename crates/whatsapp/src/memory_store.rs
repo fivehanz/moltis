@@ -37,6 +37,8 @@ pub struct MemoryStore {
     signed_prekeys: Arc<DashMap<u32, Vec<u8>>>,
     sender_keys: Arc<DashMap<String, Vec<u8>>>,
     sync_keys: Arc<DashMap<Vec<u8>, AppStateSyncKey>>,
+    /// Most recently stored sync key ID (DashMap iteration order is non-deterministic).
+    latest_sync_key_id: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
     app_state_versions: Arc<DashMap<String, HashState>>,
     /// Keyed by `"{name}:{version}:{hex(index_mac)}"`.
     mutation_macs: Arc<DashMap<String, Vec<u8>>>,
@@ -167,6 +169,10 @@ impl AppSyncStore for MemoryStore {
 
     async fn set_sync_key(&self, key_id: &[u8], key: AppStateSyncKey) -> Result<()> {
         self.sync_keys.insert(key_id.to_vec(), key);
+        *self
+            .latest_sync_key_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(key_id.to_vec());
         Ok(())
     }
 
@@ -232,7 +238,11 @@ impl AppSyncStore for MemoryStore {
     }
 
     async fn get_latest_sync_key_id(&self) -> Result<Option<Vec<u8>>> {
-        Ok(self.sync_keys.iter().map(|e| e.key().clone()).last())
+        Ok(self
+            .latest_sync_key_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 }
 
@@ -396,10 +406,7 @@ impl ProtocolStore for MemoryStore {
         message_id: &str,
         payload: &[u8],
     ) -> Result<()> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let key = format!("{chat_jid}:{message_id}");
         self.sent_messages.insert(key, (payload.to_vec(), now));
         Ok(())

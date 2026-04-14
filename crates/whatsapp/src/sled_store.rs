@@ -5,7 +5,7 @@
 //!
 //! Each account gets its own sled database at `<data_dir>/whatsapp/<account_id>/`.
 
-use std::{fmt::Write, path::Path, sync::atomic::AtomicI32, time::SystemTime};
+use std::{fmt::Write, path::Path, sync::atomic::AtomicI32};
 
 use {
     async_trait::async_trait,
@@ -580,10 +580,7 @@ impl ProtocolStore for SledStore {
         message_id: &str,
         payload: &[u8],
     ) -> Result<()> {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let key = format!("{chat_jid}:{message_id}");
         let val = encode_persistent(&(payload.to_vec(), now))?;
         self.sent_messages
@@ -596,7 +593,7 @@ impl ProtocolStore for SledStore {
         let key = format!("{chat_jid}:{message_id}");
         match self.sent_messages.remove(key.as_bytes()).map_err(db_err)? {
             Some(v) => {
-                let (payload, _ts): (Vec<u8>, u64) = decode_persistent(&v)?;
+                let (payload, _ts): (Vec<u8>, i64) = decode_persistent(&v)?;
                 Ok(Some(payload))
             },
             None => Ok(None),
@@ -608,8 +605,8 @@ impl ProtocolStore for SledStore {
         let mut keys_to_remove = Vec::new();
         for entry in self.sent_messages.iter() {
             let (k, v) = entry.map_err(db_err)?;
-            let (_payload, ts): (Vec<u8>, u64) = decode_persistent(&v)?;
-            if (ts as i64) < cutoff_timestamp {
+            let (_payload, ts): (Vec<u8>, i64) = decode_persistent(&v)?;
+            if ts < cutoff_timestamp {
                 keys_to_remove.push(k);
             }
         }
