@@ -3350,7 +3350,7 @@ function WhatsAppForm({ onConnected, error, setError }) {
 			try {
 				var res = await sendRpc("channels.status");
 				if (!res?.ok) return;
-				var ch = (res.result?.channels || []).find(
+				var ch = (res.payload?.channels || []).find(
 					(c) => c.type === "whatsapp" && c.account_id === id,
 				);
 				if (ch?.extra?.qr_data && !qrData) {

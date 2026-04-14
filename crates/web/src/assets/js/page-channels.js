@@ -1795,7 +1795,7 @@ function AddWhatsAppModal() {
 					try {
 						var st = await sendRpc("channels.status");
 						if (!st?.ok) return;
-						var ch = (st.result?.channels || []).find(
+						var ch = (st.payload?.channels || []).find(
 							(c) => c.type === "whatsapp" && c.account_id === accountId,
 						);
 						if (ch?.extra?.qr_data && !waQrData.value) {
