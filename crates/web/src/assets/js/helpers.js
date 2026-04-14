@@ -2,6 +2,23 @@
 import { hasTranslation, t } from "./i18n.js";
 import * as S from "./state.js";
 
+/**
+ * Extract the highest version number from a model ID for sorting.
+ * e.g. "gpt-5.4-mini" → 5.4, "claude-opus-4-6-20260301" → 20260301, "o4-mini" → 4
+ * For models with a date suffix the date itself becomes the sort key, which is
+ * intentional — newer dates rank higher.  Returns 0 when no number is found.
+ */
+export function modelVersionScore(id) {
+	var matches = (id || "").match(/\d+(?:\.\d+)?/g);
+	if (!matches) return 0;
+	var max = 0;
+	for (var m of matches) {
+		var v = Number.parseFloat(m);
+		if (v > max) max = v;
+	}
+	return max;
+}
+
 function translatedOrFallback(key, opts, fallback) {
 	if (!key) return fallback;
 	if (!hasTranslation(key, opts)) return fallback;
@@ -225,9 +242,12 @@ export function localizedApiErrorMessage(payload, fallbackMessage) {
 
 export function localizeRpcError(error) {
 	if (!error) return error;
+	// When the server provides a specific message (not just an error code),
+	// preserve it as `serverMessage` so callers like model probes can show
+	// the precise backend reason instead of a generic locale string.
 	var message = localizedRpcErrorMessage(error);
 	if (error.message === message) return error;
-	return Object.assign({}, error, { message: message });
+	return Object.assign({}, error, { message: message, serverMessage: error.message });
 }
 
 export function localizeStructuredError(error) {
@@ -242,6 +262,17 @@ export function formatTokens(n) {
 	if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
 	if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
 	return String(n);
+}
+
+export function formatAssistantTokenUsage(inputTokens, outputTokens, cacheReadTokens) {
+	var input = Number(inputTokens || 0);
+	var output = Number(outputTokens || 0);
+	var cached = Number(cacheReadTokens || 0);
+	var inputText = `${formatTokens(input)} in`;
+	if (cached > 0) {
+		inputText += ` (${formatTokens(cached)} cached)`;
+	}
+	return `${inputText} / ${formatTokens(output)} out`;
 }
 
 var TOKEN_SPEED_SLOW_TPS = 10;
@@ -403,8 +434,21 @@ export function updateCountdown(el, resetsAtMs) {
 export function toolCallSummary(name, args, executionMode) {
 	if (!args) return name || "tool";
 	switch (name) {
-		case "exec":
-			return args.command || "exec";
+		case "exec": {
+			var command = args.command || "exec";
+			var nodeRef = typeof args.node === "string" ? args.node.trim() : "";
+			if (!nodeRef) return command;
+			if (nodeRef.startsWith("ssh:target:")) {
+				return `${command} [SSH target]`;
+			}
+			if (nodeRef.startsWith("ssh:")) {
+				return `${command} [SSH: ${nodeRef.slice(4)}]`;
+			}
+			if (nodeRef.includes("@")) {
+				return `${command} [SSH: ${nodeRef}]`;
+			}
+			return `${command} [node: ${nodeRef}]`;
+		}
 		case "web_fetch":
 			return `web_fetch ${args.url || ""}`.trim();
 		case "web_search":

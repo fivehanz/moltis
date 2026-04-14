@@ -350,6 +350,21 @@ pub struct ContextFile {
     pub path: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub warnings: Option<Vec<ContextWarning>>,
+}
+
+#[derive(Debug, SimpleObject, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextWarning {
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 // ── Channels ────────────────────────────────────────────────────────────────
@@ -434,6 +449,8 @@ pub struct ModelInfo {
     pub supports_tools: Option<bool>,
     #[serde(default)]
     pub supports_vision: Option<bool>,
+    #[serde(default)]
+    pub supports_reasoning: Option<bool>,
     #[serde(default)]
     pub supports_streaming: Option<bool>,
     #[serde(default)]
@@ -972,7 +989,15 @@ pub struct SecurityScanResult {
 #[serde(rename_all = "camelCase")]
 pub struct MemoryConfig {
     #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub agent_write_mode: Option<String>,
+    #[serde(default)]
+    pub user_profile_write_mode: Option<String>,
+    #[serde(default)]
     pub backend: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
     #[serde(default)]
     pub citations: Option<String>,
     #[serde(default)]
@@ -980,7 +1005,11 @@ pub struct MemoryConfig {
     #[serde(default)]
     pub llm_reranking: Option<bool>,
     #[serde(default)]
-    pub session_export: Option<bool>,
+    pub search_merge_strategy: Option<String>,
+    #[serde(default)]
+    pub session_export: Option<String>,
+    #[serde(default)]
+    pub prompt_memory_mode: Option<String>,
     #[serde(default)]
     pub qmd_feature_enabled: Option<bool>,
 }

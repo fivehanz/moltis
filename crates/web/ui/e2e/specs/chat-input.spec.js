@@ -6,11 +6,29 @@ function isRetryableRpcError(message) {
 	return message.includes("WebSocket not connected") || message.includes("WebSocket disconnected");
 }
 
+function isNoProvidersConfiguredResponse(response) {
+	// `localizeRpcError` in helpers.js replaces `error.message` with a locale
+	// string (e.g. "An internal server error occurred.") and moves the original
+	// backend message to `serverMessage`. Check both so the test still skips
+	// when providers are unconfigured.
+	const err = response?.error;
+	const message = err?.serverMessage || err?.message || "";
+	return (
+		err?.code === "UNAVAILABLE" ||
+		message.includes("no LLM providers configured") ||
+		message.includes("chat not configured")
+	);
+}
+
+function ignoreWaitError() {
+	return "ignored";
+}
+
 async function sendRpcFromPage(page, method, params) {
 	let lastResponse = null;
 	for (let attempt = 0; attempt < 30; attempt++) {
 		if (attempt > 0) {
-			await waitForWsConnected(page);
+			await waitForWsConnected(page, 5_000).catch(ignoreWaitError);
 		}
 		lastResponse = await page
 			.evaluate(
@@ -33,6 +51,102 @@ async function sendRpcFromPage(page, method, params) {
 		if (!isRetryableRpcError(lastResponse?.error?.message)) return lastResponse;
 	}
 	return lastResponse;
+}
+
+async function waitForWsConnectedIfPossible(page) {
+	await waitForWsConnected(page, 5_000).catch(ignoreWaitError);
+}
+
+async function mockFullContextRpc(page) {
+	await page.evaluate(async () => {
+		var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+		if (!appScript) throw new Error("app module script not found");
+		var appUrl = new URL(appScript.src, window.location.origin);
+		var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+		var stateModule = await import(`${prefix}js/state.js`);
+		var ws = stateModule.ws;
+		if (!ws) throw new Error("websocket unavailable");
+
+		if (!window.__origFullContextWsSend) {
+			window.__origFullContextWsSend = ws.send.bind(ws);
+		}
+		window.__mockPromptMemoryRefreshCount = 0;
+		window.__mockPromptMemoryVersion = 1;
+
+		function mockPromptMemory() {
+			return {
+				mode: "frozen-at-session-start",
+				snapshotActive: true,
+				present: true,
+				chars: window.__mockPromptMemoryVersion === 1 ? 12 : 24,
+				path: window.__mockPromptMemoryVersion === 1 ? "/tmp/MEMORY-v1.md" : "/tmp/MEMORY-v2.md",
+				fileSource: "root_workspace",
+			};
+		}
+
+		function resolvePending(id, payload) {
+			var resolver = stateModule.pending?.[id];
+			if (typeof resolver !== "function") return false;
+			delete stateModule.pending[id];
+			resolver({ ok: true, payload });
+			return true;
+		}
+
+		function handleMockPromptMemoryRpc(parsed) {
+			if (parsed?.method === "chat.context") {
+				return resolvePending(parsed.id, {
+					session: { key: "main", messageCount: 2, model: "demo-model" },
+					supportsTools: true,
+					promptMemory: mockPromptMemory(),
+				});
+			}
+			if (parsed?.method === "chat.full_context") {
+				return resolvePending(parsed.id, {
+					messageCount: 2,
+					systemPromptChars: 42,
+					totalChars: 128,
+					promptMemory: mockPromptMemory(),
+					messages: [
+						{ role: "user", content: "How are you?" },
+						{
+							role: "assistant",
+							content: "Doing fine.",
+							tool_calls: [{ function: { name: "demo_tool", arguments: '{"hello":"world"}' } }],
+						},
+					],
+					llmOutputs: [{ text: "assistant raw output" }],
+				});
+			}
+			if (parsed?.method === "chat.prompt_memory.refresh") {
+				window.__mockPromptMemoryRefreshCount += 1;
+				window.__mockPromptMemoryVersion = 2;
+				return resolvePending(parsed.id, {
+					ok: true,
+					sessionKey: "main",
+					agentId: "main",
+					snapshotCleared: true,
+					promptMemory: mockPromptMemory(),
+				});
+			}
+			return false;
+		}
+
+		ws.send = (payload) => {
+			try {
+				var parsed = JSON.parse(payload);
+				if (handleMockPromptMemoryRpc(parsed)) {
+					return;
+				}
+			} catch (_err) {
+				// Fall through to the original sender.
+			}
+			return window.__origFullContextWsSend(payload);
+		};
+	});
+}
+
+async function getMockPromptMemoryRefreshCount(page) {
+	return await page.evaluate(() => window.__mockPromptMemoryRefreshCount || 0);
 }
 
 async function waitForChatInputReady(page) {
@@ -64,26 +178,37 @@ async function getChatSeq(page) {
 	});
 }
 
+async function closeFullContextIfOpen(page, modal) {
+	if (!(await modal.isVisible().catch(() => false))) return;
+	await page.locator("#fullContextModalCloseBtn").click();
+	await expect(modal).toBeHidden({ timeout: 8_000 });
+}
+
+async function fullContextPanelState(copyBtn, copiedBtn, downloadBtn, llmOutputBtn, failedMsg) {
+	if ((await copyBtn.isVisible().catch(() => false)) || (await copiedBtn.isVisible().catch(() => false))) {
+		return "controls";
+	}
+	if ((await downloadBtn.isVisible().catch(() => false)) && (await llmOutputBtn.isVisible().catch(() => false))) {
+		return "controls";
+	}
+	if (await failedMsg.isVisible().catch(() => false)) return "failed";
+	return "loading";
+}
+
 async function openFullContextWithRetry(page) {
 	const chatMoreModal = page.locator("#chatMoreModal");
 	const fullContextModal = page.locator("#fullContextModal");
 	const toggleBtn = page.locator("#fullContextBtn");
 	const panel = page.locator("#fullContextPanel");
 	const copyBtn = panel.getByRole("button", { name: "Copy", exact: true });
+	const copiedBtn = panel.getByRole("button", { name: "Copied!", exact: true });
+	const downloadBtn = panel.getByRole("button", { name: "Download", exact: true });
+	const llmOutputBtn = panel.getByRole("button", { name: "LLM output", exact: true });
 	const failedMsg = panel.getByText("Failed to build context", { exact: true });
 
 	for (let attempt = 0; attempt < 5; attempt++) {
-		await waitForWsConnected(page);
-		const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", {});
-		const noProvidersConfigured =
-			fullContextRpc?.error?.code === "UNAVAILABLE" ||
-			fullContextRpc?.error?.message?.includes("no LLM providers configured") ||
-			fullContextRpc?.error?.message?.includes("chat not configured");
-
-		if (await fullContextModal.isVisible().catch(() => false)) {
-			await page.locator("#fullContextModalCloseBtn").click();
-			await expect(fullContextModal).toBeHidden({ timeout: 8_000 });
-		}
+		await waitForWsConnectedIfPossible(page);
+		await closeFullContextIfOpen(page, fullContextModal);
 
 		await openChatMoreModal(page);
 		await expect(toggleBtn).toBeVisible({ timeout: 8_000 });
@@ -93,21 +218,23 @@ async function openFullContextWithRetry(page) {
 		await expect(panel).toBeVisible();
 
 		const result = await expect
-			.poll(
-				async () => {
-					if (await copyBtn.isVisible().catch(() => false)) return "copy";
-					if (await failedMsg.isVisible().catch(() => false)) return "failed";
-					return "loading";
-				},
-				{ timeout: 8_000 },
-			)
-			.toBe("copy")
-			.then(() => "copy")
+			.poll(async () => await fullContextPanelState(copyBtn, copiedBtn, downloadBtn, llmOutputBtn, failedMsg), {
+				timeout: 12_000,
+			})
+			.toBe("controls")
+			.then(() => "controls")
 			.catch(() => "failed");
 
-		if (result === "copy") return copyBtn;
-		if (result === "failed" && noProvidersConfigured) {
-			return null;
+		if (result === "controls") {
+			if (await copyBtn.isVisible().catch(() => false)) return copyBtn;
+			if (await copiedBtn.isVisible().catch(() => false)) return copiedBtn;
+			return copyBtn;
+		}
+		if (result === "failed") {
+			const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", {});
+			if (isNoProvidersConfiguredResponse(fullContextRpc)) {
+				return null;
+			}
 		}
 	}
 
@@ -148,6 +275,69 @@ test.describe("Chat input and slash commands", () => {
 		await expect(chatInput).toBeVisible();
 		await chatInput.focus();
 		await expect(chatInput).toBeFocused();
+	});
+
+	test("chat.full_context reports workspace prompt truncation", async ({ page }) => {
+		const originalResponse = await sendRpcFromPage(page, "agents.files.get", {
+			agent_id: "main",
+			path: "AGENTS.md",
+		});
+		const originalContent = originalResponse?.ok ? originalResponse.payload?.content || "" : "";
+		const oversizedContent = `${"A".repeat(32_050)}\n`;
+
+		try {
+			const setResponse = await sendRpcFromPage(page, "agents.files.set", {
+				agent_id: "main",
+				path: "AGENTS.md",
+				content: oversizedContent,
+			});
+			expect(setResponse?.ok).toBe(true);
+
+			const fullContextRpc = await sendRpcFromPage(page, "chat.full_context", {});
+			if (isNoProvidersConfiguredResponse(fullContextRpc)) {
+				return;
+			}
+			expect(fullContextRpc?.ok).toBe(true);
+			expect(fullContextRpc.payload?.truncated).toBe(true);
+			expect(Array.isArray(fullContextRpc.payload?.workspaceFiles)).toBe(true);
+			const agentsFile = fullContextRpc.payload.workspaceFiles.find((file) => file?.name === "AGENTS.md");
+			expect(agentsFile?.truncated).toBe(true);
+			expect(Number(agentsFile?.original_chars || 0)).toBeGreaterThan(32_000);
+
+			const triggerBtn = await openFullContextWithRetry(page);
+			if (triggerBtn) {
+				const panel = page.locator("#fullContextPanel");
+				await expect(panel).toContainText("AGENTS.md", { timeout: 10_000 });
+				await expect(panel).toContainText("truncated by", { timeout: 10_000 });
+			}
+		} finally {
+			await sendRpcFromPage(page, "agents.files.set", {
+				agent_id: "main",
+				path: "AGENTS.md",
+				content: originalContent,
+			});
+		}
+	});
+
+	test("full context modal shows prompt memory status and can refresh frozen snapshots", async ({ page }) => {
+		await mockFullContextRpc(page);
+
+		const triggerBtn = await openFullContextWithRetry(page);
+		expect(triggerBtn).not.toBe(false);
+		if (triggerBtn === null) {
+			return;
+		}
+
+		const panel = page.locator("#fullContextPanel");
+		await expect(panel).toContainText("Prompt memory: Frozen at session start", { timeout: 10_000 });
+		await expect(panel).toContainText("/tmp/MEMORY-v1.md", { timeout: 10_000 });
+
+		const refreshBtn = panel.getByRole("button", { name: "Refresh memory", exact: true });
+		await expect(refreshBtn).toBeVisible();
+		await refreshBtn.click();
+
+		await expect.poll(async () => await getMockPromptMemoryRefreshCount(page), { timeout: 10_000 }).toBe(1);
+		await expect(panel).toContainText("/tmp/MEMORY-v2.md", { timeout: 10_000 });
 	});
 
 	test('typing "/" shows slash command menu', async ({ page }) => {
@@ -311,6 +501,25 @@ test.describe("Chat input and slash commands", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("assistant token usage formatter shows cached input counts when present", async ({ page }) => {
+		const formatted = await page.evaluate(async () => {
+			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) throw new Error("app module script not found");
+			var appUrl = new URL(appScript.src, window.location.origin);
+			var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			var helpers = await import(`${prefix}js/helpers.js`);
+			return {
+				cached: helpers.formatAssistantTokenUsage(12400, 320, 11800),
+				uncached: helpers.formatAssistantTokenUsage(900, 45, 0),
+			};
+		});
+
+		expect(formatted).toEqual({
+			cached: "12.4K in (11.8K cached) / 320 out",
+			uncached: "900 in / 45 out",
+		});
+	});
+
 	test("token bar context-left uses current request input, not cumulative totals", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 
@@ -363,6 +572,7 @@ test.describe("Chat input and slash commands", () => {
 
 	test("full context copy button uses small button style", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
+		await mockFullContextRpc(page);
 		const copyBtn = await openFullContextWithRetry(page);
 		if (copyBtn === null) {
 			await expect(
@@ -426,6 +636,7 @@ test.describe("Chat input and slash commands", () => {
 
 	test("full context download button produces .jsonl file", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
+		await mockFullContextRpc(page);
 		const copyBtn = await openFullContextWithRetry(page);
 		if (copyBtn === null) {
 			await expect(

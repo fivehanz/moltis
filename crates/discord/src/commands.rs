@@ -102,9 +102,14 @@ async fn handle_slash_command(
         account_id: account_id.to_string(),
         chat_id: command.channel_id.to_string(),
         message_id: None,
+        thread_id: None,
     };
+    let sender_id = command.user.id.to_string();
 
-    let response_text = match sink.dispatch_command(&command.data.name, reply_to).await {
+    let response_text = match sink
+        .dispatch_command(&command.data.name, reply_to, Some(&sender_id))
+        .await
+    {
         Ok(response) => response,
         Err(e) => format!("Command failed: {e}"),
     };
@@ -154,6 +159,7 @@ async fn handle_component_interaction(
         account_id: account_id.to_string(),
         chat_id: component.channel_id.to_string(),
         message_id: None,
+        thread_id: None,
     };
 
     match sink.dispatch_interaction(callback_data, reply_to).await {

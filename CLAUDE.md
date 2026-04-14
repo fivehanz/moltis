@@ -30,6 +30,8 @@ fields need updates in `check_semantic_warnings()`.
 
 ## Rust Style and Idioms
 
+- **File size limit: 1,500 lines.** CI enforces this via `scripts/check-file-size.sh`. Split large files into modules by domain. Existing oversize files are allowlisted for incremental decomposition.
+- Do not add implementation code to `mod.rs` or `lib.rs`. Keep those files for module wiring, exports, and crate setup, move real logic into dedicated sibling modules.
 - Use traits for behaviour boundaries. Prefer generics for hot paths, `dyn Trait` for heterogeneous/runtime dispatch.
 - Derive `Default` when all fields have sensible defaults.
 - Use concrete types (`struct`/`enum`) over `serde_json::Value` wherever shape is known.
@@ -108,6 +110,18 @@ Never merge features into a single endpoint.
 **Always respond to approved senders** — no silent failures. Send error/fallback messages
 for LLM failures, transcription failures, unhandled message types. Access control via
 allowlist/OTP flow.
+
+## Adding Channels
+
+When adding a new channel or extending one, follow `docs/channel-integration-checklist.md`.
+
+Minimum bar before shipping:
+- Settings reachable from the web UI, with onboarding coverage if the channel is offered there
+- Advanced JSON config escape hatch for settings without dedicated HTML fields yet
+- Prefer declarative channel field definitions that can drive both HTML forms and advanced JSON guidance
+- Storage behavior explained clearly, web UI channel settings live in `data_dir()/moltis.db`, not `moltis.toml`
+- Config template, validation, docs, and tests updated in the same PR
+- No silent access-control failures, OTP and allowlist behavior must be user-visible
 
 ## Authentication Architecture
 
@@ -223,6 +237,29 @@ Conventional commits: `feat|fix|docs|style|refactor|test|chore(scope): descripti
 - Never overwrite tags — always create new version.
 - Use `./scripts/prepare-release.sh [YYYYMMDD.NN]` for release prep (auto-computes next version if omitted).
 - Deploy template tags updated automatically by CI — don't manually update.
+
+**Release workflow is two phases:**
+
+1. **Prepare & publish** (can be done in a session):
+   ```bash
+   ./scripts/prepare-release.sh          # generates changelog, syncs lockfile
+   git add -A && git commit -m "chore: prepare release YYYYMMDD.NN"
+   git tag YYYYMMDD.NN && git push --follow-tags
+   ```
+   CI then builds artifacts, generates checksums, Sigstore signatures, and creates the GitHub release. This takes time.
+
+2. **GPG-sign** (must happen later, after CI completes):
+   ```bash
+   ./scripts/gpg-sign-release.sh [VERSION]
+   ```
+   This downloads artifacts from the published release, verifies SHA256 checksums, signs each artifact with the maintainer's YubiKey-resident GPG key, and uploads `.asc` files back to the release. **Requires YubiKey tap.**
+
+   Users verify signatures with:
+   ```bash
+   ./scripts/verify-release.sh --version YYYYMMDD.NN
+   ```
+
+**Important:** When asked to create a release, complete phase 1 and remind the maintainer to run `gpg-sign-release.sh` after CI finishes. Do not attempt to run the signing script in the same session — the release artifacts won't exist yet.
 
 ### Lockfile
 
@@ -362,6 +399,20 @@ bd automatically syncs via Dolt:
 - Each write auto-commits to Dolt history
 - Use `bd dolt push`/`bd dolt pull` for remote sync
 - No manual export/import needed!
+
+### Worktrees
+
+If you create a git worktree with plain `git worktree add`, Beads will not
+automatically share the main checkout's `.beads` state. For an existing
+worktree, run:
+
+```bash
+./scripts/bd-worktree-attach.sh
+```
+
+This writes `.beads/redirect` so the worktree uses the main repository's Beads
+database. If you create worktrees through `bd worktree create`, it should set
+up the redirect for you automatically.
 
 ### Important Rules
 

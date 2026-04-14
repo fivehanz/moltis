@@ -1,7 +1,8 @@
 // ── Onboarding wizard ──────────────────────────────────────
 //
 // Multi-step setup page shown to first-time users.
-// Steps: Auth (conditional) → Identity → Provider → Voice (conditional) → Channel → Summary
+// Steps: Auth (conditional) → Identity → Provider → Voice (conditional) →
+// Remote Access → Channel → Summary
 // No new Rust code — all existing RPC methods and REST endpoints.
 
 import { html } from "htm/preact";
@@ -10,15 +11,28 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import {
 	addChannel,
 	buildTeamsEndpoint,
+	channelStorageNote,
 	defaultTeamsBaseUrl,
+	deriveMatrixAccountId,
 	fetchChannelStatus,
 	generateWebhookSecretHex,
+	MATRIX_DEFAULT_HOMESERVER,
+	MATRIX_DOCS_URL,
+	MATRIX_ENCRYPTION_GUIDANCE,
+	matrixAuthModeGuidance,
+	matrixCredentialLabel,
+	matrixCredentialPlaceholder,
+	matrixOwnershipModeGuidance,
+	normalizeMatrixAuthMode,
+	normalizeMatrixOtpCooldown,
+	normalizeMatrixOwnershipMode,
+	parseChannelConfigPatch,
 	validateChannelFields,
 } from "./channel-utils.js";
 import { EmojiPicker } from "./emoji-picker.js";
 import { eventListeners, onEvent } from "./events.js";
 import { get as getGon, refresh as refreshGon } from "./gon.js";
-import { sendRpc } from "./helpers.js";
+import { modelVersionScore, sendRpc } from "./helpers.js";
 import { t } from "./i18n.js";
 import { updateIdentity, validateIdentityFields } from "./identity-utils.js";
 import { detectPasskeyName } from "./passkey-detect.js";
@@ -37,6 +51,7 @@ import {
 	decodeBase64Safe,
 	fetchVoiceProviders,
 	saveVoiceKey,
+	saveVoiceSettings,
 	testTts,
 	toggleVoiceProvider,
 	transcribeAudio,
@@ -83,6 +98,32 @@ function ErrorPanel({ message }) {
 	return html`<div role="alert" class="alert-error-text whitespace-pre-line">
 		<span class="text-[var(--error)] font-medium">${t("onboarding:errorPrefix")}</span> ${message}
 	</div>`;
+}
+
+function ChannelStorageNotice() {
+	return html`<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)]">
+		<span class="font-medium text-[var(--text-strong)]">Storage note.</span> ${channelStorageNote()}
+	</div>`;
+}
+
+function AdvancedConfigPatchField({ value, onInput }) {
+	return html`<details class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3">
+		<summary class="cursor-pointer text-xs font-medium text-[var(--text-strong)]">Advanced Config JSON</summary>
+		<div class="mt-3 flex flex-col gap-2">
+			<div class="text-xs text-[var(--muted)]">
+				Optional JSON object merged on top of the form before save. Use this for channel-specific settings that do not have dedicated fields yet.
+			</div>
+			<div>
+				<label class="text-xs text-[var(--muted)] mb-1 block">Advanced config JSON patch (optional)</label>
+				<textarea
+					name="channel_advanced_config"
+					class="provider-key-input w-full min-h-[140px] font-mono text-xs"
+					value=${value}
+					onInput=${(e) => onInput(e.target.value)}
+					placeholder='{"reply_to_message": true}'></textarea>
+			</div>
+		</div>
+	</details>`;
 }
 
 function StepIndicator({ steps, current }) {
@@ -182,8 +223,8 @@ function AuthStep({ onNext, skippable }) {
 		e.preventDefault();
 		setError(null);
 		if (password.length > 0 || !localhostOnly) {
-			if (password.length < 8) {
-				setError("Password must be at least 8 characters.");
+			if (password.length < 12) {
+				setError("Password must be at least 12 characters.");
 				return;
 			}
 			if (password !== confirm) {
@@ -312,8 +353,8 @@ function AuthStep({ onNext, skippable }) {
 	function onOptionalPassword(e) {
 		e.preventDefault();
 		setError(null);
-		if (optPw.length < 8) {
-			setError("Password must be at least 8 characters.");
+		if (optPw.length < 12) {
+			setError("Password must be at least 12 characters.");
 			return;
 		}
 		if (optPw !== optPwConfirm) {
@@ -433,7 +474,7 @@ function AuthStep({ onNext, skippable }) {
 						class="provider-key-input w-full"
 						value=${optPw}
 						onInput=${(e) => setOptPw(e.target.value)}
-						placeholder="At least 8 characters"
+						placeholder="At least 12 characters"
 						autofocus
 					/>
 				</div>
@@ -544,7 +585,7 @@ function AuthStep({ onNext, skippable }) {
 						class="provider-key-input w-full"
 						value=${password}
 						onInput=${(e) => setPassword(e.target.value)}
-						placeholder=${localhostOnly ? "Optional on localhost" : "At least 8 characters"}
+						placeholder=${localhostOnly ? "Optional on localhost" : "At least 12 characters"}
 						autofocus
 					/>
 				</div>
@@ -692,18 +733,31 @@ function IdentityStep({ onNext, onBack }) {
 
 var OPENAI_COMPATIBLE = ["openai", "mistral", "openrouter", "cerebras", "minimax", "moonshot", "venice", "ollama"];
 var BYOM_PROVIDERS = ["venice"];
+var RECOMMENDED_PROVIDERS = new Set([
+	"anthropic",
+	"openai",
+	"gemini",
+	"deepseek",
+	"minimax",
+	"zai",
+	"ollama",
+	"local-llm",
+	"lmstudio",
+]);
 
 function ModelSelectCard({ model, selected, probe, onToggle }) {
+	var probeError = probe && probe !== "ok" && probe !== "probing" ? probe.error || "" : "";
 	return html`<div class="model-card ${selected ? "selected" : ""}" onClick=${onToggle}>
 		<div class="flex flex-wrap items-center justify-between gap-2">
 			<span class="text-sm font-medium text-[var(--text)]">${model.displayName}</span>
 			<div class="flex flex-wrap gap-2 justify-end">
 				${model.supportsTools ? html`<span class="recommended-badge">Tools</span>` : null}
 				${probe === "probing" ? html`<span class="tier-badge">Probing\u2026</span>` : null}
-				${probe && probe !== "ok" && probe !== "probing" ? html`<span class="provider-item-badge warning" title=${probe.error || ""}>Unsupported</span>` : null}
+				${probeError ? html`<span class="provider-item-badge warning">Unsupported</span>` : null}
 			</div>
 		</div>
 		<div class="text-xs text-[var(--muted)] mt-1 font-mono">${model.id}</div>
+		${probeError ? html`<div class="text-xs font-medium text-[var(--danger,#ef4444)] mt-0.5">${probeError}</div>` : null}
 		${model.createdAt ? html`<time class="text-xs text-[var(--muted)] mt-0.5 opacity-60 block" data-epoch-ms=${model.createdAt * 1000} data-format="year-month"></time>` : null}
 	</div>`;
 }
@@ -774,13 +828,34 @@ function OnboardingProviderRow({
 	var needsModel = BYOM_PROVIDERS.includes(provider.name);
 	var keyHelp = providerApiKeyHelp(provider);
 
+	var [showAllModels, setShowAllModels] = useState(false);
+	var DEFAULT_VISIBLE = 3;
+
+	// Sort models: recommended > newest date > highest version > alpha.
+	var sortedModels = (providerModels || []).slice().sort((a, b) => {
+		var aRec = a.recommended ? 1 : 0;
+		var bRec = b.recommended ? 1 : 0;
+		if (aRec !== bRec) return bRec - aRec;
+		var aTime = a.createdAt || 0;
+		var bTime = b.createdAt || 0;
+		if (aTime !== bTime) return bTime - aTime;
+		var aVer = modelVersionScore(a.id);
+		var bVer = modelVersionScore(b.id);
+		if (aVer !== bVer) return bVer - aVer;
+		return (a.displayName || a.id).localeCompare(b.displayName || b.id);
+	});
+
 	// Filter models for the model selector.
-	var filteredModels = (providerModels || []).filter(
+	var filteredModels = sortedModels.filter(
 		(m) =>
 			!modelSearch ||
 			m.displayName.toLowerCase().includes(modelSearch.toLowerCase()) ||
 			m.id.toLowerCase().includes(modelSearch.toLowerCase()),
 	);
+
+	var hasMoreModels = filteredModels.length > DEFAULT_VISIBLE && !modelSearch;
+	var visibleModels = showAllModels || modelSearch ? filteredModels : filteredModels.slice(0, DEFAULT_VISIBLE);
+	var hiddenModelCount = filteredModels.length - DEFAULT_VISIBLE;
 
 	return html`<div ref=${rowRef} class="rounded-md border border-[var(--border)] bg-[var(--surface)] p-3">
 		<div class="flex items-center gap-3">
@@ -856,10 +931,10 @@ function OnboardingProviderRow({
 				}
 				${error ? html`<${ErrorPanel} message=${error} />` : null}
 				<div class="flex items-center gap-2 mt-1">
-					<button type="submit" class="provider-btn provider-btn-sm" disabled=${phase === "validating"}>${phase === "validating" ? "Validating\u2026" : "Save & Validate"}</button>
+					<button type="submit" class="provider-btn provider-btn-sm" disabled=${phase === "validating"}>${phase === "validating" ? "Saving\u2026" : "Save"}</button>
 					<button type="button" class="provider-btn provider-btn-secondary provider-btn-sm" onClick=${onCancelConfigure} disabled=${phase === "validating"}>Cancel</button>
 				</div>
-				${phase === "validating" ? html`<div class="text-xs text-[var(--muted)] mt-1">Testing connection and discovering available models\u2026</div>` : null}
+				${phase === "validating" ? html`<div class="text-xs text-[var(--muted)] mt-1">Discovering available models\u2026</div>` : null}
 			</form>`
 				: null
 		}
@@ -878,14 +953,22 @@ function OnboardingProviderRow({
 				}
 				<div class="flex flex-col gap-1">
 					${
-						filteredModels.length === 0
+						visibleModels.length === 0
 							? html`<div class="text-xs text-[var(--muted)] py-4 text-center">No models match your search.</div>`
-							: filteredModels.map(
+							: visibleModels.map(
 									(m) => html`<${ModelSelectCard} key=${m.id} model=${m}
 										selected=${selectedModels.has(m.id)}
 										probe=${probeResults.get(m.id)}
 										onToggle=${() => onToggleModel(m.id)} />`,
 								)
+					}
+					${
+						hasMoreModels
+							? html`<button
+						class="text-xs text-[var(--accent)] cursor-pointer bg-transparent border-none py-1 text-left hover:underline"
+						onClick=${() => setShowAllModels(!showAllModels)}
+					>${showAllModels ? t("providers:showFewerModels") : t("providers:showAllModels", { count: hiddenModelCount })}</button>`
+							: null
 					}
 				</div>
 				<div class="text-xs text-[var(--muted)]">${selectedModels.size === 0 ? "No models selected" : `${selectedModels.size} model${selectedModels.size > 1 ? "s" : ""} selected`}</div>
@@ -1090,6 +1173,7 @@ function ProviderStep({ onNext, onBack }) {
 	var [providers, setProviders] = useState([]);
 	var [loading, setLoading] = useState(true);
 	var [error, setError] = useState(null);
+	var [showAllProviders, setShowAllProviders] = useState(false);
 
 	// Which provider has an open inline form (by name), or null
 	var [configuring, setConfiguring] = useState(null);
@@ -1487,11 +1571,6 @@ function ProviderStep({ onNext, onBack }) {
 			setSelectedModels(new Set());
 			setPhase("selectModel");
 		} else {
-			sendRpc("models.detect_supported", {
-				background: true,
-				reason: "provider_connected",
-				provider: providerName,
-			});
 			setValidationResults((prev) => ({ ...prev, [providerName]: { ok: true, message: null } }));
 		}
 		refreshProviders();
@@ -1616,8 +1695,64 @@ function ProviderStep({ onNext, onBack }) {
 
 	var configuredProviders = providers.filter((p) => p.configured);
 
+	var recommendedProviders = providers.filter((p) => RECOMMENDED_PROVIDERS.has(p.name));
+	var otherProviders = providers.filter((p) => !RECOMMENDED_PROVIDERS.has(p.name));
+	// If a non-recommended provider is being configured, expand the section.
+	var otherIsActive = otherProviders.some(
+		(p) => configuring === p.name || oauthProvider === p.name || localProvider === p.name,
+	);
+	var showOther = showAllProviders || otherIsActive;
+
+	function renderProviderRow(p) {
+		return html`<${OnboardingProviderRow}
+			key=${p.name}
+			provider=${p}
+			configuring=${configuring}
+			phase=${configuring === p.name ? phase : "form"}
+			providerModels=${configuring === p.name ? providerModels : []}
+			selectedModels=${configuring === p.name ? selectedModels : new Set()}
+			probeResults=${configuring === p.name ? probeResults : new Map()}
+			modelSearch=${configuring === p.name ? modelSearch : ""}
+			setModelSearch=${setModelSearch}
+			oauthProvider=${oauthProvider}
+			oauthInfo=${oauthInfo}
+			oauthCallbackInput=${oauthCallbackInput}
+			setOauthCallbackInput=${setOauthCallbackInput}
+			oauthSubmitting=${oauthSubmitting}
+			localProvider=${localProvider}
+			sysInfo=${sysInfo}
+			localModels=${localModels}
+			selectedBackend=${selectedBackend}
+			setSelectedBackend=${setSelectedBackend}
+			apiKey=${apiKey}
+			setApiKey=${setApiKey}
+			endpoint=${endpoint}
+			setEndpoint=${setEndpoint}
+			model=${model}
+			setModel=${setModel}
+			saving=${saving}
+			savingModels=${savingModels}
+			error=${configuring === p.name || oauthProvider === p.name || localProvider === p.name ? error : null}
+			validationResult=${validationResults[p.name] || null}
+			onStartConfigure=${onStartConfigure}
+			onCancelConfigure=${closeAll}
+			onSaveKey=${onSaveKey}
+			onToggleModel=${onToggleModel}
+			onSaveModels=${onSaveSelectedModels}
+			onSubmitOAuthCallback=${submitOAuthCallback}
+			onCancelOAuth=${cancelOAuth}
+			onConfigureLocalModel=${configureLocalModel}
+			onCancelLocal=${cancelLocal}
+		/>`;
+	}
+
 	return html`<div class="flex flex-col gap-4">
-		<h2 class="text-lg font-medium text-[var(--text-strong)]">${t("onboarding:provider.addLlms")}</h2>
+		<div class="flex items-baseline justify-between gap-2">
+			<h2 class="text-lg font-medium text-[var(--text-strong)]">${t("onboarding:provider.addLlms")}</h2>
+			<a href="https://docs.moltis.org/choosing-a-provider.html"
+				target="_blank" rel="noopener noreferrer"
+				class="text-xs text-[var(--accent)] hover:underline shrink-0">Help me choose</a>
+		</div>
 		<p class="text-xs text-[var(--muted)] leading-relaxed">Configure one or more LLM providers to power your agent. You can add more later in Settings.</p>
 		${
 			configuredProviders.length > 0
@@ -1630,49 +1765,22 @@ function ProviderStep({ onNext, onBack }) {
 				: null
 		}
 		<div class="flex flex-col gap-2">
-			${providers.map(
-				(p) => html`<${OnboardingProviderRow}
-				key=${p.name}
-				provider=${p}
-				configuring=${configuring}
-				phase=${configuring === p.name ? phase : "form"}
-				providerModels=${configuring === p.name ? providerModels : []}
-				selectedModels=${configuring === p.name ? selectedModels : new Set()}
-				probeResults=${configuring === p.name ? probeResults : new Map()}
-				modelSearch=${configuring === p.name ? modelSearch : ""}
-					setModelSearch=${setModelSearch}
-					oauthProvider=${oauthProvider}
-					oauthInfo=${oauthInfo}
-					oauthCallbackInput=${oauthCallbackInput}
-					setOauthCallbackInput=${setOauthCallbackInput}
-					oauthSubmitting=${oauthSubmitting}
-					localProvider=${localProvider}
-				sysInfo=${sysInfo}
-				localModels=${localModels}
-				selectedBackend=${selectedBackend}
-				setSelectedBackend=${setSelectedBackend}
-				apiKey=${apiKey}
-				setApiKey=${setApiKey}
-				endpoint=${endpoint}
-				setEndpoint=${setEndpoint}
-				model=${model}
-				setModel=${setModel}
-				saving=${saving}
-				savingModels=${savingModels}
-				error=${configuring === p.name || oauthProvider === p.name || localProvider === p.name ? error : null}
-				validationResult=${validationResults[p.name] || null}
-				onStartConfigure=${onStartConfigure}
-				onCancelConfigure=${closeAll}
-					onSaveKey=${onSaveKey}
-					onToggleModel=${onToggleModel}
-					onSaveModels=${onSaveSelectedModels}
-					onSubmitOAuthCallback=${submitOAuthCallback}
-					onCancelOAuth=${cancelOAuth}
-				onConfigureLocalModel=${configureLocalModel}
-				onCancelLocal=${cancelLocal}
-			/>`,
-			)}
+			<div class="text-xs font-medium text-[var(--text)] uppercase tracking-wide">Recommended</div>
+			${recommendedProviders.map(renderProviderRow)}
 		</div>
+		${
+			otherProviders.length > 0
+				? html`<div class="flex flex-col gap-2">
+				<button type="button"
+					class="text-xs text-[var(--muted)] hover:text-[var(--text)] cursor-pointer bg-transparent border-none text-left flex items-center gap-1"
+					onClick=${() => setShowAllProviders((v) => !v)}>
+					<span class="inline-block transition-transform ${showOther ? "rotate-90" : ""}">\u25B6</span>
+					All providers (${otherProviders.length} more)
+				</button>
+				${showOther ? otherProviders.map(renderProviderRow) : null}
+			</div>`
+				: null
+		}
 		${error && !configuring && !oauthProvider && !localProvider ? html`<${ErrorPanel} message=${error} />` : null}
 		<div class="flex flex-wrap items-center gap-3 mt-1">
 			<button class="provider-btn provider-btn-secondary" onClick=${onBack}>${t("common:actions.back")}</button>
@@ -1693,6 +1801,8 @@ function OnboardingVoiceRow({
 	configuring,
 	apiKey,
 	setApiKey,
+	baseUrl,
+	setBaseUrl,
 	saving,
 	error,
 	onSaveKey,
@@ -1710,6 +1820,7 @@ function OnboardingVoiceRow({
 			keyInputRef.current.focus();
 		}
 	}, [isConfiguring]);
+	var supportsBaseUrl = provider.capabilities?.baseUrl === true;
 	var keySourceLabel =
 		provider.keySource === "env" ? "(from env)" : provider.keySource === "llm_provider" ? "(from LLM provider)" : "";
 
@@ -1800,6 +1911,23 @@ function OnboardingVoiceRow({
 						placeholder=${provider.keyPlaceholder || "API key"} />
 				</div>
 				${
+					supportsBaseUrl
+						? html`<div>
+					<label class="text-xs text-[var(--muted)] mb-1 block">Base URL</label>
+					<input
+						type="text"
+						class="provider-key-input w-full"
+						data-field="baseUrl"
+						value=${baseUrl}
+						onInput=${(e) => setBaseUrl(e.target.value)}
+						placeholder="http://localhost:8000/v1" />
+					<div class="text-xs text-[var(--muted)] mt-1">
+						Use this for a local or OpenAI-compatible server. Leave the API key blank if the endpoint does not require one.
+					</div>
+				</div>`
+						: null
+				}
+				${
 					provider.keyUrl
 						? html`<div class="text-xs text-[var(--muted)]">
 					Get your key at <a href=${provider.keyUrl} target="_blank" class="text-[var(--accent)] underline">${provider.keyUrlLabel || provider.keyUrl}</a>
@@ -1825,6 +1953,7 @@ function VoiceStep({ onNext, onBack }) {
 	var [allProviders, setAllProviders] = useState({ tts: [], stt: [] });
 	var [configuring, setConfiguring] = useState(null); // provider id with open key form
 	var [apiKey, setApiKey] = useState("");
+	var [baseUrl, setBaseUrl] = useState("");
 	var [saving, setSaving] = useState(false);
 	var [error, setError] = useState(null);
 	var [voiceTesting, setVoiceTesting] = useState(null); // { id, type, phase }
@@ -1908,27 +2037,38 @@ function VoiceStep({ onNext, onBack }) {
 	}
 
 	function onStartConfigure(providerId) {
+		var provider = [...allProviders.stt, ...allProviders.tts].find((candidate) => candidate.id === providerId);
 		setConfiguring(providerId);
 		setApiKey("");
+		setBaseUrl(provider?.settings?.baseUrl || "");
 		setError(null);
 	}
 
 	function onCancelConfigure() {
 		setConfiguring(null);
 		setApiKey("");
+		setBaseUrl("");
 		setError(null);
 	}
 
 	function onSaveKey(e) {
 		e.preventDefault();
-		if (!apiKey.trim()) {
-			setError("API key is required.");
+		var provider = [...allProviders.stt, ...allProviders.tts].find((candidate) => candidate.id === configuring);
+		var trimmedApiKey = apiKey.trim();
+		var trimmedBaseUrl = baseUrl.trim();
+		var hadBaseUrl = typeof provider?.settings?.baseUrl === "string" && provider.settings.baseUrl.trim().length > 0;
+		var shouldSaveBaseUrl = provider?.capabilities?.baseUrl === true && (trimmedBaseUrl.length > 0 || hadBaseUrl);
+		if (!(trimmedApiKey || shouldSaveBaseUrl)) {
+			setError("API key or base URL is required.");
 			return;
 		}
 		setError(null);
 		setSaving(true);
 		var providerId = configuring;
-		saveVoiceKey(providerId, apiKey.trim()).then(async (res) => {
+		var req = trimmedApiKey
+			? saveVoiceKey(providerId, trimmedApiKey, { baseUrl: shouldSaveBaseUrl ? trimmedBaseUrl : undefined })
+			: saveVoiceSettings(providerId, shouldSaveBaseUrl ? { baseUrl: trimmedBaseUrl } : undefined);
+		req.then(async (res) => {
 			if (res?.ok) {
 				// Auto-enable in onboarding: toggle on for each type this provider appears in.
 				// IDs differ between TTS and STT (e.g. "elevenlabs" vs "elevenlabs-stt"),
@@ -1951,6 +2091,7 @@ function VoiceStep({ onNext, onBack }) {
 				setSaving(false);
 				setConfiguring(null);
 				setApiKey("");
+				setBaseUrl("");
 				fetchProviders();
 			} else {
 				setSaving(false);
@@ -2063,7 +2204,7 @@ function VoiceStep({ onNext, onBack }) {
 					for (var track of stream.getTracks()) track.stop();
 					setVoiceTesting({ id: providerId, type, phase: "transcribing" });
 
-					var audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+					var audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || mimeType });
 
 					try {
 						var resp = await transcribeAudio(S.activeSessionKey, providerId, audioBlob);
@@ -2071,10 +2212,14 @@ function VoiceStep({ onNext, onBack }) {
 						if (resp.ok) {
 							var sttRes = await resp.json();
 
-							if (sttRes.ok && sttRes.transcription?.text) {
+							if (sttRes.ok && typeof sttRes.transcription?.text === "string") {
+								var transcriptText = sttRes.transcription.text.trim();
 								setVoiceTestResults((prev) => ({
 									...prev,
-									[providerId]: { text: sttRes.transcription.text, error: null },
+									[providerId]: {
+										text: transcriptText || null,
+										error: transcriptText ? null : "No speech detected",
+									},
 								}));
 							} else {
 								setVoiceTestResults((prev) => ({
@@ -2160,6 +2305,8 @@ function VoiceStep({ onNext, onBack }) {
 						configuring=${configuring}
 						apiKey=${apiKey}
 						setApiKey=${setApiKey}
+						baseUrl=${baseUrl}
+						setBaseUrl=${setBaseUrl}
 						saving=${saving}
 						error=${configuring === prov.id ? error : null}
 						onSaveKey=${onSaveKey}
@@ -2188,6 +2335,8 @@ function VoiceStep({ onNext, onBack }) {
 						configuring=${configuring}
 						apiKey=${apiKey}
 						setApiKey=${setApiKey}
+						baseUrl=${baseUrl}
+						setBaseUrl=${setBaseUrl}
 						saving=${saving}
 						error=${configuring === prov.id ? error : null}
 						onSaveKey=${onSaveKey}
@@ -2215,35 +2364,359 @@ function VoiceStep({ onNext, onBack }) {
 // ── Channel step ────────────────────────────────────────────
 
 function ChannelTypeSelector({ onSelect, offered }) {
-	return html`<div class="flex gap-3">
+	var channelOptions = [
+		["telegram", "icon-telegram", "Telegram"],
+		["whatsapp", "icon-whatsapp", "WhatsApp"],
+		["msteams", "icon-msteams", "Microsoft Teams"],
+		["discord", "icon-discord", "Discord"],
+		["matrix", "icon-matrix", "Matrix"],
+		["nostr", "icon-nostr", "Nostr"],
+	].filter(([type]) => offered.has(type));
+
+	return html`<div class="grid grid-cols-2 gap-3 md:grid-cols-3" data-testid="channel-type-selector">
+		${channelOptions.map(
+			([type, iconClass, label]) => html`<button
+					key=${type}
+					type="button"
+					class="backend-card w-full min-h-[120px] items-center justify-center gap-4 px-4 py-8 text-center"
+					onClick=${() => onSelect(type)}>
+					<span class=${`icon icon-xl ${iconClass}`}></span>
+					<span class="text-sm font-medium text-[var(--text-strong)]">${label}</span>
+				</button>`,
+		)}
+	</div>`;
+}
+
+function fetchRemoteAccessStatus(path, featureDisabledMessage) {
+	return fetch(path)
+		.then((response) => {
+			var contentType = response.headers.get("content-type") || "";
+			if (response.status === 404 || !contentType.includes("application/json")) {
+				return {
+					error: featureDisabledMessage,
+					feature_disabled: true,
+				};
+			}
+			return response.json();
+		})
+		.catch((error) => ({
+			error: error.message,
+		}));
+}
+
+function preferredPublicBaseUrl({ ngrokStatus, tailscaleStatus }) {
+	var ngrokUrl = typeof ngrokStatus?.public_url === "string" ? ngrokStatus.public_url.trim() : "";
+	if (ngrokUrl) return ngrokUrl;
+
+	var tailscaleUrl = typeof tailscaleStatus?.url === "string" ? tailscaleStatus.url.trim() : "";
+	if (tailscaleStatus?.mode === "funnel" && tailscaleUrl) return tailscaleUrl;
+
+	return "";
+}
+
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: onboarding remote access manages two public endpoint integrations
+function RemoteAccessStep({ onNext, onBack }) {
+	var [authReady, setAuthReady] = useState(false);
+	var [tsStatus, setTsStatus] = useState(null);
+	var [tsError, setTsError] = useState(null);
+	var [tsWarning, setTsWarning] = useState(null);
+	var [tsLoading, setTsLoading] = useState(true);
+	var [configuringTailscale, setConfiguringTailscale] = useState(false);
+	var [ngStatus, setNgStatus] = useState(null);
+	var [ngError, setNgError] = useState(null);
+	var [ngLoading, setNgLoading] = useState(true);
+	var [ngSaving, setNgSaving] = useState(false);
+	var [ngMsg, setNgMsg] = useState(null);
+	var [ngForm, setNgForm] = useState({
+		enabled: false,
+		authtoken: "",
+		domain: "",
+	});
+
+	function loadAuthStatus() {
+		return fetch("/api/auth/status")
+			.then((response) => (response.ok ? response.json() : null))
+			.then((data) => {
+				var ready = data?.auth_disabled ? false : data?.has_password === true;
+				setAuthReady(ready);
+			})
+			.catch(() => {
+				setAuthReady(false);
+			});
+	}
+
+	function loadTailscaleStatus() {
+		setTsLoading(true);
+		return fetchRemoteAccessStatus("/api/tailscale/status", "Tailscale feature is not enabled in this build.")
+			.then((data) => {
+				setTsStatus(data?.feature_disabled ? null : data);
+				setTsError(data?.error || null);
+				setTsWarning(data?.passkey_warning || null);
+				setTsLoading(false);
+			})
+			.catch((error) => {
+				setTsError(error.message);
+				setTsLoading(false);
+			});
+	}
+
+	function loadNgrokStatus() {
+		setNgLoading(true);
+		return fetchRemoteAccessStatus("/api/ngrok/status", "ngrok feature is not enabled in this build.")
+			.then((data) => {
+				setNgStatus(data?.feature_disabled ? null : data);
+				setNgError(data?.error || null);
+				setNgLoading(false);
+				setNgForm((current) => ({
+					enabled: Boolean(data?.enabled),
+					authtoken: current.authtoken,
+					domain: current.domain || data?.domain || "",
+				}));
+			})
+			.catch((error) => {
+				setNgError(error.message);
+				setNgLoading(false);
+			});
+	}
+
+	useEffect(() => {
+		loadAuthStatus();
+		loadTailscaleStatus();
+		loadNgrokStatus();
+	}, []);
+
+	function setTailscaleMode(mode) {
+		setConfiguringTailscale(true);
+		setTsError(null);
+		setTsWarning(null);
+		fetch("/api/tailscale/configure", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ mode }),
+		})
+			.then((response) =>
+				response
+					.json()
+					.catch(() => ({}))
+					.then((data) => ({ ok: response.ok, data })),
+			)
+			.then(({ ok, data }) => {
+				if (!ok || data.error) {
+					setTsError(data.error || "Failed to configure Tailscale.");
+				} else {
+					setTsWarning(data.passkey_warning || null);
+					loadTailscaleStatus();
+				}
+				setConfiguringTailscale(false);
+			})
+			.catch((error) => {
+				setTsError(error.message);
+				setConfiguringTailscale(false);
+			});
+	}
+
+	function toggleTailscaleFunnel() {
+		var nextMode = tsStatus?.mode === "funnel" ? "off" : "funnel";
+		setTailscaleMode(nextMode);
+	}
+
+	function applyNgrokConfig(nextForm, successMessage) {
+		setNgSaving(true);
+		setNgError(null);
+		setNgMsg(null);
+		fetch("/api/ngrok/config", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				enabled: nextForm.enabled,
+				authtoken: nextForm.authtoken,
+				clear_authtoken: false,
+				domain: nextForm.domain,
+			}),
+		})
+			.then((response) =>
+				response
+					.json()
+					.catch(() => ({}))
+					.then((data) => ({ ok: response.ok, data })),
+			)
+			.then(({ ok, data }) => {
+				setNgSaving(false);
+				if (!ok || data.error) {
+					setNgError(data.error || "Failed to apply ngrok settings.");
+					return;
+				}
+
+				var status = data.status || null;
+				setNgMsg(successMessage);
+				setNgStatus(status);
+				setNgForm({
+					enabled: Boolean(status?.enabled),
+					authtoken: "",
+					domain: status?.domain || nextForm.domain || "",
+				});
+			})
+			.catch((error) => {
+				setNgSaving(false);
+				setNgError(error.message);
+			});
+	}
+
+	function toggleNgrokEnabled() {
+		var nextForm = {
+			...ngForm,
+			enabled: !ngForm.enabled,
+		};
+		setNgForm(nextForm);
+		applyNgrokConfig(nextForm, `ngrok ${nextForm.enabled ? "enabled" : "disabled"}.`);
+	}
+
+	var tailscaleAvailable = tsStatus !== null;
+	var tailscaleFunnelEnabled = tsStatus?.mode === "funnel";
+	var tailscaleInstalled = tsStatus?.installed !== false;
+	var tailscaleBlocked = !(tailscaleAvailable && tailscaleInstalled) || tsStatus?.tailscale_up === false;
+	var ngrokAvailable = ngStatus !== null;
+	var activePublicUrl = preferredPublicBaseUrl({
+		ngrokStatus: ngStatus,
+		tailscaleStatus: tsStatus,
+	});
+
+	return html`<div class="flex flex-col gap-4">
+		<h2 class="text-lg font-medium text-[var(--text-strong)]">Remote Access</h2>
+		<p class="text-xs text-[var(--muted)] leading-relaxed">
+			Public endpoints are optional for most channels, but Microsoft Teams needs one. Enable
+			Tailscale Funnel, ngrok, or both before connecting team channels.
+		</p>
 		${
-			offered.has("telegram") &&
-			html`<button type="button" class="backend-card flex-1 items-center gap-3 py-6" onClick=${() => onSelect("telegram")}>
-			<span class="icon icon-xl icon-telegram"></span>
-			<span class="text-sm font-medium text-[var(--text-strong)]">Telegram</span>
-		</button>`
+			activePublicUrl
+				? html`<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
+					<span class="font-medium text-[var(--text-strong)]">Active public URL</span>
+					<a href=${activePublicUrl} target="_blank" rel="noopener" class="text-[var(--accent)] underline break-all">
+						${activePublicUrl}
+					</a>
+					<span>The Teams webhook step will prefill this URL.</span>
+				</div>`
+				: html`<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)]">
+					Teams webhooks need a public URL. If you skip this step, you can still configure remote access later in
+					Settings.
+				</div>`
 		}
-		${
-			offered.has("whatsapp") &&
-			html`<button type="button" class="backend-card flex-1 items-center gap-3 py-6" onClick=${() => onSelect("whatsapp")}>
-			<span class="icon icon-xl icon-whatsapp"></span>
-			<span class="text-sm font-medium text-[var(--text-strong)]">WhatsApp</span>
-		</button>`
-		}
-		${
-			offered.has("msteams") &&
-			html`<button type="button" class="backend-card flex-1 items-center gap-3 py-6" onClick=${() => onSelect("msteams")}>
-			<span class="icon icon-xl icon-msteams"></span>
-			<span class="text-sm font-medium text-[var(--text-strong)]">Microsoft Teams</span>
-		</button>`
-		}
-		${
-			offered.has("discord") &&
-			html`<button type="button" class="backend-card flex-1 items-center gap-3 py-6" onClick=${() => onSelect("discord")}>
-			<span class="icon icon-xl icon-discord"></span>
-			<span class="text-sm font-medium text-[var(--text-strong)]">Discord</span>
-		</button>`
-		}
+
+		<section class="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4 flex flex-col gap-4">
+			<div class="flex flex-col gap-1">
+				<h3 class="text-base font-medium text-[var(--text-strong)]">Tailscale Funnel</h3>
+				<p class="text-xs text-[var(--muted)] leading-relaxed">
+					Public HTTPS through Tailscale. Tailscale Serve is tailnet-only, so Teams webhooks need Funnel instead.
+				</p>
+			</div>
+			${
+				tsLoading
+					? html`<div class="text-xs text-[var(--muted)]">Loading Tailscale status…</div>`
+					: html`<div class="text-sm text-[var(--text-strong)]">
+						Tailscale Funnel is ${tailscaleFunnelEnabled ? "enabled" : "disabled"}.
+					</div>`
+			}
+			${tsStatus?.url && tailscaleFunnelEnabled ? html`<a href=${tsStatus.url} target="_blank" rel="noopener" class="text-sm text-[var(--accent)] underline break-all">${tsStatus.url}</a>` : null}
+			${tsError ? html`<${ErrorPanel} message=${tsError} />` : null}
+			${tsWarning ? html`<div class="alert-warning-text max-w-form">${tsWarning}</div>` : null}
+			${
+				tsStatus?.installed === false
+					? html`<a href="https://tailscale.com/download" target="_blank" rel="noopener" class="provider-btn self-start no-underline">
+						Install Tailscale
+					</a>`
+					: null
+			}
+			${
+				tsStatus?.tailscale_up === false
+					? html`<div class="alert-warning-text max-w-form">
+						<span class="alert-label-warn">Warning:</span> Start Tailscale before enabling Funnel.
+					</div>`
+					: null
+			}
+			${
+				authReady
+					? null
+					: html`<div class="alert-warning-text max-w-form">
+						<span class="alert-label-warn">Warning:</span> Funnel can be enabled now, but remote visitors will
+						see the setup-required page until authentication is configured.
+					</div>`
+			}
+			<button
+				type="button"
+				class="provider-btn self-start"
+				disabled=${tsLoading || configuringTailscale || tailscaleBlocked}
+				onClick=${toggleTailscaleFunnel}
+			>
+				${configuringTailscale ? "Applying…" : tailscaleFunnelEnabled ? "Disable Funnel" : "Enable Funnel"}
+			</button>
+		</section>
+
+		<section class="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4 flex flex-col gap-4">
+			<div class="flex flex-col gap-1">
+				<h3 class="text-base font-medium text-[var(--text-strong)]">ngrok</h3>
+				<p class="text-xs text-[var(--muted)] leading-relaxed">
+					Public HTTPS without installing an external binary. This is useful for demos, shared testing, and Teams.
+				</p>
+			</div>
+			${
+				ngLoading
+					? html`<div class="text-xs text-[var(--muted)]">Loading ngrok status…</div>`
+					: html`<div class="text-sm text-[var(--text-strong)]">
+						ngrok is ${ngForm.enabled ? "enabled" : "disabled"}.
+					</div>`
+			}
+			${ngStatus?.public_url ? html`<a href=${ngStatus.public_url} target="_blank" rel="noopener" class="text-sm text-[var(--accent)] underline break-all">${ngStatus.public_url}</a>` : null}
+			${ngError ? html`<${ErrorPanel} message=${ngError} />` : null}
+			${ngStatus?.passkey_warning ? html`<div class="alert-warning-text max-w-form">${ngStatus.passkey_warning}</div>` : null}
+			<div class="flex flex-col gap-1">
+				<label class="text-xs text-[var(--muted)]" for="onboarding-ngrok-authtoken">Authtoken</label>
+				<input
+					id="onboarding-ngrok-authtoken"
+					type="password"
+					class="provider-key-input w-full"
+					placeholder=${ngStatus?.authtoken_source ? "Leave blank to keep the current token" : "Paste your ngrok authtoken"}
+					value=${ngForm.authtoken}
+					onInput=${(e) => setNgForm({ ...ngForm, authtoken: e.currentTarget.value })}
+				/>
+				<div class="text-xs text-[var(--muted)]">
+					Create or copy an authtoken from <a
+						href="https://dashboard.ngrok.com/get-started/your-authtoken"
+						target="_blank"
+						rel="noopener"
+						class="text-[var(--accent)] underline"
+					>ngrok dashboard</a>.
+				</div>
+			</div>
+			<div class="flex flex-col gap-1">
+				<label class="text-xs text-[var(--muted)]" for="onboarding-ngrok-domain">Reserved domain (optional)</label>
+				<input
+					id="onboarding-ngrok-domain"
+					type="text"
+					class="provider-key-input w-full"
+					placeholder="team-gateway.ngrok.app"
+					value=${ngForm.domain}
+					onInput=${(e) => setNgForm({ ...ngForm, domain: e.currentTarget.value })}
+				/>
+				<div class="text-xs text-[var(--muted)]">Use a reserved domain if you want a stable public hostname.</div>
+			</div>
+			${ngMsg ? html`<div class="text-xs text-[var(--ok)]">${ngMsg}</div>` : null}
+			<button
+				type="button"
+				class="provider-btn self-start"
+				disabled=${!ngrokAvailable || ngLoading || ngSaving}
+				onClick=${toggleNgrokEnabled}
+			>
+				${ngSaving ? "Applying…" : ngForm.enabled ? "Disable ngrok" : "Enable ngrok"}
+			</button>
+		</section>
+
+		<div class="flex flex-wrap items-center gap-3 mt-1">
+			<button type="button" class="provider-btn provider-btn-secondary" onClick=${onBack}>${t("common:actions.back")}</button>
+			<button type="button" class="provider-btn" onClick=${onNext}>${t("common:actions.continue")}</button>
+			<button type="button" class="text-xs text-[var(--muted)] cursor-pointer bg-transparent border-none underline" onClick=${onNext}>
+				Skip for now
+			</button>
+		</div>
 	</div>`;
 }
 
@@ -2252,6 +2725,7 @@ function TelegramForm({ onConnected, error, setError }) {
 	var [token, setToken] = useState("");
 	var [dmPolicy, setDmPolicy] = useState("allowlist");
 	var [allowlist, setAllowlist] = useState("");
+	var [advancedConfig, setAdvancedConfig] = useState("");
 	var [saving, setSaving] = useState(false);
 
 	function onSubmit(e) {
@@ -2261,6 +2735,11 @@ function TelegramForm({ onConnected, error, setError }) {
 			setError(v.error);
 			return;
 		}
+		var advancedPatch = parseChannelConfigPatch(advancedConfig);
+		if (!advancedPatch.ok) {
+			setError(advancedPatch.error);
+			return;
+		}
 		setError(null);
 		setSaving(true);
 		var allowlistEntries = allowlist
@@ -2268,12 +2747,14 @@ function TelegramForm({ onConnected, error, setError }) {
 			.split(/\n/)
 			.map((s) => s.trim())
 			.filter(Boolean);
-		addChannel("telegram", accountId.trim(), {
+		var config = {
 			token: token.trim(),
 			dm_policy: dmPolicy,
 			mention_mode: "mention",
 			allowlist: allowlistEntries,
-		}).then((res) => {
+		};
+		Object.assign(config, advancedPatch.value);
+		addChannel("telegram", accountId.trim(), config).then((res) => {
 			setSaving(false);
 			if (res?.ok) {
 				onConnected(accountId.trim(), "telegram");
@@ -2328,6 +2809,7 @@ function TelegramForm({ onConnected, error, setError }) {
 				placeholder="your_username" style="resize:vertical;font-family:var(--font-body);" />
 			<div class="text-xs text-[var(--muted)] mt-1">One username per line, without the @ sign. These users can DM your bot.</div>
 		</div>
+		<${AdvancedConfigPatchField} value=${advancedConfig} onInput=${setAdvancedConfig} />
 		${error && html`<${ErrorPanel} message=${error} />`}
 		<button type="submit" class="provider-btn" disabled=${saving}>${saving ? "Connecting\u2026" : "Connect Bot"}</button>
 	</form>`;
@@ -2339,7 +2821,33 @@ function TeamsForm({ onConnected, error, setError }) {
 	var [webhookSecret, setWebhookSecret] = useState("");
 	var [baseUrl, setBaseUrl] = useState(defaultTeamsBaseUrl());
 	var [bootstrapEndpoint, setBootstrapEndpoint] = useState("");
+	var [advancedConfig, setAdvancedConfig] = useState("");
 	var [saving, setSaving] = useState(false);
+
+	// Auto-detect public URL from ngrok or Tailscale Funnel.
+	useEffect(() => {
+		var cancelled = false;
+		var currentDefault = defaultTeamsBaseUrl();
+		if (baseUrl !== currentDefault) return undefined;
+
+		Promise.all([
+			fetchRemoteAccessStatus("/api/ngrok/status", "ngrok feature is not enabled in this build."),
+			fetchRemoteAccessStatus("/api/tailscale/status", "Tailscale feature is not enabled in this build."),
+		]).then(([nextNgrokStatus, nextTailscaleStatus]) => {
+			if (cancelled) return;
+			var nextPublicBaseUrl = preferredPublicBaseUrl({
+				ngrokStatus: nextNgrokStatus,
+				tailscaleStatus: nextTailscaleStatus,
+			});
+			if (nextPublicBaseUrl) {
+				setBaseUrl(nextPublicBaseUrl);
+			}
+		});
+
+		return () => {
+			cancelled = true;
+		};
+	}, [baseUrl]);
 
 	function onBootstrap() {
 		var id = appId.trim();
@@ -2375,6 +2883,11 @@ function TeamsForm({ onConnected, error, setError }) {
 			setError(v.error);
 			return;
 		}
+		var advancedPatch = parseChannelConfigPatch(advancedConfig);
+		if (!advancedPatch.ok) {
+			setError(advancedPatch.error);
+			return;
+		}
 		setError(null);
 		setSaving(true);
 		var config = {
@@ -2385,6 +2898,7 @@ function TeamsForm({ onConnected, error, setError }) {
 			allowlist: [],
 		};
 		if (webhookSecret.trim()) config.webhook_secret = webhookSecret.trim();
+		Object.assign(config, advancedPatch.value);
 		addChannel("msteams", appId.trim(), config).then((res) => {
 			setSaving(false);
 			if (res?.ok) {
@@ -2395,40 +2909,63 @@ function TeamsForm({ onConnected, error, setError }) {
 		});
 	}
 
+	var isLocalUrl =
+		!baseUrl ||
+		/^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\])/i.test(baseUrl) ||
+		baseUrl === defaultTeamsBaseUrl();
+
 	return html`<form onSubmit=${onSubmit} class="flex flex-col gap-3">
-		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
-			<span class="font-medium text-[var(--text-strong)]">Microsoft Teams setup</span>
-			<span>1. <a href="https://learn.microsoft.com/en-us/azure/bot-service/bot-service-quickstart-registration" target="_blank" class="text-[var(--accent)] underline">Create an Azure Bot registration</a> and copy the App ID + App Password.</span>
-			<span>2. Generate the messaging endpoint below and paste it into your Azure Bot configuration.</span>
-			<span>3. Optional CLI shortcut: <code class="text-xs">moltis channels teams bootstrap</code>.</span>
+		${
+			isLocalUrl &&
+			html`<div class="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs flex flex-col gap-1">
+			<span class="font-medium text-[var(--text-strong)]">Public URL required</span>
+			<span class="text-[var(--muted)]">Teams sends messages via webhook \u2014 your server must be reachable over HTTPS. Set up a tunnel in the previous <strong>Remote Access</strong> step, or enter a public URL below.</span>
+		</div>`
+		}
+		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-2">
+			<span class="font-medium text-[var(--text-strong)]">How to create a Teams bot</span>
+			<span class="font-medium text-[var(--text-strong)] text-[10px] opacity-70">Option A: Teams Developer Portal (easiest)</span>
+			<span>1. Open <a href="https://dev.teams.microsoft.com/bots" target="_blank" class="text-[var(--accent)] underline">Teams Developer Portal \u2192 Bot Management</a></span>
+			<span>2. Click <strong>+ New Bot</strong>, give it a name, and click <strong>Add</strong></span>
+			<span>3. Go to <strong>Configure</strong> \u2014 copy the <strong>Bot ID</strong> (this is your App ID)</span>
+			<span>4. Under <strong>Client secrets</strong>, click <strong>Add a client secret</strong> and copy the value</span>
+			<span class="font-medium text-[var(--text-strong)] text-[10px] opacity-70 mt-1">Option B: Azure Portal</span>
+			<span>1. Go to <a href="https://portal.azure.com/#create/Microsoft.AzureBot" target="_blank" class="text-[var(--accent)] underline">Azure Portal \u2192 Create Azure Bot</a></span>
+			<span>2. Create the bot, then go to <strong>Configuration</strong> to find the App ID</span>
+			<span>3. Click <strong>Manage Password</strong> \u2192 <strong>New client secret</strong> to get the App Password</span>
+			<span class="mt-1">After creating the bot, generate the endpoint below and paste it as the <strong>Messaging endpoint</strong> in your bot settings.</span>
 		</div>
 		<div>
-			<label class="text-xs text-[var(--muted)] mb-1 block">App ID / Account ID</label>
+			<label class="text-xs text-[var(--muted)] mb-1 block">App ID (Bot ID from Azure)</label>
 			<input type="text" class="provider-key-input w-full"
 				value=${appId} onInput=${(e) => setAppId(e.target.value)}
-				placeholder="Azure App ID or alias"
+				placeholder="e.g. 12345678-abcd-efgh-ijkl-000000000000"
 				autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"
 				name="teams_app_id" autofocus />
 		</div>
 		<div>
-			<label class="text-xs text-[var(--muted)] mb-1 block">App Password (client secret)</label>
+			<label class="text-xs text-[var(--muted)] mb-1 block">App Password (client secret from Azure)</label>
 			<input type="password" class="provider-key-input w-full"
 				value=${appPassword} onInput=${(e) => setAppPassword(e.target.value)}
-				placeholder="Azure client secret"
+				placeholder="Client secret value"
 				autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false"
 				name="teams_app_password" />
 		</div>
 		<div>
-			<label class="text-xs text-[var(--muted)] mb-1 block">Webhook Secret (optional)</label>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Webhook Secret <span class="opacity-60">(optional \u2014 auto-generated if blank)</span></label>
 			<input type="text" class="provider-key-input w-full"
 				value=${webhookSecret} onInput=${(e) => setWebhookSecret(e.target.value)}
-				placeholder="shared secret for ?secret=..." />
+				placeholder="Leave blank to auto-generate" />
 		</div>
 		<div>
-			<label class="text-xs text-[var(--muted)] mb-1 block">Public Base URL</label>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Public Base URL <span class="opacity-60">(your server\u2019s HTTPS address)</span></label>
 			<input type="text" class="provider-key-input w-full"
 				value=${baseUrl} onInput=${(e) => setBaseUrl(e.target.value)}
 				placeholder="https://bot.example.com" />
+			${
+				isLocalUrl &&
+				html`<div class="text-[10px] text-amber-600 mt-1">This looks like a local address. Teams webhooks need a publicly reachable HTTPS URL.</div>`
+			}
 		</div>
 		<div class="flex gap-2">
 			<button type="button" class="provider-btn provider-btn-sm provider-btn-secondary" onClick=${onBootstrap}>Generate Endpoint</button>
@@ -2436,11 +2973,12 @@ function TeamsForm({ onConnected, error, setError }) {
 		</div>
 		${
 			bootstrapEndpoint &&
-			html`<div>
-			<div class="text-xs text-[var(--muted)]">Messaging endpoint</div>
-			<code class="text-xs block break-all">${bootstrapEndpoint}</code>
+			html`<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-2">
+			<div class="text-xs text-[var(--muted)] mb-1">Messaging endpoint \u2014 paste this into your bot\u2019s configuration:</div>
+			<code class="text-xs block break-all select-all">${bootstrapEndpoint}</code>
 		</div>`
 		}
+		<${AdvancedConfigPatchField} value=${advancedConfig} onInput=${setAdvancedConfig} />
 		${error && html`<${ErrorPanel} message=${error} />`}
 		<button type="submit" class="provider-btn" disabled=${saving}>${saving ? "Connecting\u2026" : "Connect Teams"}</button>
 	</form>`;
@@ -2464,6 +3002,7 @@ function DiscordForm({ onConnected, error, setError }) {
 	var [token, setToken] = useState("");
 	var [dmPolicy, setDmPolicy] = useState("allowlist");
 	var [allowlist, setAllowlist] = useState("");
+	var [advancedConfig, setAdvancedConfig] = useState("");
 	var [saving, setSaving] = useState(false);
 
 	function onSubmit(e) {
@@ -2473,6 +3012,11 @@ function DiscordForm({ onConnected, error, setError }) {
 			setError(v.error);
 			return;
 		}
+		var advancedPatch = parseChannelConfigPatch(advancedConfig);
+		if (!advancedPatch.ok) {
+			setError(advancedPatch.error);
+			return;
+		}
 		setError(null);
 		setSaving(true);
 		var allowlistEntries = allowlist
@@ -2480,12 +3024,14 @@ function DiscordForm({ onConnected, error, setError }) {
 			.split(/\n/)
 			.map((s) => s.trim())
 			.filter(Boolean);
-		addChannel("discord", accountId.trim(), {
+		var config = {
 			token: token.trim(),
 			dm_policy: dmPolicy,
 			mention_mode: "mention",
 			allowlist: allowlistEntries,
-		}).then((res) => {
+		};
+		Object.assign(config, advancedPatch.value);
+		addChannel("discord", accountId.trim(), config).then((res) => {
 			setSaving(false);
 			if (res?.ok) {
 				onConnected(accountId.trim(), "discord");
@@ -2552,8 +3098,227 @@ function DiscordForm({ onConnected, error, setError }) {
 				placeholder="your_username" style="resize:vertical;font-family:var(--font-body);" />
 			<div class="text-xs text-[var(--muted)] mt-1">One username per line. These users can DM your bot.</div>
 		</div>
+		<${AdvancedConfigPatchField} value=${advancedConfig} onInput=${setAdvancedConfig} />
 		${error && html`<${ErrorPanel} message=${error} />`}
 		<button type="submit" class="provider-btn" disabled=${saving}>${saving ? "Connecting\u2026" : "Connect Bot"}</button>
+	</form>`;
+}
+
+function MatrixForm({ onConnected, error, setError }) {
+	var [homeserver, setHomeserver] = useState(MATRIX_DEFAULT_HOMESERVER);
+	var [authMode, setAuthMode] = useState("password");
+	var [userId, setUserId] = useState("");
+	var [credential, setCredential] = useState("");
+	var [deviceDisplayName, setDeviceDisplayName] = useState("");
+	var [ownershipMode, setOwnershipMode] = useState("moltis_owned");
+	var [dmPolicy, setDmPolicy] = useState("allowlist");
+	var [roomPolicy, setRoomPolicy] = useState("allowlist");
+	var [mentionMode, setMentionMode] = useState("mention");
+	var [autoJoin, setAutoJoin] = useState("always");
+	var [otpSelfApproval, setOtpSelfApproval] = useState(true);
+	var [otpCooldown, setOtpCooldown] = useState("300");
+	var [userAllowlist, setUserAllowlist] = useState("");
+	var [roomAllowlist, setRoomAllowlist] = useState("");
+	var [advancedConfig, setAdvancedConfig] = useState("");
+	var [saving, setSaving] = useState(false);
+
+	function splitLines(value) {
+		return value
+			.trim()
+			.split(/\n/)
+			.map((s) => s.trim())
+			.filter(Boolean);
+	}
+
+	function onSubmit(e) {
+		e.preventDefault();
+		var accountId = deriveMatrixAccountId({ userId, homeserver });
+		var v = validateChannelFields("matrix", accountId, credential, {
+			matrixAuthMode: authMode,
+			matrixUserId: userId,
+		});
+		if (!v.valid) {
+			setError(v.error);
+			return;
+		}
+		if (!homeserver.trim()) {
+			setError("Homeserver URL is required.");
+			return;
+		}
+		var advancedPatch = parseChannelConfigPatch(advancedConfig);
+		if (!advancedPatch.ok) {
+			setError(advancedPatch.error);
+			return;
+		}
+		setError(null);
+		setSaving(true);
+		var config = {
+			homeserver: homeserver.trim(),
+			ownership_mode:
+				normalizeMatrixAuthMode(authMode) === "password" ? normalizeMatrixOwnershipMode(ownershipMode) : "user_managed",
+			dm_policy: dmPolicy,
+			room_policy: roomPolicy,
+			mention_mode: mentionMode,
+			auto_join: autoJoin,
+			otp_self_approval: otpSelfApproval,
+			otp_cooldown_secs: normalizeMatrixOtpCooldown(otpCooldown),
+			user_allowlist: splitLines(userAllowlist),
+			room_allowlist: splitLines(roomAllowlist),
+		};
+		if (normalizeMatrixAuthMode(authMode) === "password") {
+			config.password = credential.trim();
+		} else {
+			config.access_token = credential.trim();
+		}
+		if (userId.trim()) config.user_id = userId.trim();
+		if (deviceDisplayName.trim()) config.device_display_name = deviceDisplayName.trim();
+		Object.assign(config, advancedPatch.value);
+		addChannel("matrix", accountId.trim(), config).then((res) => {
+			setSaving(false);
+			if (res?.ok) {
+				onConnected(accountId.trim(), "matrix");
+			} else {
+				setError((res?.error && (res.error.message || res.error.detail)) || "Failed to connect Matrix.");
+			}
+		});
+	}
+
+	return html`<form onSubmit=${onSubmit} class="flex flex-col gap-3">
+		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
+			<span class="font-medium text-[var(--text-strong)]">Connect a Matrix bot user</span>
+			<span>1. Leave the homeserver as <span class="font-mono">${MATRIX_DEFAULT_HOMESERVER}</span> for matrix.org accounts</span>
+			<span>2. Password is the default because it supports encrypted Matrix chats. Access token auth is only for plain Matrix traffic</span>
+			<span>3. Moltis generates the local account ID automatically from the Matrix user or homeserver</span>
+		</div>
+		<div class="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-100 flex flex-col gap-1">
+			<span class="font-medium text-emerald-50">Encrypted chats require password auth</span>
+			<span>${MATRIX_ENCRYPTION_GUIDANCE}</span>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Homeserver URL</label>
+			<input type="text" class="provider-key-input w-full"
+				value=${homeserver} onInput=${(e) => setHomeserver(e.target.value)}
+				placeholder=${MATRIX_DEFAULT_HOMESERVER}
+				autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"
+				name="matrix_homeserver" autofocus />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Authentication</label>
+			<select class="provider-key-input w-full cursor-pointer" value=${authMode} onChange=${(e) => setAuthMode(normalizeMatrixAuthMode(e.target.value))}>
+				<option value="password">Password</option>
+				<option value="access_token">Access token</option>
+			</select>
+			<div class="text-xs text-[var(--muted)] mt-1">${matrixAuthModeGuidance(authMode)}</div>
+		</div>
+		${
+			authMode === "password"
+				? html`<label class="flex items-start gap-2 rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3">
+					<input
+						type="checkbox"
+						aria-label="Let Moltis own this Matrix account"
+						checked=${normalizeMatrixOwnershipMode(ownershipMode) === "moltis_owned"}
+						onChange=${(e) => setOwnershipMode(e.target.checked ? "moltis_owned" : "user_managed")} />
+					<span class="flex flex-col gap-1">
+						<span class="text-xs font-medium text-[var(--text-strong)]">Let Moltis own this Matrix account</span>
+						<span class="text-xs text-[var(--muted)]">${matrixOwnershipModeGuidance(authMode, ownershipMode)}</span>
+					</span>
+				</label>`
+				: html`<div class="text-xs text-[var(--muted)]">${matrixOwnershipModeGuidance(authMode, "user_managed")}</div>`
+		}
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Matrix User ID${authMode === "password" ? " (required)" : " (optional)"}</label>
+			<input type="text" class="provider-key-input w-full"
+				value=${userId} onInput=${(e) => setUserId(e.target.value)}
+				placeholder="@bot:example.com"
+				autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"
+				name="matrix_user_id" />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">${matrixCredentialLabel(authMode)}</label>
+			<input type="password" class="provider-key-input w-full"
+				value=${credential} onInput=${(e) => setCredential(e.target.value)}
+				placeholder=${matrixCredentialPlaceholder(authMode)}
+				autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false"
+				name="matrix_credential" />
+			<div class="text-xs text-[var(--muted)] mt-1">
+				${
+					authMode === "password"
+						? html`Use the password for the dedicated Matrix bot account. This is the required mode for encrypted Matrix chats because Moltis needs to create and persist its own Matrix device keys.`
+						: html`Get the access token in Element: <span class="font-mono">Settings -> Help & About -> Advanced -> Access Token</span>. Access token mode does <span class="font-medium">not</span> support encrypted Matrix chats because Moltis cannot import that existing device's private encryption keys.`
+				}
+				${" "}
+				<a href=${MATRIX_DOCS_URL} target="_blank" rel="noreferrer" class="text-[var(--accent)] underline">Matrix setup docs</a>
+			</div>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Device Display Name (optional)</label>
+			<input type="text" class="provider-key-input w-full"
+				value=${deviceDisplayName} onInput=${(e) => setDeviceDisplayName(e.target.value)}
+				placeholder="Moltis Matrix Bot"
+				autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"
+				name="matrix_device_display_name" />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">DM Policy</label>
+			<select class="provider-key-input w-full cursor-pointer" value=${dmPolicy} onChange=${(e) => setDmPolicy(e.target.value)}>
+				<option value="allowlist">Allowlist only (recommended)</option>
+				<option value="open">Open (anyone)</option>
+				<option value="disabled">Disabled</option>
+			</select>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Room Policy</label>
+			<select class="provider-key-input w-full cursor-pointer" value=${roomPolicy} onChange=${(e) => setRoomPolicy(e.target.value)}>
+				<option value="allowlist">Room allowlist only (recommended)</option>
+				<option value="open">Open (any joined room)</option>
+				<option value="disabled">Disabled</option>
+			</select>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Room Mention Mode</label>
+			<select class="provider-key-input w-full cursor-pointer" value=${mentionMode} onChange=${(e) => setMentionMode(e.target.value)}>
+				<option value="mention">Must mention bot</option>
+				<option value="always">Always respond</option>
+				<option value="none">Never respond in rooms</option>
+			</select>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Invite Auto-Join</label>
+			<select class="provider-key-input w-full cursor-pointer" value=${autoJoin} onChange=${(e) => setAutoJoin(e.target.value)}>
+				<option value="always">Always join invites</option>
+				<option value="allowlist">Only when inviter or room is allowlisted</option>
+				<option value="off">Do not auto-join</option>
+			</select>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Unknown DM Approval</label>
+			<select class="provider-key-input w-full cursor-pointer" value=${otpSelfApproval ? "on" : "off"} onChange=${(e) => setOtpSelfApproval(e.target.value !== "off")}>
+				<option value="on">PIN challenge enabled (recommended)</option>
+				<option value="off">Reject unknown DMs without a PIN</option>
+			</select>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">PIN Cooldown Seconds</label>
+			<input type="number" min="1" step="1" class="provider-key-input w-full"
+				value=${otpCooldown} onInput=${(e) => setOtpCooldown(e.target.value)}
+				name="matrix_otp_cooldown_secs" />
+			<div class="text-xs text-[var(--muted)] mt-1">With DM policy on allowlist, unknown users get a 6-digit PIN challenge by default.</div>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">DM Allowlist (Matrix user IDs)</label>
+			<textarea class="provider-key-input w-full" rows="2"
+				value=${userAllowlist} onInput=${(e) => setUserAllowlist(e.target.value)}
+				placeholder="@alice:example.com" style="resize:vertical;font-family:var(--font-body);" />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Room Allowlist (room IDs or aliases)</label>
+			<textarea class="provider-key-input w-full" rows="2"
+				value=${roomAllowlist} onInput=${(e) => setRoomAllowlist(e.target.value)}
+				placeholder="!room:example.com" style="resize:vertical;font-family:var(--font-body);" />
+		</div>
+		<${AdvancedConfigPatchField} value=${advancedConfig} onInput=${setAdvancedConfig} />
+		${error && html`<${ErrorPanel} message=${error} />`}
+		<button type="submit" class="provider-btn" disabled=${saving}>${saving ? "Connecting\u2026" : "Connect Matrix"}</button>
 	</form>`;
 }
 
@@ -2561,6 +3326,7 @@ function WhatsAppForm({ onConnected, error, setError }) {
 	var [accountId, setAccountId] = useState("");
 	var [dmPolicy, setDmPolicy] = useState("allowlist");
 	var [allowlist, setAllowlist] = useState("");
+	var [advancedConfig, setAdvancedConfig] = useState("");
 	var [saving, setSaving] = useState(false);
 	var [pairingStarted, setPairingStarted] = useState(false);
 	var [qrData, setQrData] = useState(null);
@@ -2600,6 +3366,11 @@ function WhatsAppForm({ onConnected, error, setError }) {
 			setError("Account ID is required.");
 			return;
 		}
+		var advancedPatch = parseChannelConfigPatch(advancedConfig);
+		if (!advancedPatch.ok) {
+			setError(advancedPatch.error);
+			return;
+		}
 		setError(null);
 		setSaving(true);
 		setQrData(null);
@@ -2624,10 +3395,12 @@ function WhatsAppForm({ onConnected, error, setError }) {
 			.split(/\n/)
 			.map((s) => s.trim())
 			.filter(Boolean);
-		addChannel("whatsapp", id, {
+		var config = {
 			dm_policy: dmPolicy,
 			allowlist: allowlistEntries,
-		}).then((res) => {
+		};
+		Object.assign(config, advancedPatch.value);
+		addChannel("whatsapp", id, config).then((res) => {
 			setSaving(false);
 			if (res?.ok) {
 				setPairingStarted(true);
@@ -2695,6 +3468,7 @@ function WhatsAppForm({ onConnected, error, setError }) {
 				placeholder="phone number or identifier" style="resize:vertical;font-family:var(--font-body);" />
 			<div class="text-xs text-[var(--muted)] mt-1">One per line. Only needed if DM policy is "Allowlist only".</div>
 		</div>
+		<${AdvancedConfigPatchField} value=${advancedConfig} onInput=${setAdvancedConfig} />
 		${error && html`<${ErrorPanel} message=${error} />`}
 		<button type="submit" class="provider-btn" disabled=${saving}>${saving ? "Starting\u2026" : "Start Pairing"}</button>
 	</form>`;
@@ -2703,7 +3477,10 @@ function WhatsAppForm({ onConnected, error, setError }) {
 function channelDisplayLabel(type) {
 	if (type === "msteams") return "Microsoft Teams";
 	if (type === "discord") return "Discord";
+	if (type === "slack") return "Slack";
 	if (type === "whatsapp") return "WhatsApp";
+	if (type === "matrix") return "Matrix";
+	if (type === "nostr") return "Nostr";
 	return "Telegram";
 }
 
@@ -2730,8 +3507,122 @@ function ChannelSuccess({ channelName, channelType: type, onAnother }) {
 	</div>`;
 }
 
+function NostrForm({ onConnected, error, setError }) {
+	var [accountId, setAccountId] = useState("");
+	var [secretKey, setSecretKey] = useState("");
+	var [relays, setRelays] = useState("wss://relay.damus.io, wss://relay.nostr.band, wss://nos.lol");
+	var [dmPolicy, setDmPolicy] = useState("allowlist");
+	var [allowlist, setAllowlist] = useState("");
+	var [advancedConfig, setAdvancedConfig] = useState("");
+	var [saving, setSaving] = useState(false);
+
+	function onSubmit(e) {
+		e.preventDefault();
+		if (!accountId.trim()) {
+			setError("Account ID is required.");
+			return;
+		}
+		if (!secretKey.trim()) {
+			setError("Secret key is required.");
+			return;
+		}
+		var advancedPatch = parseChannelConfigPatch(advancedConfig);
+		if (!advancedPatch.ok) {
+			setError(advancedPatch.error);
+			return;
+		}
+		setError(null);
+		setSaving(true);
+		var relayList = relays
+			.split(",")
+			.map((r) => r.trim())
+			.filter(Boolean);
+		var allowlistEntries = allowlist
+			.trim()
+			.split(/\n/)
+			.map((s) => s.trim())
+			.filter(Boolean);
+		var config = {
+			secret_key: secretKey.trim(),
+			relays: relayList,
+			dm_policy: dmPolicy,
+			allowed_pubkeys: allowlistEntries,
+		};
+		Object.assign(config, advancedPatch.value);
+		addChannel("nostr", accountId.trim(), config).then((res) => {
+			setSaving(false);
+			if (res?.ok) {
+				onConnected(accountId.trim(), "nostr");
+			} else {
+				setError((res?.error && (res.error.message || res.error.detail)) || "Failed to connect channel.");
+			}
+		});
+	}
+
+	return html`<form onSubmit=${onSubmit} class="flex flex-col gap-3">
+		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
+			<span class="font-medium text-[var(--text-strong)]">How to set up Nostr DMs</span>
+			<span>1. Generate or use an existing Nostr secret key (nsec1... or hex)</span>
+			<span>2. Configure relay URLs (defaults are provided)</span>
+			<span>3. Add allowed public keys (npub1... or hex) to the allowlist</span>
+			<span>4. Send a DM to the bot's public key from any Nostr client</span>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Account ID</label>
+			<input type="text" class="provider-key-input w-full"
+				value=${accountId} onInput=${(e) => setAccountId(e.target.value)}
+				placeholder="e.g. my-nostr-bot"
+				autocomplete="off"
+				autocapitalize="none"
+				autocorrect="off"
+				spellcheck="false"
+				name="nostr_account_id"
+				autofocus />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Secret Key</label>
+			<input type="password" class="provider-key-input w-full"
+				value=${secretKey} onInput=${(e) => setSecretKey(e.target.value)}
+				placeholder="nsec1... or 64-char hex"
+				autocomplete="new-password"
+				autocapitalize="none"
+				autocorrect="off"
+				spellcheck="false"
+				name="nostr_secret_key" />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Relays (comma-separated)</label>
+			<input type="text" class="provider-key-input w-full"
+				value=${relays} onInput=${(e) => setRelays(e.target.value)}
+				placeholder="wss://relay.damus.io, wss://nos.lol"
+				name="nostr_relays" />
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">DM Policy</label>
+			<select class="channel-select w-full" value=${dmPolicy} onChange=${(e) => setDmPolicy(e.target.value)}>
+				<option value="allowlist">Allowlist only</option>
+				<option value="open">Open (anyone)</option>
+				<option value="disabled">Disabled</option>
+			</select>
+		</div>
+		<div>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Allowed Public Keys (one per line, npub1 or hex)</label>
+			<textarea class="provider-key-input w-full" rows="3"
+				value=${allowlist} onInput=${(e) => setAllowlist(e.target.value)}
+				placeholder="npub1abc123...\nnpub1def456..."
+				name="nostr_allowed_pubkeys" />
+		</div>
+		<${AdvancedConfigPatchField} value=${advancedConfig}
+			onInput=${(value) => setAdvancedConfig(value)} />
+		${error && html`<div class="text-xs text-[var(--error)]">${error}</div>`}
+		<button type="submit" class="provider-btn self-start" disabled=${saving}>
+			${saving ? "Connecting\u2026" : "Connect Nostr"}
+		</button>
+	</form>`;
+}
+
 function ChannelStep({ onNext, onBack }) {
-	var offeredList = getGon("channels_offered") || ["telegram"];
+	var offeredList = getGon("channels_offered") || ["telegram", "discord", "slack", "matrix"];
 	var offered = new Set(offeredList);
 	var singleType = offeredList.length === 1 ? offeredList[0] : null;
 
@@ -2770,11 +3661,14 @@ function ChannelStep({ onNext, onBack }) {
 	return html`<div class="flex flex-col gap-4">
 		<h2 class="text-lg font-medium text-[var(--text-strong)]">Connect a Channel</h2>
 		<p class="text-xs text-[var(--muted)] leading-relaxed">Connect a messaging channel so you can chat from your phone or team workspace. You can set this up later in Channels.</p>
+		<${ChannelStorageNotice} />
 		${phase === "select" && html`<${ChannelTypeSelector} onSelect=${onSelectType} offered=${offered} />`}
 		${phase === "form" && selectedType === "telegram" && html`<${TelegramForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
 		${phase === "form" && selectedType === "whatsapp" && html`<${WhatsAppForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
 		${phase === "form" && selectedType === "msteams" && html`<${TeamsForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
 		${phase === "form" && selectedType === "discord" && html`<${DiscordForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
+		${phase === "form" && selectedType === "matrix" && html`<${MatrixForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
+		${phase === "form" && selectedType === "nostr" && html`<${NostrForm} onConnected=${onConnected} error=${error} setError=${setError} />`}
 		${phase === "success" && html`<${ChannelSuccess} channelName=${connectedName} channelType=${connectedType} onAnother=${onAnother} />`}
 		<div class="flex flex-wrap items-center gap-3 mt-1">
 			<button type="button" class="provider-btn provider-btn-secondary" onClick=${showBackSelector ? () => setPhase("select") : onBack}>${t("common:actions.back")}</button>
@@ -3244,7 +4138,7 @@ function SummaryStep({ onBack, onFinish }) {
 						data.tailscale?.tailscale_up
 							? html`Connected`
 							: data.tailscale?.installed
-								? html`Installed but not connected — <a href="/settings/tailscale" class="text-[var(--accent)] underline">Configure in Settings</a>`
+								? html`Installed but not connected — <a href="/settings/remote-access" class="text-[var(--accent)] underline">Configure in Settings</a>`
 								: html`Not installed. Install Tailscale for secure remote access.`
 					}
 				<//>`
@@ -3354,15 +4248,22 @@ function OnboardingPage() {
 	if (openclawDetected) allLabels.push(t("onboarding:steps.import"));
 	allLabels.push(t("onboarding:steps.llm"));
 	if (voiceAvailable) allLabels.push(t("onboarding:steps.voice"));
-	allLabels.push(t("onboarding:steps.channel"), t("onboarding:steps.identity"), t("onboarding:steps.summary"));
+	allLabels.push(
+		t("onboarding:steps.remoteAccess"),
+		t("onboarding:steps.channel"),
+		t("onboarding:steps.identity"),
+		t("onboarding:steps.summary"),
+	);
 	var steps = authNeeded ? allLabels : allLabels.slice(1);
 	var stepIndex = authNeeded ? step : step - 1;
 
-	// Compute dynamic step indices: Auth(0) → Import? → LLM → Voice? → Channel → Identity → Summary
+	// Compute dynamic step indices: Auth(0) → Import? → LLM → Voice? →
+	// Remote Access → Channel → Identity → Summary
 	var nextIdx = 1;
 	var importStep = openclawDetected ? nextIdx++ : -1;
 	var llmStep = nextIdx++;
 	var voiceStep = voiceAvailable ? nextIdx++ : -1;
+	var remoteAccessStep = nextIdx++;
 	var channelStep = nextIdx++;
 	var identityStep = nextIdx++;
 	var summaryStep = nextIdx;
@@ -3397,6 +4298,7 @@ function OnboardingPage() {
 			${step === importStep && html`<${OpenClawImportStep} onNext=${goNext} onBack=${authNeeded ? goBack : null} />`}
 			${step === llmStep && html`<${ProviderStep} onNext=${goNext} onBack=${authNeeded || openclawDetected ? goBack : null} />`}
 			${step === voiceStep && html`<${VoiceStep} onNext=${goNext} onBack=${goBack} />`}
+			${step === remoteAccessStep && html`<${RemoteAccessStep} onNext=${goNext} onBack=${goBack} />`}
 			${step === channelStep && html`<${ChannelStep} onNext=${goNext} onBack=${goBack} />`}
 			${step === identityStep && html`<${IdentityStep} onNext=${goNext} onBack=${goBack} />`}
 			${step === summaryStep && html`<${SummaryStep} onBack=${goBack} onFinish=${goFinish} />`}

@@ -47,7 +47,7 @@ jobs:
           - label: ios-app
             context: local/ios-app
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - name: Verify local status context
@@ -65,7 +65,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -82,7 +82,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - uses: zizmorcore/zizmor-action@135698455da5c3b3e55f73f4419e481ab68cdd95 # v0.4.1
@@ -98,7 +98,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - uses: biomejs/setup-biome@29711cbb52afee00eb13aeb30636592f9edc0088 # v2.7.0
@@ -115,11 +115,17 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+      - name: Check Rust file size limit
+        run: ./scripts/check-file-size.sh
       - name: Check website install script sync
         run: ./scripts/check-website-install-sync.sh
+      - name: Check install script package names match release workflow
+        run: ./scripts/check-install-package-names.sh
+      - name: Check install docs avoid stale asset URLs
+        run: ./scripts/check-install-docs.sh
       - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
@@ -138,7 +144,7 @@ jobs:
     env:
       LD_LIBRARY_PATH: /usr/local/cuda/compat:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - name: Clean up corrupted cargo config
@@ -156,6 +162,14 @@ jobs:
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Install QMD CLI
+        run: |
+          npm install -g @tobilu/qmd
+          qmd --version
       - name: Initialize git repo in llama-cpp source to satisfy cmake
         run: |
           cargo fetch --locked
@@ -193,6 +207,39 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
 
+  sandbox-runtime-e2e:
+    name: Sandbox Runtime E2E
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: [fmt, biome]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      MOLTIS_SANDBOX_RUNTIME_E2E: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs
+      - name: Verify runtimes
+        run: |
+          docker --version
+          docker info
+          podman --version
+          podman info
+      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
+        with:
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          shared-key: sandbox-runtime-e2e-v1
+          cache-all-crates: true
+      - name: Exercise Docker and Podman OCI file transfers
+        run: cargo test -p moltis-tools runtime_oci_file_transfers -- --nocapture
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
@@ -204,7 +251,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
           sudo apt-get clean
           df -h /
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - name: Install build dependencies
@@ -215,6 +262,14 @@ jobs:
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: llvm-tools-preview
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Install QMD CLI
+        run: |
+          npm install -g @tobilu/qmd
+          qmd --version
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           shared-key: coverage-v1
@@ -256,7 +311,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -310,7 +365,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -364,7 +419,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
@@ -410,7 +465,7 @@ jobs:
     env:
       LD_LIBRARY_PATH: /usr/local/cuda/compat:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
       - name: Clean up corrupted cargo config
@@ -428,6 +483,14 @@ jobs:
         with:
           toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Install QMD CLI
+        run: |
+          npm install -g @tobilu/qmd
+          qmd --version
       - name: Initialize git repo in llama-cpp source to satisfy cmake
         run: |
           cargo fetch --locked

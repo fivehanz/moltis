@@ -8,6 +8,7 @@
 
 pub mod approval;
 pub mod branch_session;
+pub mod checkpoints;
 #[cfg(test)]
 pub mod contract;
 
@@ -20,7 +21,7 @@ static SHARED_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock
 /// Initialize the shared HTTP client with optional proxy.
 /// Call once at gateway startup; subsequent calls are no-ops.
 pub fn init_shared_http_client(proxy_url: Option<&str>) {
-    let _ = SHARED_CLIENT.set(build_http_client(proxy_url));
+    let _ = SHARED_CLIENT.set(moltis_common::http_client::build_http_client(proxy_url));
 }
 
 /// Shared HTTP client for tools that don't need custom configuration.
@@ -29,22 +30,18 @@ pub fn init_shared_http_client(proxy_url: Option<&str>) {
 /// DNS resolver, and TLS session cache overhead — significant on
 /// memory-constrained devices.
 ///
-/// Falls back to a plain client if [`init_shared_http_client`] was never
-/// called (e.g. in tests).
+/// Falls back to a client with default headers (including User-Agent)
+/// if [`init_shared_http_client`] was never called (e.g. in tests).
 pub fn shared_http_client() -> &'static reqwest::Client {
-    SHARED_CLIENT.get_or_init(reqwest::Client::new)
+    SHARED_CLIENT.get_or_init(moltis_common::http_client::build_default_http_client)
 }
 
 /// Build a `reqwest::Client` with optional proxy configuration.
+///
+/// Re-export of [`moltis_common::http_client::build_http_client`] for
+/// backward compatibility.
 pub fn build_http_client(proxy_url: Option<&str>) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder();
-    if let Some(url) = proxy_url
-        && let Ok(proxy) = reqwest::Proxy::all(url)
-    {
-        let proxy = proxy.no_proxy(reqwest::NoProxy::from_string("localhost,127.0.0.1,::1"));
-        builder = builder.proxy(proxy);
-    }
-    builder.build().unwrap_or_else(|_| reqwest::Client::new())
+    moltis_common::http_client::build_http_client(proxy_url)
 }
 pub mod browser;
 pub mod calc;
@@ -53,6 +50,10 @@ pub mod cron_tool;
 pub mod embedded_wasm;
 pub mod exec;
 pub mod file_io;
+#[cfg(feature = "firecrawl")]
+pub mod firecrawl;
+#[cfg(feature = "fs-tools")]
+pub mod fs;
 pub mod image_cache;
 pub mod location;
 pub mod map;

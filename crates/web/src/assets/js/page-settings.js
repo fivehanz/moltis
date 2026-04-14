@@ -12,7 +12,6 @@ import { localizedApiErrorMessage, sendRpc } from "./helpers.js";
 import { setLocale } from "./i18n.js";
 import { updateIdentity, validateIdentityFields } from "./identity-utils.js";
 import { initAgents, teardownAgents } from "./page-agents.js";
-// Moved page init/teardown imports
 import { initChannels, teardownChannels } from "./page-channels.js";
 import { initCrons, teardownCrons } from "./page-crons.js";
 import { initHooks, teardownHooks } from "./page-hooks.js";
@@ -22,9 +21,11 @@ import { initMcp, teardownMcp } from "./page-mcp.js";
 import { initMonitoring, teardownMonitoring } from "./page-metrics.js";
 import { initNetworkAudit, teardownNetworkAudit } from "./page-network-audit.js";
 import { initNodes, teardownNodes } from "./page-nodes.js";
+import { initProjects, teardownProjects } from "./page-projects.js";
 import { initProviders, teardownProviders } from "./page-providers.js";
 import { initSkills, teardownSkills } from "./page-skills.js";
 import { initTerminal, teardownTerminal } from "./page-terminal.js";
+import { initWebhooks, teardownWebhooks } from "./page-webhooks.js";
 import { detectPasskeyName } from "./passkey-detect.js";
 import * as push from "./push.js";
 import { isStandalone } from "./pwa.js";
@@ -33,11 +34,12 @@ import { routes, settingsPath } from "./routes.js";
 import { connected } from "./signals.js";
 import * as S from "./state.js";
 import { fetchPhrase } from "./tts-phrases.js";
-import { Modal } from "./ui.js";
+import { Modal, showToast } from "./ui.js";
 import {
 	decodeBase64Safe,
 	fetchVoiceProviders,
 	saveVoiceKey,
+	saveVoiceSettings,
 	testTts,
 	toggleVoiceProvider,
 	transcribeAudio,
@@ -120,6 +122,12 @@ var sections = [
 		page: true,
 	},
 	{
+		id: "projects",
+		label: "Projects",
+		icon: html`<span class="icon icon-folder"></span>`,
+		page: true,
+	},
+	{
 		id: "environment",
 		label: "Environment",
 		icon: html`<span class="icon icon-terminal"></span>`,
@@ -141,6 +149,12 @@ var sections = [
 		page: true,
 	},
 	{
+		id: "webhooks",
+		label: "Webhooks",
+		icon: html`<span class="icon icon-webhooks"></span>`,
+		page: true,
+	},
+	{
 		id: "heartbeat",
 		label: "Heartbeat",
 		icon: html`<span class="icon icon-heart"></span>`,
@@ -158,9 +172,14 @@ var sections = [
 		icon: html`<span class="icon icon-lock"></span>`,
 	},
 	{
-		id: "tailscale",
-		label: "Tailscale",
-		icon: html`<span class="icon icon-tailscale"></span>`,
+		id: "ssh",
+		label: "SSH",
+		icon: html`<span class="icon icon-ssh"></span>`,
+	},
+	{
+		id: "remote-access",
+		label: "Remote Access",
+		icon: html`<span class="icon icon-share"></span>`,
 	},
 	{
 		id: "network-audit",
@@ -192,6 +211,11 @@ var sections = [
 		label: "LLMs",
 		icon: html`<span class="icon icon-layers"></span>`,
 		page: true,
+	},
+	{
+		id: "tools",
+		label: "Tools",
+		icon: html`<span class="icon icon-settings-gear"></span>`,
 	},
 	{
 		id: "mcp",
@@ -237,6 +261,57 @@ function getVisibleSections() {
 /** Return only items with an id (no group headings). */
 function getSectionItems() {
 	return getVisibleSections().filter((s) => s.id);
+}
+
+function pluralizeToolsCount(count, noun) {
+	return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function toolsOverviewCategory(name) {
+	if (typeof name !== "string" || !name) return "Core";
+	if (name.startsWith("mcp__")) return "MCP";
+	if (name === "exec" || name.startsWith("node") || name.startsWith("sandbox") || name.includes("checkpoint")) {
+		return "Execution";
+	}
+	if (name.startsWith("session") || name.startsWith("sessions_")) return "Sessions";
+	if (name.startsWith("memory") || name.includes("memory")) return "Memory";
+	if (name.startsWith("browser") || name.startsWith("web_") || name.includes("screenshot") || name.includes("fetch")) {
+		return "Web & Browser";
+	}
+	if (name.startsWith("skill") || name.includes("skill")) return "Skills";
+	return "Core";
+}
+
+function groupToolsForOverview(tools) {
+	var grouped = new Map();
+	(tools || []).forEach((tool) => {
+		var category = toolsOverviewCategory(tool?.name);
+		if (!grouped.has(category)) grouped.set(category, []);
+		grouped.get(category).push(tool);
+	});
+	var order = ["Execution", "Sessions", "Memory", "Web & Browser", "Skills", "MCP", "Core"];
+	return order
+		.filter((label) => grouped.has(label))
+		.map((label) => ({
+			label,
+			tools: grouped
+				.get(label)
+				.slice()
+				.sort((left, right) => String(left?.name || "").localeCompare(String(right?.name || ""))),
+		}));
+}
+
+function summarizeRemoteExecInventory(entries) {
+	var summary = { pairedNodes: 0, sshTargets: 0 };
+	(entries || []).forEach((entry) => {
+		if (!entry || typeof entry !== "object") return;
+		if (entry.platform === "ssh") {
+			summary.sshTargets += 1;
+			return;
+		}
+		summary.pairedNodes += 1;
+	});
+	return summary;
 }
 
 function SettingsSidebar() {
@@ -529,7 +604,9 @@ function IdentitySection() {
 			<!-- User section -->
 			<div>
 				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">User</h3>
-				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">Saved to <code>USER.md</code> in your workspace root.</p>
+				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
+					Saved to your user profile. Depending on memory settings, Moltis may also mirror it to <code>USER.md</code>.
+				</p>
 					<div>
 						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Your name *</div>
 						<input type="text" class="provider-key-input" style="width:100%;max-width:280px;"
@@ -954,8 +1031,8 @@ function SecuritySection() {
 		e.preventDefault();
 		setPwErr(null);
 		setPwMsg(null);
-		if (newPw.length < 8) {
-			setPwErr("New password must be at least 8 characters.");
+		if (newPw.length < 12) {
+			setPwErr("New password must be at least 12 characters.");
 			return;
 		}
 		if (newPw !== confirmPw) {
@@ -1291,7 +1368,7 @@ function SecuritySection() {
 					<div>
 						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">${hasPassword ? "New password" : "Password"}</div>
 						<input type="password" class="provider-key-input" style="width:100%;" value=${newPw}
-							onInput=${(e) => setNewPw(e.target.value)} placeholder="At least 8 characters" />
+							onInput=${(e) => setNewPw(e.target.value)} placeholder="At least 12 characters" />
 					</div>
 					<div>
 						<div class="text-xs text-[var(--muted)]" style="margin-bottom:4px;">Confirm ${hasPassword ? "new " : ""}password</div>
@@ -1662,6 +1739,961 @@ function VaultSection() {
 			</div>`
 					: null
 			}
+		</div>
+	</div>`;
+}
+
+function ToolsSection() {
+	var [loadingTools, setLoadingTools] = useState(true);
+	var [toolData, setToolData] = useState(null);
+	var [nodeInventory, setNodeInventory] = useState([]);
+	var [toolsErr, setToolsErr] = useState(null);
+
+	function loadToolsOverview() {
+		setLoadingTools(true);
+		setToolsErr(null);
+		Promise.allSettled([sendRpc("chat.context", {}), sendRpc("node.list", {})])
+			.then((results) => {
+				var contextResult = results[0];
+				if (contextResult.status !== "fulfilled" || !contextResult.value?.ok) {
+					throw new Error(contextResult.value?.error?.message || "Failed to load tools overview.");
+				}
+				var nextToolData = contextResult.value.payload || {};
+				var nodesResult = results[1];
+				var nextNodeInventory =
+					nodesResult.status === "fulfilled" && nodesResult.value?.ok && Array.isArray(nodesResult.value.payload)
+						? nodesResult.value.payload
+						: [];
+				setToolData(nextToolData);
+				setNodeInventory(nextNodeInventory);
+				setLoadingTools(false);
+			})
+			.catch((error) => {
+				setLoadingTools(false);
+				setToolsErr(error.message);
+			});
+	}
+
+	useEffect(() => {
+		loadToolsOverview();
+	}, []);
+
+	var data = toolData || {};
+	var session = data.session || {};
+	var execution = data.execution || {};
+	var sandbox = data.sandbox || {};
+	var tools = Array.isArray(data.tools) ? data.tools : [];
+	var toolGroups = groupToolsForOverview(tools);
+	var skills = Array.isArray(data.skills) ? data.skills : [];
+	var pluginCount = skills.filter((entry) => entry?.source === "plugin").length;
+	var personalSkillCount = skills.length - pluginCount;
+	var mcpServers = Array.isArray(data.mcpServers) ? data.mcpServers : [];
+	var runningMcpServers = mcpServers.filter((entry) => entry?.state === "running");
+	var runningMcpToolCount = runningMcpServers.reduce((sum, entry) => sum + (Number(entry?.tool_count) || 0), 0);
+	var remoteExecInventory = summarizeRemoteExecInventory(nodeInventory);
+	var routeDetails = [];
+	routeDetails.push(execution.mode === "sandbox" ? "sandboxed commands" : "host commands");
+	if (remoteExecInventory.pairedNodes > 0) {
+		routeDetails.push(pluralizeToolsCount(remoteExecInventory.pairedNodes, "paired node"));
+	}
+	if (remoteExecInventory.sshTargets > 0) {
+		routeDetails.push(pluralizeToolsCount(remoteExecInventory.sshTargets, "SSH target"));
+	}
+	if (remoteExecInventory.pairedNodes === 0 && remoteExecInventory.sshTargets === 0) {
+		routeDetails.push("local only");
+	}
+
+	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
+		<div class="flex items-start justify-between gap-3 flex-wrap max-w-[1100px]">
+			<div class="min-w-0">
+				<h2 class="text-lg font-medium text-[var(--text-strong)]">Tools</h2>
+				<p class="text-xs text-[var(--muted)] mt-1 max-w-[900px] leading-relaxed">
+					This page shows the effective tool inventory for the active session and model. Change the
+					current LLM, disable MCP for a session, or switch execution routes and the inventory here will
+					change with it.
+				</p>
+			</div>
+			<button
+				type="button"
+				class="provider-btn provider-btn-secondary"
+				onClick=${loadToolsOverview}
+				disabled=${loadingTools}
+			>
+				${loadingTools ? "Refreshing…" : "Refresh"}
+			</button>
+		</div>
+
+		<div class="rounded border border-[var(--border)] bg-[var(--surface2)] p-3 max-w-[1100px]">
+			<div class="text-xs text-[var(--muted)] leading-relaxed">
+				Use this as the operator view of what the model can currently reach. For setup changes, jump straight
+				to the relevant control surface.
+			</div>
+			<div class="mt-3 flex gap-2 flex-wrap">
+				<button type="button" class="provider-btn provider-btn-secondary" onClick=${() => navigate(settingsPath("providers"))}>
+					LLMs
+				</button>
+				<button type="button" class="provider-btn provider-btn-secondary" onClick=${() => navigate(settingsPath("mcp"))}>
+					MCP
+				</button>
+				<button type="button" class="provider-btn provider-btn-secondary" onClick=${() => navigate(settingsPath("skills"))}>
+					Skills
+				</button>
+				<button type="button" class="provider-btn provider-btn-secondary" onClick=${() => navigate(settingsPath("nodes"))}>
+					Nodes
+				</button>
+				<button type="button" class="provider-btn provider-btn-secondary" onClick=${() => navigate(settingsPath("ssh"))}>
+					SSH
+				</button>
+			</div>
+		</div>
+
+		${toolsErr ? html`<div class="text-xs text-[var(--error)] max-w-[1100px]">${toolsErr}</div>` : null}
+
+		<div class="grid gap-4 md:grid-cols-2 max-w-[1100px]">
+			<div class="rounded border border-[var(--border)] bg-[var(--surface)] p-4">
+				<div class="text-xs uppercase tracking-wide text-[var(--muted)]">Tool Calling</div>
+				<div class="mt-2 flex items-center gap-2 flex-wrap">
+					<span class="provider-item-badge ${data.supportsTools === false ? "warning" : "configured"}">
+						${data.supportsTools === false ? "Disabled" : "Enabled"}
+					</span>
+					<span class="text-sm font-medium text-[var(--text)]">
+						${tools.length} registered tool${tools.length === 1 ? "" : "s"}
+					</span>
+				</div>
+				<div class="text-xs text-[var(--muted)] mt-2 leading-relaxed">
+					${
+						data.supportsTools === false
+							? "The current model is chat-only, so the agent cannot call tools in this session."
+							: "Built-in, MCP, and runtime-routed tools available to the active model."
+					}
+				</div>
+			</div>
+
+			<div class="rounded border border-[var(--border)] bg-[var(--surface)] p-4">
+				<div class="text-xs uppercase tracking-wide text-[var(--muted)]">Active Model</div>
+				<div class="mt-2 text-sm font-medium text-[var(--text)] break-words">
+					${session.model || "Default model selection"}
+				</div>
+				<div class="text-xs text-[var(--muted)] mt-2 leading-relaxed">
+					${session.provider ? `Provider: ${session.provider}` : "Provider selected automatically."}
+					${session.label ? ` Session: ${session.label}.` : ""}
+				</div>
+			</div>
+
+			<div class="rounded border border-[var(--border)] bg-[var(--surface)] p-4">
+				<div class="text-xs uppercase tracking-wide text-[var(--muted)]">MCP</div>
+				<div class="mt-2 flex items-center gap-2 flex-wrap">
+					<span class="provider-item-badge ${
+						data.supportsTools === false || data.mcpDisabled
+							? "warning"
+							: runningMcpServers.length > 0
+								? "configured"
+								: "muted"
+					}">
+						${
+							data.supportsTools === false
+								? "Unavailable"
+								: data.mcpDisabled
+									? "Off for session"
+									: runningMcpServers.length > 0
+										? "Active"
+										: "No running servers"
+						}
+					</span>
+					<span class="text-sm font-medium text-[var(--text)]">
+						${pluralizeToolsCount(runningMcpToolCount, "MCP tool")}
+					</span>
+				</div>
+				<div class="text-xs text-[var(--muted)] mt-2 leading-relaxed">
+					${pluralizeToolsCount(runningMcpServers.length, "running server")}
+					${data.mcpDisabled ? ", disabled explicitly for this session." : "."}
+				</div>
+			</div>
+
+			<div class="rounded border border-[var(--border)] bg-[var(--surface)] p-4">
+				<div class="text-xs uppercase tracking-wide text-[var(--muted)]">Execution Routes</div>
+				<div class="mt-2 text-sm font-medium text-[var(--text)]">
+					${routeDetails.join(" · ")}
+				</div>
+				<div class="text-xs text-[var(--muted)] mt-2 leading-relaxed">
+					${sandbox.enabled ? `Sandbox backend: ${sandbox.backend || "configured"}. ` : ""}
+					${execution.promptSymbol ? `Prompt symbol: ${execution.promptSymbol}. ` : ""}
+					The <code class="text-[var(--text)]">exec</code> tool uses these routes rather than exposing SSH as
+					a separate command runner.
+				</div>
+			</div>
+		</div>
+
+		${
+			data.supportsTools === false
+				? html`<div class="rounded border border-[var(--warn)] bg-[var(--surface2)] p-3 max-w-[1100px]">
+					<div class="text-xs text-[var(--muted)] leading-relaxed">
+						Tools are unavailable because the current model does not support tool calling. Switch to a tool-capable
+						model in <strong class="text-[var(--text)]">Settings → LLMs</strong> and refresh this page.
+					</div>
+				</div>`
+				: null
+		}
+
+		<div class="grid gap-4 md:grid-cols-2 max-w-[1100px]">
+			<div class="rounded border border-[var(--border)] bg-[var(--surface)] p-4">
+				<div class="flex items-center justify-between gap-2 flex-wrap">
+					<h3 class="text-sm font-medium text-[var(--text-strong)] m-0">Registered Tools</h3>
+					<span class="provider-item-badge muted">${tools.length}</span>
+				</div>
+				${
+					toolGroups.length > 0
+						? html`<div class="mt-3 flex flex-col gap-3">
+							${toolGroups.map(
+								(group) => html`<div key=${group.label}>
+									<div class="text-xs uppercase tracking-wide text-[var(--muted)] mb-2">
+										${group.label} · ${group.tools.length}
+									</div>
+									<div class="flex flex-col gap-2">
+										${group.tools.map(
+											(tool) => html`<div
+												key=${tool.name}
+												class="rounded border border-[var(--border)] bg-[var(--surface2)] p-3"
+											>
+												<div class="flex items-center justify-between gap-2 flex-wrap">
+													<div class="text-xs font-medium text-[var(--text)] break-words">${tool.name}</div>
+													${
+														tool.name?.startsWith("mcp__")
+															? html`<span class="provider-item-badge configured">MCP</span>`
+															: null
+													}
+												</div>
+												<div class="text-xs text-[var(--muted)] mt-1 leading-relaxed">
+													${tool.description || "No description provided."}
+												</div>
+											</div>`,
+										)}
+									</div>
+								</div>`,
+							)}
+						</div>`
+						: html`<div class="text-xs text-[var(--muted)] mt-3">
+							No tools are currently exposed to this session.
+						</div>`
+				}
+			</div>
+
+			<div class="flex flex-col gap-4">
+				<div class="rounded border border-[var(--border)] bg-[var(--surface)] p-4">
+					<div class="flex items-center justify-between gap-2 flex-wrap">
+						<h3 class="text-sm font-medium text-[var(--text-strong)] m-0">Skills & Plugins</h3>
+						<span class="provider-item-badge muted">${skills.length}</span>
+					</div>
+					<div class="text-xs text-[var(--muted)] mt-3 leading-relaxed">
+						${pluralizeToolsCount(personalSkillCount, "skill")}, ${pluralizeToolsCount(pluginCount, "plugin")}.
+					</div>
+					${
+						skills.length > 0
+							? html`<div class="mt-3 flex flex-col gap-2">
+								${skills.map(
+									(entry) => html`<div
+										key=${entry.name}
+										class="rounded border border-[var(--border)] bg-[var(--surface2)] p-3"
+									>
+										<div class="flex items-center justify-between gap-2 flex-wrap">
+											<div class="text-xs font-medium text-[var(--text)]">${entry.name}</div>
+											<span class="provider-item-badge ${entry.source === "plugin" ? "configured" : "muted"}">
+												${entry.source === "plugin" ? "Plugin" : "Skill"}
+											</span>
+										</div>
+										<div class="text-xs text-[var(--muted)] mt-1 leading-relaxed">
+											${entry.description || "No description provided."}
+										</div>
+									</div>`,
+								)}
+							</div>`
+							: html`<div class="text-xs text-[var(--muted)] mt-3">No skills or plugins enabled.</div>`
+					}
+				</div>
+
+				<div class="rounded border border-[var(--border)] bg-[var(--surface)] p-4">
+					<div class="flex items-center justify-between gap-2 flex-wrap">
+						<h3 class="text-sm font-medium text-[var(--text-strong)] m-0">MCP Servers</h3>
+						<span class="provider-item-badge muted">${mcpServers.length}</span>
+					</div>
+					${
+						mcpServers.length > 0
+							? html`<div class="mt-3 flex flex-col gap-2">
+								${mcpServers.map(
+									(entry) => html`<div
+										key=${entry.name}
+										class="rounded border border-[var(--border)] bg-[var(--surface2)] p-3"
+									>
+										<div class="flex items-center justify-between gap-2 flex-wrap">
+											<div class="text-xs font-medium text-[var(--text)]">${entry.name}</div>
+											<span class="provider-item-badge ${entry.state === "running" ? "configured" : "warning"}">
+												${entry.state || "unknown"}
+											</span>
+										</div>
+										<div class="text-xs text-[var(--muted)] mt-1 leading-relaxed">
+											${pluralizeToolsCount(Number(entry.tool_count) || 0, "tool")}
+										</div>
+									</div>`,
+								)}
+							</div>`
+							: html`<div class="text-xs text-[var(--muted)] mt-3">No MCP servers configured.</div>`
+					}
+				</div>
+			</div>
+		</div>
+	</div>`;
+}
+
+function SshSection() {
+	var [loadingSsh, setLoadingSsh] = useState(true);
+	var [keys, setKeys] = useState([]);
+	var [targets, setTargets] = useState([]);
+	var [sshMsg, setSshMsg] = useState(null);
+	var [sshErr, setSshErr] = useState(null);
+	var [busyAction, setBusyAction] = useState("");
+	var [generateName, setGenerateName] = useState("");
+	var [importName, setImportName] = useState("");
+	var [importPrivateKey, setImportPrivateKey] = useState("");
+	var [importPassphrase, setImportPassphrase] = useState("");
+	var [targetLabel, setTargetLabel] = useState("");
+	var [targetHost, setTargetHost] = useState("");
+	var [targetPort, setTargetPort] = useState("");
+	var [targetKnownHost, setTargetKnownHost] = useState("");
+	var [targetAuthMode, setTargetAuthMode] = useState("managed");
+	var [targetKeyId, setTargetKeyId] = useState("");
+	var [targetIsDefault, setTargetIsDefault] = useState(true);
+	var [copiedKeyId, setCopiedKeyId] = useState(null);
+	var [testResults, setTestResults] = useState({});
+	var vaultStatus = gon.get("vault_status");
+
+	function setMessage(message) {
+		setSshMsg(message);
+		setSshErr(null);
+	}
+
+	function setError(message) {
+		setSshErr(message);
+		setSshMsg(null);
+	}
+
+	function clearFlash() {
+		setSshMsg(null);
+		setSshErr(null);
+	}
+
+	function fetchSshStatus() {
+		setLoadingSsh(true);
+		rerender();
+		return fetch("/api/ssh")
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "Failed to load SSH settings"));
+				}
+				return response.json();
+			})
+			.then((data) => {
+				setKeys(data.keys || []);
+				setTargets(data.targets || []);
+				if (!targetKeyId && (data.keys || []).length > 0) {
+					setTargetKeyId(String(data.keys[0].id));
+				}
+				setLoadingSsh(false);
+				rerender();
+			})
+			.catch((error) => {
+				setLoadingSsh(false);
+				setError(error.message);
+				rerender();
+			});
+	}
+
+	useEffect(() => {
+		fetchSshStatus();
+	}, []);
+
+	function runSshAction(actionKey, url, payload, successMessage, afterSuccess) {
+		clearFlash();
+		setBusyAction(actionKey);
+		rerender();
+		return fetch(url, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: payload ? JSON.stringify(payload) : "{}",
+		})
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "SSH action failed"));
+				}
+				return response.json().catch(() => ({}));
+			})
+			.then(async (data) => {
+				if (afterSuccess) await afterSuccess(data);
+				setMessage(successMessage);
+				await fetchSshStatus();
+			})
+			.catch((error) => {
+				setError(error.message);
+			})
+			.finally(() => {
+				setBusyAction("");
+				rerender();
+			});
+	}
+
+	function onGenerateKey(e) {
+		e.preventDefault();
+		var name = generateName.trim();
+		if (!name) {
+			setError("Key name is required.");
+			return;
+		}
+		runSshAction("generate-key", "/api/ssh/keys/generate", { name }, "Deploy key generated.", () => {
+			setGenerateName("");
+		});
+	}
+
+	function onImportKey(e) {
+		e.preventDefault();
+		var name = importName.trim();
+		if (!name) {
+			setError("Key name is required.");
+			return;
+		}
+		if (!importPrivateKey.trim()) {
+			setError("Private key is required.");
+			return;
+		}
+		runSshAction(
+			"import-key",
+			"/api/ssh/keys/import",
+			{
+				name,
+				private_key: importPrivateKey,
+				passphrase: importPassphrase.trim() ? importPassphrase : null,
+			},
+			"Private key imported.",
+			() => {
+				setImportName("");
+				setImportPrivateKey("");
+				setImportPassphrase("");
+			},
+		);
+	}
+
+	function onDeleteKey(id) {
+		clearFlash();
+		setBusyAction(`delete-key:${id}`);
+		rerender();
+		fetch(`/api/ssh/keys/${id}`, { method: "DELETE" })
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "Failed to delete key"));
+				}
+				setMessage("SSH key deleted.");
+				await fetchSshStatus();
+			})
+			.catch((error) => setError(error.message))
+			.finally(() => {
+				setBusyAction("");
+				rerender();
+			});
+	}
+
+	function onCreateTarget(e) {
+		e.preventDefault();
+		var label = targetLabel.trim();
+		var target = targetHost.trim();
+		var port = targetPort.trim() ? Number.parseInt(targetPort.trim(), 10) : null;
+		var keyId = targetAuthMode === "managed" && targetKeyId ? Number.parseInt(targetKeyId, 10) : null;
+		if (!label) {
+			setError("Target label is required.");
+			return;
+		}
+		if (!target) {
+			setError("SSH target is required.");
+			return;
+		}
+		if (targetAuthMode === "managed" && !keyId) {
+			setError("Choose a managed SSH key for this target.");
+			return;
+		}
+		if (Number.isNaN(port)) {
+			setError("Port must be a valid number.");
+			return;
+		}
+		runSshAction(
+			"create-target",
+			"/api/ssh/targets",
+			{
+				label,
+				target,
+				port,
+				auth_mode: targetAuthMode,
+				key_id: keyId,
+				known_host: targetKnownHost.trim() ? targetKnownHost : null,
+				is_default: targetIsDefault,
+			},
+			"SSH target saved.",
+			() => {
+				setTargetLabel("");
+				setTargetHost("");
+				setTargetPort("");
+				setTargetKnownHost("");
+				setTargetIsDefault(targets.length === 0);
+			},
+		);
+	}
+
+	function onScanCreateTargetHost() {
+		var target = targetHost.trim();
+		var port = targetPort.trim() ? Number.parseInt(targetPort.trim(), 10) : null;
+		if (!target) {
+			setError("SSH target is required before scanning.");
+			return;
+		}
+		if (Number.isNaN(port)) {
+			setError("Port must be a valid number.");
+			return;
+		}
+		clearFlash();
+		setBusyAction("scan-create-target");
+		rerender();
+		fetch("/api/ssh/host-key/scan", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ target, port }),
+		})
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "Failed to scan host key"));
+				}
+				return response.json();
+			})
+			.then((data) => {
+				setTargetKnownHost(data.known_host || "");
+				setMessage(`Scanned host key for ${data.host}${data.port ? `:${data.port}` : ""}.`);
+				showToast("Host key scanned", "success");
+				rerender();
+			})
+			.catch((error) => {
+				setError(error.message);
+				showToast(error.message, "error");
+			})
+			.finally(() => {
+				setBusyAction("");
+				rerender();
+			});
+	}
+
+	function onDeleteTarget(id) {
+		clearFlash();
+		setBusyAction(`delete-target:${id}`);
+		rerender();
+		fetch(`/api/ssh/targets/${id}`, { method: "DELETE" })
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "Failed to delete target"));
+				}
+				setMessage("SSH target deleted.");
+				await fetchSshStatus();
+			})
+			.catch((error) => setError(error.message))
+			.finally(() => {
+				setBusyAction("");
+				rerender();
+			});
+	}
+
+	function onSetDefaultTarget(id) {
+		runSshAction(`default-target:${id}`, `/api/ssh/targets/${id}/default`, null, "Default SSH target updated.");
+	}
+
+	function onTestTarget(id) {
+		clearFlash();
+		setBusyAction(`test-target:${id}`);
+		rerender();
+		fetch(`/api/ssh/targets/${id}/test`, { method: "POST" })
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "SSH connectivity test failed"));
+				}
+				return response.json();
+			})
+			.then((data) => {
+				setTestResults({
+					...testResults,
+					[id]: data,
+				});
+				setMessage(
+					data.reachable ? "SSH connectivity test passed." : data.failure_hint || "SSH connectivity test failed.",
+				);
+				rerender();
+			})
+			.catch((error) => setError(error.message))
+			.finally(() => {
+				setBusyAction("");
+				rerender();
+			});
+	}
+
+	function onScanAndPinTarget(entry) {
+		clearFlash();
+		setBusyAction(`pin-target:${entry.id}`);
+		rerender();
+		fetch("/api/ssh/host-key/scan", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ target: entry.target, port: entry.port ?? null }),
+		})
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "Failed to scan host key"));
+				}
+				return response.json();
+			})
+			.then(async (scanData) => {
+				var pinResponse = await fetch(`/api/ssh/targets/${entry.id}/pin`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ known_host: scanData.known_host }),
+				});
+				if (!pinResponse.ok) {
+					throw new Error(localizedApiErrorMessage(await pinResponse.json(), "Failed to pin host key"));
+				}
+				setMessage(
+					`${entry.known_host ? "Refreshed" : "Pinned"} host key for ${scanData.host}${scanData.port ? `:${scanData.port}` : ""}.`,
+				);
+				showToast(entry.known_host ? "Host pin refreshed" : "Host pinned", "success");
+				await fetchSshStatus();
+			})
+			.catch((error) => {
+				setError(error.message);
+				showToast(error.message, "error");
+			})
+			.finally(() => {
+				setBusyAction("");
+				rerender();
+			});
+	}
+
+	function onClearTargetPin(entry) {
+		clearFlash();
+		setBusyAction(`clear-pin:${entry.id}`);
+		rerender();
+		fetch(`/api/ssh/targets/${entry.id}/pin`, { method: "DELETE" })
+			.then(async (response) => {
+				if (!response.ok) {
+					throw new Error(localizedApiErrorMessage(await response.json(), "Failed to clear host pin"));
+				}
+				setMessage(`Cleared host pin for ${entry.label}.`);
+				showToast("Host pin cleared", "success");
+				await fetchSshStatus();
+			})
+			.catch((error) => {
+				setError(error.message);
+				showToast(error.message, "error");
+			})
+			.finally(() => {
+				setBusyAction("");
+				rerender();
+			});
+	}
+
+	function onCopyPublicKey(entry) {
+		navigator.clipboard
+			.writeText(entry.public_key)
+			.then(() => {
+				setCopiedKeyId(entry.id);
+				setTimeout(() => {
+					setCopiedKeyId(null);
+					rerender();
+				}, 1500);
+				rerender();
+			})
+			.catch((error) => setError(error.message));
+	}
+
+	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
+		<h2 class="text-lg font-medium text-[var(--text-strong)]">SSH</h2>
+				<div class="rounded border border-[var(--border)] bg-[var(--surface2)] p-3 max-w-[760px]">
+					<p class="text-xs text-[var(--muted)] m-0 mb-1.5 leading-relaxed">
+						Manage outbound SSH keys and named remote exec targets. Generated deploy keys use <strong class="text-[var(--text)]">Ed25519</strong>,
+						the private half stays inside Moltis,
+						and the public half is shown so you can install it in <code class="text-[var(--text)]">authorized_keys</code>.
+					</p>
+			<p class="text-xs text-[var(--muted)] m-0 leading-relaxed">
+				Current auth path:
+				<strong class="text-[var(--text)]">
+					${
+						vaultStatus === "unsealed"
+							? " vault-backed managed keys are available"
+							: vaultStatus === "sealed"
+								? " vault is locked, managed keys cannot be used until unlocked"
+								: " system OpenSSH remains available, managed keys stay plaintext until the vault is enabled"
+					}
+				</strong>
+			</p>
+		</div>
+
+		${sshMsg ? html`<div class="text-xs text-[var(--accent)]">${sshMsg}</div>` : null}
+		${sshErr ? html`<div class="text-xs text-[var(--error)]">${sshErr}</div>` : null}
+
+		<div class="grid gap-4 lg:grid-cols-2 max-w-[1100px]">
+			<div class="rounded border border-[var(--border)] bg-[var(--surface)] p-4">
+				<h3 class="text-sm font-medium text-[var(--text-strong)] m-0 mb-2">Deploy Keys</h3>
+				<p class="text-xs text-[var(--muted)] m-0 mb-3">
+					Generate a new keypair for a host, or import an existing private key. Passphrase-protected imports are decrypted once and then stored under Moltis control.
+				</p>
+				<div class="mb-3 rounded border border-[var(--border)] bg-[var(--surface2)] p-2 text-xs text-[var(--muted)] leading-relaxed">
+					Recommended flow: generate one deploy key per remote host, copy the public key below, add it to that
+					host&apos;s <code class="text-[var(--text)]">~/.ssh/authorized_keys</code>, then pin the host key with
+					<code class="text-[var(--text)]">ssh-keyscan -H host</code> when creating the target.
+				</div>
+				<form onSubmit=${onGenerateKey} class="flex flex-col gap-2 mb-4">
+					<label class="text-xs text-[var(--muted)]">Generate deploy key</label>
+					<div class="flex gap-2 flex-wrap">
+						<input
+							class="provider-key-input flex-1 min-w-[180px]"
+							type="text"
+							value=${generateName}
+							onInput=${(e) => setGenerateName(e.target.value)}
+							placeholder="production-box"
+						/>
+						<button type="submit" class="provider-btn" disabled=${busyAction === "generate-key"}>
+							${busyAction === "generate-key" ? "Generating…" : "Generate"}
+						</button>
+					</div>
+				</form>
+
+				<form onSubmit=${onImportKey} class="flex flex-col gap-2">
+					<label class="text-xs text-[var(--muted)]">Import private key</label>
+					<input
+						class="provider-key-input"
+						type="text"
+						value=${importName}
+						onInput=${(e) => setImportName(e.target.value)}
+						placeholder="existing-deploy-key"
+					/>
+					<textarea
+						class="provider-key-input min-h-[140px] font-mono text-xs"
+						value=${importPrivateKey}
+						onInput=${(e) => setImportPrivateKey(e.target.value)}
+						placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+					></textarea>
+					<input
+						class="provider-key-input"
+						type="password"
+						value=${importPassphrase}
+						onInput=${(e) => setImportPassphrase(e.target.value)}
+						placeholder="Optional import passphrase"
+					/>
+					<button type="submit" class="provider-btn self-start" disabled=${busyAction === "import-key"}>
+						${busyAction === "import-key" ? "Importing…" : "Import Key"}
+					</button>
+				</form>
+
+				<div class="mt-4 flex flex-col gap-2">
+					${
+						loadingSsh
+							? html`<div class="text-xs text-[var(--muted)]">Loading keys…</div>`
+							: keys.length === 0
+								? html`<div class="text-xs text-[var(--muted)]">No managed SSH keys yet.</div>`
+								: keys.map(
+										(entry) => html`<div class="provider-item items-start gap-4" key=${entry.id}>
+											<div class="flex-1 min-w-0">
+												<div class="provider-item-name">${entry.name}</div>
+												<div class="text-xs text-[var(--muted)] break-all mt-1">
+													<span class="text-[var(--text)]">Fingerprint (SHA256):</span> ${entry.fingerprint}
+												</div>
+												<div class="text-xs text-[var(--muted)] mt-1">
+													${entry.encrypted ? "Encrypted in vault" : "Stored plaintext until the vault is available"}
+													${entry.target_count > 0 ? `, used by ${entry.target_count} target${entry.target_count === 1 ? "" : "s"}` : ""}
+												</div>
+												<pre class="mt-3 whitespace-pre-wrap break-all rounded border border-[var(--border)] bg-[var(--surface2)] p-2 text-[11px] leading-relaxed text-[var(--muted)]">${entry.public_key}</pre>
+											</div>
+											<div class="flex flex-col gap-2 shrink-0 self-start">
+												<button type="button" class="provider-btn provider-btn-secondary" onClick=${() => onCopyPublicKey(entry)}>
+													${copiedKeyId === entry.id ? "Copied" : "Copy Public Key"}
+												</button>
+											<button
+												type="button"
+												class="provider-btn provider-btn-danger"
+												onClick=${() => onDeleteKey(entry.id)}
+												disabled=${busyAction === `delete-key:${entry.id}` || entry.target_count > 0}
+											>
+												${busyAction === `delete-key:${entry.id}` ? "Deleting…" : "Delete"}
+											</button>
+										</div>
+									</div>`,
+									)
+					}
+				</div>
+			</div>
+
+			<div class="rounded border border-[var(--border)] bg-[var(--surface)] p-4">
+				<h3 class="text-sm font-medium text-[var(--text-strong)] m-0 mb-2">SSH Targets</h3>
+				<p class="text-xs text-[var(--muted)] m-0 mb-3">
+					Add named hosts for remote execution. Targets can use your system OpenSSH setup or one of the managed keys above.
+				</p>
+				<form onSubmit=${onCreateTarget} class="flex flex-col gap-2 mb-4">
+					<input
+						class="provider-key-input"
+						type="text"
+						value=${targetLabel}
+						onInput=${(e) => setTargetLabel(e.target.value)}
+						placeholder="prod-box"
+					/>
+					<input
+						class="provider-key-input"
+						type="text"
+						value=${targetHost}
+						onInput=${(e) => setTargetHost(e.target.value)}
+						placeholder="deploy@example.com"
+					/>
+					<div class="flex gap-2 flex-wrap">
+						<input
+							class="provider-key-input w-[120px]"
+							type="number"
+							min="1"
+							max="65535"
+							value=${targetPort}
+							onInput=${(e) => setTargetPort(e.target.value)}
+							placeholder="22"
+						/>
+						<select
+							class="provider-key-input flex-1 min-w-[180px]"
+							value=${targetAuthMode}
+							onInput=${(e) => setTargetAuthMode(e.target.value)}
+						>
+							<option value="managed">Managed key</option>
+							<option value="system">System OpenSSH</option>
+						</select>
+					</div>
+					<textarea
+						class="provider-key-input min-h-[96px] font-mono text-xs"
+						value=${targetKnownHost}
+						onInput=${(e) => setTargetKnownHost(e.target.value)}
+						placeholder="Optional known_hosts line from ssh-keyscan -H host"
+					></textarea>
+					<div class="text-xs text-[var(--muted)]">
+						If you paste a <code class="text-[var(--text)]">known_hosts</code> line here, Moltis will use strict host-key checking for this target instead of trusting your global SSH config.
+					</div>
+					<button
+						type="button"
+						class="provider-btn provider-btn-secondary self-start"
+						onClick=${onScanCreateTargetHost}
+						disabled=${busyAction === "scan-create-target"}
+					>
+						${busyAction === "scan-create-target" ? "Scanning…" : "Scan Host Key"}
+					</button>
+					${
+						targetAuthMode === "managed"
+							? html`<select
+								class="provider-key-input"
+								value=${targetKeyId}
+								onInput=${(e) => setTargetKeyId(e.target.value)}
+							>
+								<option value="">Choose a managed key</option>
+								${keys.map((entry) => html`<option value=${entry.id}>${entry.name}</option>`)}
+							</select>`
+							: null
+					}
+					${
+						targetAuthMode === "managed" && keys.length === 0
+							? html`<div class="text-xs text-[var(--muted)]">
+								Generate or import a deploy key first. Moltis cannot connect with a managed target until a private key exists.
+							</div>`
+							: null
+					}
+					<label class="text-xs text-[var(--muted)] flex items-center gap-2">
+						<input type="checkbox" checked=${targetIsDefault} onInput=${(e) => setTargetIsDefault(e.target.checked)} />
+						Set as default remote SSH target
+					</label>
+					<button
+						type="submit"
+						class="provider-btn self-start"
+						disabled=${busyAction === "create-target" || (targetAuthMode === "managed" && keys.length === 0)}
+					>
+						${busyAction === "create-target" ? "Saving…" : "Add Target"}
+					</button>
+				</form>
+
+				<div class="flex flex-col gap-2">
+					${
+						loadingSsh
+							? html`<div class="text-xs text-[var(--muted)]">Loading targets…</div>`
+							: targets.length === 0
+								? html`<div class="text-xs text-[var(--muted)]">No SSH targets configured.</div>`
+								: targets.map(
+										(entry) => html`<div class="provider-item" key=${entry.id}>
+										<div class="flex-1 min-w-0">
+											<div class="provider-item-name flex items-center gap-2 flex-wrap">
+												<span>${entry.label}</span>
+												${entry.is_default ? html`<span class="provider-item-badge configured">Default</span>` : null}
+												<span class="provider-item-badge muted">${entry.auth_mode === "managed" ? "Managed key" : "System SSH"}</span>
+												${entry.known_host ? html`<span class="provider-item-badge configured">Host pinned</span>` : html`<span class="provider-item-badge warning">Uses global known_hosts</span>`}
+											</div>
+											<div class="text-xs text-[var(--muted)] break-all">
+												${entry.target}${entry.port ? `:${entry.port}` : ""}
+											</div>
+											<div class="text-xs text-[var(--muted)]">
+												${entry.key_name ? `Key: ${entry.key_name}` : "Uses your local ssh config / agent"}
+											</div>
+											${
+												testResults[entry.id]
+													? html`<div class="mt-1">
+														<div class="text-xs ${testResults[entry.id].reachable ? "text-[var(--accent)]" : "text-[var(--error)]"}">
+															${testResults[entry.id].reachable ? "Reachable" : "Unreachable"}
+														</div>
+														${
+															testResults[entry.id].failure_hint
+																? html`<div class="text-xs text-[var(--text-muted)] mt-1">
+																	Hint: ${testResults[entry.id].failure_hint}
+																</div>`
+																: null
+														}
+													</div>`
+													: null
+											}
+										</div>
+										<div class="flex flex-col gap-2">
+											<button type="button" class="provider-btn provider-btn-secondary" onClick=${() => onTestTarget(entry.id)} disabled=${busyAction === `test-target:${entry.id}`}>
+												${busyAction === `test-target:${entry.id}` ? "Testing…" : "Test"}
+											</button>
+											<button
+												type="button"
+												class="provider-btn provider-btn-secondary"
+												onClick=${() => onScanAndPinTarget(entry)}
+												disabled=${busyAction === `pin-target:${entry.id}`}
+											>
+												${busyAction === `pin-target:${entry.id}` ? "Scanning…" : entry.known_host ? "Refresh Pin" : "Scan & Pin"}
+											</button>
+											${
+												entry.known_host
+													? html`<button
+															type="button"
+															class="provider-btn provider-btn-secondary"
+															onClick=${() => onClearTargetPin(entry)}
+															disabled=${busyAction === `clear-pin:${entry.id}`}
+														>
+															${busyAction === `clear-pin:${entry.id}` ? "Clearing…" : "Clear Pin"}
+														</button>`
+													: null
+											}
+											${
+												entry.is_default
+													? null
+													: html`<button type="button" class="provider-btn provider-btn-secondary" onClick=${() => onSetDefaultTarget(entry.id)} disabled=${busyAction === `default-target:${entry.id}`}>Make Default</button>`
+											}
+											<button type="button" class="provider-btn provider-btn-danger" onClick=${() => onDeleteTarget(entry.id)} disabled=${busyAction === `delete-target:${entry.id}`}>
+												${busyAction === `delete-target:${entry.id}` ? "Deleting…" : "Delete"}
+											</button>
+										</div>
+									</div>`,
+									)
+					}
+				</div>
+			</div>
 		</div>
 	</div>`;
 }
@@ -2330,25 +3362,25 @@ function ConfigSection() {
 	</div>`;
 }
 
-// ── Tailscale section ─────────────────────────────────────────
+// ── Remote access section ────────────────────────────────────
 
-/** Populate a text node with plain text + clickable URLs. */
-function setLinkedText(el, text) {
-	el.textContent = "";
-	var parts = String(text).split(/(https?:\/\/[^\s]+)/g);
-	for (var p of parts) {
-		if (/^https?:\/\//.test(p)) {
-			var a = document.createElement("a");
-			a.href = p;
-			a.target = "_blank";
-			a.rel = "noopener";
-			a.style.cssText = "color:inherit;text-decoration:underline;word-break:break-all;";
-			a.textContent = p;
-			el.appendChild(a);
-		} else {
-			el.appendChild(document.createTextNode(p));
-		}
-	}
+function renderLinkedText(text) {
+	return String(text || "")
+		.split(/(https?:\/\/[^\s]+)/g)
+		.filter(Boolean)
+		.map((part, index) =>
+			/^https?:\/\//.test(part)
+				? html`<a
+					key=${index}
+					href=${part}
+					target="_blank"
+					rel="noopener"
+					class="underline break-all"
+				>
+					${part}
+				</a>`
+				: part,
+		);
 }
 
 /** Clone a hidden element from index.html by ID. */
@@ -2361,14 +3393,24 @@ function cloneHidden(id) {
 	return clone;
 }
 
-function TailscaleSection() {
-	var ref = useRef(null);
+function RemoteAccessSection() {
 	var [tsStatus, setTsStatus] = useState(null);
 	var [tsError, setTsError] = useState(null);
 	var [tsWarning, setTsWarning] = useState(null);
 	var [tsLoading, setTsLoading] = useState(true);
 	var [configuring, setConfiguring] = useState(false);
 	var [configuringMode, setConfiguringMode] = useState(null);
+	var [ngStatus, setNgStatus] = useState(null);
+	var [ngError, setNgError] = useState(null);
+	var [ngLoading, setNgLoading] = useState(true);
+	var [ngSaving, setNgSaving] = useState(false);
+	var [ngMsg, setNgMsg] = useState(null);
+	var [ngForm, setNgForm] = useState({
+		enabled: false,
+		authtoken: "",
+		clearAuthtoken: false,
+		domain: "",
+	});
 	var [authReady, setAuthReady] = useState(false);
 
 	function fetchTsStatus() {
@@ -2404,6 +3446,41 @@ function TailscaleSection() {
 			});
 	}
 
+	function fetchNgrokStatus() {
+		setNgLoading(true);
+		rerender();
+		fetch("/api/ngrok/status")
+			.then((r) => {
+				var ct = r.headers.get("content-type") || "";
+				if (r.status === 404 || !ct.includes("application/json")) {
+					setNgError("ngrok feature is not enabled. Rebuild with --features ngrok.");
+					setNgStatus(null);
+					setNgLoading(false);
+					rerender();
+					return null;
+				}
+				return r.json();
+			})
+			.then((data) => {
+				if (!data) return;
+				setNgStatus(data);
+				setNgError(data.error || null);
+				setNgLoading(false);
+				setNgForm({
+					enabled: Boolean(data.enabled),
+					authtoken: "",
+					clearAuthtoken: false,
+					domain: data.domain || "",
+				});
+				rerender();
+			})
+			.catch((e) => {
+				setNgError(e.message);
+				setNgLoading(false);
+				rerender();
+			});
+	}
+
 	function setMode(mode) {
 		setConfiguring(true);
 		setTsError(null);
@@ -2435,8 +3512,92 @@ function TailscaleSection() {
 			});
 	}
 
+	function persistNgrokConfig(nextForm, successMessage) {
+		setNgSaving(true);
+		setNgError(null);
+		setNgMsg(null);
+		rerender();
+
+		fetch("/api/ngrok/config", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				enabled: nextForm.enabled,
+				authtoken: nextForm.authtoken,
+				clear_authtoken: nextForm.clearAuthtoken,
+				domain: nextForm.domain,
+			}),
+		})
+			.then((r) =>
+				r
+					.json()
+					.catch(() => ({}))
+					.then((data) => ({ ok: r.ok, data })),
+			)
+			.then(({ ok, data }) => {
+				setNgSaving(false);
+				if (!ok || data.error) {
+					setNgError(data.error);
+				} else {
+					setNgMsg(successMessage);
+					if (data.status) {
+						setNgStatus(data.status);
+						setNgForm({
+							enabled: Boolean(data.status.enabled),
+							authtoken: "",
+							clearAuthtoken: false,
+							domain: data.status.domain || "",
+						});
+					} else {
+						fetchNgrokStatus();
+					}
+				}
+				rerender();
+			})
+			.catch((e) => {
+				setNgSaving(false);
+				setNgError(e.message);
+				rerender();
+			});
+	}
+
+	function saveNgrokConfig(e) {
+		e.preventDefault();
+		persistNgrokConfig(ngForm, "ngrok settings applied.");
+	}
+
+	function toggleNgrokEnabled() {
+		var nextForm = {
+			...ngForm,
+			enabled: !ngForm.enabled,
+		};
+		setNgForm(nextForm);
+		persistNgrokConfig(nextForm, `ngrok ${nextForm.enabled ? "enabled" : "disabled"}.`);
+	}
+
+	function toggleNgrokTokenDeletion() {
+		if (ngForm.clearAuthtoken) {
+			setNgForm({
+				...ngForm,
+				clearAuthtoken: false,
+			});
+			return;
+		}
+
+		if (!window.confirm("Delete the current ngrok token from config when you save?")) {
+			return;
+		}
+
+		setNgForm({
+			...ngForm,
+			authtoken: "",
+			clearAuthtoken: true,
+		});
+	}
+
 	useEffect(() => {
 		fetchTsStatus();
+		fetchNgrokStatus();
 		fetch("/api/auth/status")
 			.then((r) => (r.ok ? r.json() : null))
 			.then((d) => {
@@ -2450,172 +3611,403 @@ function TailscaleSection() {
 			});
 	}, []);
 
-	// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: DOM manipulation with multiple conditionals
-	function renderInstalledBar(container, status) {
-		var bar = cloneHidden("ts-installed-bar");
-		if (!bar) return;
-		var verEl = bar.querySelector("[data-ts-version]");
-		if (verEl) verEl.textContent = status.version ? `v${status.version.split("-")[0]}` : "";
-		var tailnetWrap = bar.querySelector("[data-ts-tailnet-wrap]");
-		if (tailnetWrap && status.tailnet) {
-			tailnetWrap.style.display = "";
-			tailnetWrap.querySelector("[data-ts-tailnet]").textContent = status.tailnet;
-		}
-		var accountWrap = bar.querySelector("[data-ts-account-wrap]");
-		if (accountWrap && status.login_name) {
-			accountWrap.style.display = "";
-			accountWrap.querySelector("[data-ts-account]").textContent = status.login_name;
-		}
-		var ipWrap = bar.querySelector("[data-ts-ip-wrap]");
-		if (ipWrap && status.tailscale_ip) {
-			ipWrap.style.display = "";
-			ipWrap.querySelector("[data-ts-ip]").textContent = status.tailscale_ip;
-		}
-		container.appendChild(bar);
-	}
-
-	function createModeBtn(m, currentMode) {
-		var btn = document.createElement("button");
-		btn.textContent = m;
-		btn.style.fontWeight = "500";
-		var active = currentMode === m && !configuring;
-		var base = "text-xs border px-3 py-1.5 rounded-md cursor-pointer transition-colors";
-		var state = active
+	function renderTailscaleModeButton(mode, currentMode) {
+		var active = currentMode === mode && !configuring;
+		var classes = active
 			? "ts-mode-active"
 			: "text-[var(--muted)] border-[var(--border)] bg-transparent hover:text-[var(--text)] hover:border-[var(--border-strong)]";
-		btn.className = `${base} ${state}${configuringMode === m ? " ts-mode-configuring" : ""}`;
-		var funnelBlocked = m === "funnel" && !authReady;
-		btn.disabled = configuring || funnelBlocked;
-		if (funnelBlocked) {
-			btn.style.opacity = "0.4";
-			btn.style.cursor = "default";
-			btn.style.pointerEvents = "none";
-		} else {
-			btn.addEventListener("click", setMode.bind(null, m));
-		}
-		if (configuringMode === m) {
-			var spinner = document.createElement("span");
-			spinner.className = "ts-spinner";
-			btn.prepend(spinner);
-		}
-		return btn;
+		return html`<button
+			type="button"
+			class=${`text-xs border px-3 py-1.5 rounded-md cursor-pointer transition-colors font-medium ${classes}${
+				configuringMode === mode ? " ts-mode-configuring" : ""
+			}`}
+			disabled=${configuring}
+			onClick=${() => setMode(mode)}
+		>
+			${configuringMode === mode ? html`<span class="ts-spinner"></span>` : null}
+			${mode}
+		</button>`;
 	}
 
-	function renderModeButtons(container, status) {
-		var modes = ["off", "serve", "funnel"];
-		var currentMode = status?.mode || "off";
-		var section = cloneHidden("ts-mode-section");
-		if (!section) return currentMode;
-		var btnContainer = section.querySelector("[data-ts-mode-btns]");
-		for (var m of modes) btnContainer.appendChild(createModeBtn(m, currentMode));
-		var cfgMsg = section.querySelector("[data-ts-configuring]");
-		if (configuring && cfgMsg) {
-			cfgMsg.style.display = "";
-			cfgMsg.textContent = `Configuring tailscale ${configuringMode}\u2026 This can take up to 10 seconds.`;
-		}
-		container.appendChild(section);
-		var warn = cloneHidden("ts-funnel-security-warning");
-		if (warn) container.appendChild(warn);
-		if (!authReady) {
-			var authBtn = cloneHidden("ts-funnel-auth-btn");
-			if (authBtn) container.appendChild(authBtn);
-		}
-		return currentMode;
-	}
+	function renderTailscaleCard() {
+		var currentMode = tsStatus?.mode || "off";
+		var tsVaultBlocked = tsError === "vault is sealed";
+		return html`<section class="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4 flex flex-col gap-4">
+			<div class="flex flex-col gap-1">
+				<h3 class="text-base font-medium text-[var(--text-strong)]">Tailscale</h3>
+				<p class="text-xs text-[var(--muted)] leading-relaxed">
+					Expose the gateway via Tailscale Serve (tailnet-only HTTPS) or Funnel (public HTTPS). The
+					gateway stays bound to localhost while Tailscale proxies traffic to it.
+				</p>
+			</div>
 
-	// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: DOM manipulation with multiple conditionals
-	function renderHostnameAndUrl(container, currentMode) {
-		if (tsStatus?.hostname) {
-			var hn = cloneHidden("ts-hostname");
-			if (hn) {
-				hn.querySelector("[data-ts-hostname-value]").textContent = tsStatus.hostname;
-				var hnLink = hn.querySelector("[data-ts-hostname-link]");
-				if (hnLink && tsStatus.url && currentMode !== "off") {
-					hnLink.href = tsStatus.url;
-					hnLink.classList.remove("pointer-events-none", "text-[var(--text)]");
-					hnLink.classList.add("text-[var(--accent)]");
+			${
+				tsLoading
+					? html`<div class="text-xs text-[var(--muted)]">Loading\u2026 this can take a few seconds.</div>`
+					: null
+			}
+			${
+				tsStatus?.installed
+					? html`<div class="info-bar">
+						<span class="info-field">
+							<span class="status-dot connected"></span>
+							<span class="info-label">Installed</span>
+							${tsStatus.version ? html`<span class="info-version">v${tsStatus.version.split("-")[0]}</span>` : null}
+						</span>
+						${
+							tsStatus.tailnet
+								? html`<span class="info-field">
+									<span class="info-label">Tailnet:</span>
+									<span class="info-value-strong">${tsStatus.tailnet}</span>
+								</span>`
+								: null
+						}
+						${
+							tsStatus.login_name
+								? html`<span class="info-field">
+									<span class="info-label">Account:</span>
+									<span class="info-value">${tsStatus.login_name}</span>
+								</span>`
+								: null
+						}
+						${
+							tsStatus.tailscale_ip
+								? html`<span class="info-field">
+									<span class="info-label">IP:</span>
+									<span class="info-value-mono">${tsStatus.tailscale_ip}</span>
+								</span>`
+								: null
+						}
+					</div>`
+					: null
+			}
+				${
+					tsError
+						? html`<div class="settings-alert-error whitespace-pre-line max-w-form">
+							<span class="icon icon-lg icon-warn-triangle shrink-0 mt-0.5"></span>
+							<span>${renderLinkedText(tsError)}</span>
+						</div>`
+						: null
 				}
-				container.appendChild(hn);
+				${
+					tsVaultBlocked
+						? html`<button
+							type="button"
+							class="provider-btn self-start"
+							onClick=${() => navigate(settingsPath("vault"))}
+						>
+							Unlock in Encryption settings
+						</button>`
+						: null
+				}
+				${tsWarning ? html`<div class="alert-warning-text max-w-form">${tsWarning}</div>` : null}
+
+			${
+				tsStatus?.installed === false
+					? html`<div class="info-bar" style="justify-content:center;flex-direction:column;gap:12px;text-align:center">
+						<p class="text-sm text-[var(--text)]">
+							The <code class="font-mono text-sm">tailscale</code> CLI was not found on this machine.
+						</p>
+						<div class="flex items-center justify-center gap-2 flex-wrap">
+							<a
+								href="https://tailscale.com/download"
+								target="_blank"
+								rel="noopener"
+								class="provider-btn"
+								style="display:inline-block;text-decoration:none"
+							>
+								Install Tailscale
+							</a>
+							<button type="button" class="provider-btn provider-btn-secondary" onClick=${fetchTsStatus}>
+								Re-check
+							</button>
+						</div>
+					</div>`
+					: null
 			}
-		}
-		if (tsStatus?.url && currentMode !== "off") {
-			var urlEl = cloneHidden("ts-url");
-			if (urlEl) {
-				var link = urlEl.querySelector("[data-ts-url-link]");
-				link.href = tsStatus.url;
-				link.textContent = tsStatus.url;
-				container.appendChild(urlEl);
+
+			${
+				!tsLoading && tsStatus?.installed !== false
+					? html`<div class="flex flex-col gap-4">
+						${
+							tsStatus?.tailscale_up === false
+								? html`<div class="alert-warning-text max-w-form">
+									<span class="alert-label-warn">Warning:</span>
+									Tailscale is not running. Start it with <code class="font-mono">tailscale up</code> or
+									open the Tailscale app.
+								</div>`
+								: null
+						}
+
+						<div class="max-w-form flex flex-col gap-2">
+							<h4 class="text-sm font-medium text-[var(--text-strong)]">Mode</h4>
+							<div class="flex gap-2 flex-wrap">
+								${["off", "serve", "funnel"].map((mode) => renderTailscaleModeButton(mode, currentMode))}
+							</div>
+							${
+								configuring
+									? html`<div class="text-xs text-[var(--muted)]">
+										Configuring tailscale ${configuringMode}\u2026 This can take up to 10 seconds.
+									</div>`
+									: null
+							}
+						</div>
+
+						<div class="alert-warning-text max-w-form">
+							<span class="alert-label-warn">Warning:</span>${" "}
+							Enabling Funnel exposes moltis to the public internet. This code has not been security-audited.
+							Use at your own risk.
+						</div>
+						${
+							authReady
+								? null
+								: html`<div class="flex flex-col gap-2 max-w-form">
+									<div class="alert-warning-text">
+										<span class="alert-label-warn">Warning:</span>
+										Funnel can be enabled now, but remote visitors will see the setup-required page until
+										authentication is configured.
+									</div>
+									<button
+										type="button"
+										class="provider-btn self-start"
+										onClick=${() => navigate(settingsPath("security"))}
+									>
+										Set up authentication
+									</button>
+								</div>`
+						}
+
+						${
+							tsStatus?.hostname
+								? html`<div class="max-w-form">
+									<h4 class="text-sm font-medium text-[var(--text-strong)] mb-1">Hostname</h4>
+									${
+										tsStatus.url && currentMode !== "off"
+											? html`<a
+												href=${tsStatus.url}
+												target="_blank"
+												rel="noopener"
+												class="font-mono text-sm text-[var(--accent)] no-underline"
+											>
+												${tsStatus.hostname}
+											</a>`
+											: html`<div class="font-mono text-sm">${tsStatus.hostname}</div>`
+									}
+								</div>`
+								: null
+						}
+						${
+							tsStatus?.url && currentMode !== "off"
+								? html`<div class="max-w-form">
+									<h4 class="text-sm font-medium text-[var(--text-strong)] mb-1">URL</h4>
+									<a
+										href=${tsStatus.url}
+										target="_blank"
+										rel="noopener"
+										class="font-mono text-sm text-[var(--accent)] no-underline break-all"
+									>
+										${tsStatus.url}
+									</a>
+								</div>`
+								: null
+						}
+						${
+							currentMode === "funnel"
+								? html`<div class="alert-warning-text max-w-form">
+									<span class="alert-label-warn">Warning:</span>
+									Funnel exposes your gateway to the public internet. Make sure password authentication is
+									configured.
+								</div>`
+								: null
+						}
+					</div>`
+					: null
 			}
-		}
+		</section>`;
 	}
 
-	function renderInstalledState(container) {
-		if (tsStatus?.tailscale_up === false) {
-			var warn = cloneHidden("ts-not-running");
-			if (warn) container.appendChild(warn);
-		}
-		var currentMode = renderModeButtons(container, tsStatus);
-		renderHostnameAndUrl(container, currentMode);
-		if (currentMode === "funnel") {
-			var fw = cloneHidden("ts-funnel-warning");
-			if (fw) container.appendChild(fw);
-		}
+	function renderNgrokCard() {
+		var authSourceLabel =
+			ngStatus?.authtoken_source === "config"
+				? "Stored in config"
+				: ngStatus?.authtoken_source === "env"
+					? "Using NGROK_AUTHTOKEN from the environment"
+					: "No authtoken configured yet";
+		var ngVaultBlocked = ngError === "vault is sealed";
+
+		return html`<section class="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] p-4 flex flex-col gap-4">
+			<div class="flex flex-col gap-1">
+				<h3 class="text-base font-medium text-[var(--text-strong)]">ngrok</h3>
+				<p class="text-xs text-[var(--muted)] leading-relaxed">
+					Create a public HTTPS endpoint without installing an external binary. Changes apply
+					immediately.
+				</p>
+			</div>
+
+			${
+				ngLoading
+					? html`<div class="text-xs text-[var(--muted)]">Loading\u2026 this can take a few seconds.</div>`
+					: null
+			}
+				${
+					ngError
+						? html`<div class="settings-alert-error whitespace-pre-line max-w-form">
+							<span class="icon icon-lg icon-warn-triangle shrink-0 mt-0.5"></span>
+							<span>${renderLinkedText(ngError)}</span>
+						</div>`
+						: null
+				}
+				${
+					ngVaultBlocked
+						? html`<button
+							type="button"
+							class="provider-btn self-start"
+							onClick=${() => navigate(settingsPath("vault"))}
+						>
+							Unlock in Encryption settings
+						</button>`
+						: null
+				}
+
+				${
+					ngLoading || ngError
+						? null
+						: html`<form class="flex flex-col gap-4" onSubmit=${saveNgrokConfig}>
+							<div class="rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg)] px-3 py-2.5 flex items-center justify-between gap-3">
+								<div>
+									<div class="text-sm font-medium text-[var(--text-strong)]">
+										ngrok is ${ngForm.enabled ? "enabled" : "disabled"}
+									</div>
+									<div class="text-xs text-[var(--muted)]">
+										Public HTTPS endpoint for demos, shared testing, and team access.
+									</div>
+								</div>
+								<button
+									type="button"
+									class="provider-btn"
+									disabled=${ngSaving}
+									onClick=${toggleNgrokEnabled}
+								>
+									${ngSaving ? "Saving\u2026" : ngForm.enabled ? "Disable ngrok" : "Enable ngrok"}
+								</button>
+							</div>
+
+						<div class="flex flex-col gap-1">
+							<label class="text-sm font-medium text-[var(--text-strong)]" for="ngrok-authtoken">
+								Authtoken
+							</label>
+							<input
+								id="ngrok-authtoken"
+								type="password"
+								class="w-full rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)]"
+								placeholder=${ngStatus?.authtoken_source ? "Leave blank to keep the current token" : "Paste your ngrok authtoken"}
+								value=${ngForm.authtoken}
+								onInput=${(e) => setNgForm({ ...ngForm, authtoken: e.currentTarget.value })}
+							/>
+							<div class="text-xs text-[var(--muted)]">${authSourceLabel}</div>
+							<div class="text-xs text-[var(--muted)]">
+								Create or copy an authtoken from${" "}
+								<a
+									href="https://dashboard.ngrok.com/get-started/your-authtoken"
+									target="_blank"
+									rel="noopener"
+									class="text-[var(--accent)] no-underline hover:underline"
+								>
+									ngrok dashboard
+								</a>.
+							</div>
+							${
+								ngStatus?.authtoken_source === "config"
+									? html`<div class="flex flex-col gap-1">
+										<button
+											type="button"
+											class="text-xs text-[var(--accent)] self-start bg-transparent border-0 p-0 cursor-pointer hover:underline"
+											onClick=${toggleNgrokTokenDeletion}
+										>
+											${ngForm.clearAuthtoken ? "Keep current token" : "Delete current token"}
+										</button>
+										${
+											ngForm.clearAuthtoken
+												? html`<div class="text-xs text-[var(--muted)]">
+													The saved config token will be deleted when you save.
+												</div>`
+												: null
+										}
+									</div>`
+									: null
+							}
+						</div>
+
+						<div class="flex flex-col gap-1">
+							<label class="text-sm font-medium text-[var(--text-strong)]" for="ngrok-domain">
+								Reserved domain
+							</label>
+							<input
+								id="ngrok-domain"
+								type="text"
+								class="w-full rounded-[var(--radius-sm)] border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--text)]"
+								placeholder="team-gateway.ngrok.app"
+								value=${ngForm.domain}
+								onInput=${(e) => setNgForm({ ...ngForm, domain: e.currentTarget.value })}
+							/>
+							<div class="text-xs text-[var(--muted)]">
+								Optional. Use a reserved domain if you want a stable passkey origin across restarts.
+							</div>
+						</div>
+
+						${
+							ngStatus?.public_url
+								? html`<div class="flex flex-col gap-1">
+									<h4 class="text-sm font-medium text-[var(--text-strong)]">Active public URL</h4>
+									<a
+										href=${ngStatus.public_url}
+										target="_blank"
+										rel="noopener"
+										class="font-mono text-sm text-[var(--accent)] no-underline break-all"
+									>
+										${ngStatus.public_url}
+									</a>
+								</div>`
+								: null
+						}
+						${
+							ngStatus?.passkey_warning
+								? html`<div class="alert-warning-text max-w-form">${ngStatus.passkey_warning}</div>`
+								: null
+						}
+							${
+								ngForm.enabled && !authReady
+									? html`<div class="alert-warning-text max-w-form">
+										<span class="alert-label-warn">Warning:</span>${" "}
+										ngrok can be enabled now, but remote visitors will see the setup-required
+										page until authentication is configured.
+									</div>`
+									: null
+							}
+						${ngMsg ? html`<div class="text-xs text-[var(--ok)]">${ngMsg}</div>` : null}
+
+						<div class="flex flex-wrap gap-2">
+							<button type="submit" class="provider-btn" disabled=${ngSaving}>
+								${ngSaving ? "Saving\u2026" : "Save ngrok settings"}
+							</button>
+						</div>
+					</form>`
+				}
+		</section>`;
 	}
 
-	function renderTsError(container) {
-		var errEl = cloneHidden("ts-error");
-		if (errEl) {
-			setLinkedText(errEl.querySelector("[data-ts-error-text]"), tsError);
-			container.appendChild(errEl);
-		}
-	}
-
-	function renderTsWarning(container) {
-		var warningEl = document.createElement("div");
-		warningEl.className = "alert-warning-text max-w-form";
-		warningEl.textContent = tsWarning;
-		container.appendChild(warningEl);
-	}
-
-	function renderNotInstalled(container) {
-		var notInst = cloneHidden("ts-not-installed");
-		if (notInst) {
-			notInst.querySelector("[data-ts-recheck]").addEventListener("click", fetchTsStatus);
-			container.appendChild(notInst);
-		}
-	}
-
-	// Build DOM from hidden elements after each render.
-	useEffect(() => {
-		var container = ref.current;
-		if (!container) return;
-		while (container.children.length > 2) container.removeChild(container.lastChild);
-
-		if (tsLoading) {
-			var loadEl = document.createElement("div");
-			loadEl.className = "text-xs text-[var(--muted)]";
-			loadEl.textContent = "Loading\u2026 this can take a few seconds.";
-			container.appendChild(loadEl);
-			return;
-		}
-		if (tsStatus?.installed) renderInstalledBar(container, tsStatus);
-		if (tsError) renderTsError(container);
-		if (tsWarning) renderTsWarning(container);
-		if (tsStatus?.installed === false) {
-			if (!tsError) renderNotInstalled(container);
-			return;
-		}
-		renderInstalledState(container);
-	});
-
-	return html`<div ref=${ref} class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
-		<h2 class="text-lg font-medium text-[var(--text-strong)]">Tailscale</h2>
-		<p class="text-xs text-[var(--muted)] leading-relaxed max-w-form" style="margin:0;">
-			Expose the gateway via Tailscale Serve (tailnet-only HTTPS) or Funnel
-			(public HTTPS). The gateway stays bound to localhost; Tailscale proxies
-			traffic to it.
+	return html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-4 overflow-y-auto">
+		<h2 class="text-lg font-medium text-[var(--text-strong)]">Remote Access</h2>
+		<p class="text-xs text-[var(--muted)] leading-relaxed max-w-[60rem]" style="margin:0;">
+			Choose how moltis is exposed beyond localhost. Tailscale is the safer default for tailnet access and
+			optional public Funnel, while ngrok gives you a managed public HTTPS URL for teams, demos, and shared
+			endpoints.
 		</p>
-	</div>`;
+			<div class="flex flex-col gap-4">
+				${renderTailscaleCard()}
+				${renderNgrokCard()}
+			</div>
+		</div>`;
 }
 
 // ── Voice section ────────────────────────────────────────────
@@ -2798,7 +4190,7 @@ function VoiceSection() {
 					setVoiceTesting({ id: providerId, type, phase: "transcribing" });
 					rerender();
 
-					var audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+					var audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || mimeType });
 
 					try {
 						var resp = await transcribeAudio(S.activeSessionKey, providerId, audioBlob);
@@ -2806,10 +4198,14 @@ function VoiceSection() {
 						if (resp.ok) {
 							var sttRes = await resp.json();
 
-							if (sttRes.ok && sttRes.transcription?.text) {
+							if (sttRes.ok && typeof sttRes.transcription?.text === "string") {
+								var transcriptText = sttRes.transcription.text.trim();
 								setVoiceTestResults((prev) => ({
 									...prev,
-									[providerId]: { text: sttRes.transcription.text, error: null },
+									[providerId]: {
+										text: transcriptText || null,
+										error: transcriptText ? null : "No speech detected",
+									},
 								}));
 							} else {
 								setVoiceTestResults((prev) => ({
@@ -3094,6 +4490,7 @@ function LocalProviderInstructions({ providerId, voxtralReqs }) {
 // Add Voice Provider Modal
 function AddVoiceProviderModal({ unconfiguredProviders, voxtralReqs, onSaved }) {
 	var [apiKey, setApiKey] = useState("");
+	var [baseUrlValue, setBaseUrlValue] = useState("");
 	var [voiceValue, setVoiceValue] = useState("");
 	var [modelValue, setModelValue] = useState("");
 	var [languageCodeValue, setLanguageCodeValue] = useState("");
@@ -3108,12 +4505,14 @@ function AddVoiceProviderModal({ unconfiguredProviders, voxtralReqs, onSaved }) 
 		: null;
 	var isElevenLabsProvider = selectedProvider === "elevenlabs" || selectedProvider === "elevenlabs-stt";
 	var supportsTtsVoiceSettings = providerMeta?.type === "tts";
+	var supportsBaseUrl = providerMeta?.capabilities?.baseUrl === true;
 
 	function onClose() {
 		voiceShowAddModal.value = false;
 		voiceSelectedProvider.value = null;
 		voiceSelectedProviderData.value = null;
 		setApiKey("");
+		setBaseUrlValue("");
 		setVoiceValue("");
 		setModelValue("");
 		setLanguageCodeValue("");
@@ -3122,30 +4521,28 @@ function AddVoiceProviderModal({ unconfiguredProviders, voxtralReqs, onSaved }) 
 
 	function onSaveKey() {
 		var hasApiKey = apiKey.trim().length > 0;
-		var hasSettings = supportsTtsVoiceSettings && (voiceValue.trim() || modelValue.trim() || languageCodeValue.trim());
+		var trimmedBaseUrl = baseUrlValue.trim();
+		var hadBaseUrl =
+			typeof providerMeta?.settings?.baseUrl === "string" && providerMeta.settings.baseUrl.trim().length > 0;
+		var hasBaseUrl = supportsBaseUrl && (trimmedBaseUrl.length > 0 || hadBaseUrl);
+		var hasSettings =
+			(supportsTtsVoiceSettings && (voiceValue.trim() || modelValue.trim() || languageCodeValue.trim())) || hasBaseUrl;
 		if (!(hasApiKey || hasSettings)) {
-			setError("Provide an API key or at least one voice setting.");
+			setError("Provide an API key, base URL, or at least one provider setting.");
 			return;
 		}
 		setError("");
 		setSaving(true);
 
-		var voiceOpts = supportsTtsVoiceSettings
-			? {
-					voice: voiceValue.trim() || undefined,
-					model: modelValue.trim() || undefined,
-					languageCode: languageCodeValue.trim() || undefined,
-				}
-			: undefined;
+		var voiceOpts = {
+			baseUrl: hasBaseUrl ? trimmedBaseUrl : undefined,
+			voice: supportsTtsVoiceSettings ? voiceValue.trim() || undefined : undefined,
+			model: supportsTtsVoiceSettings ? modelValue.trim() || undefined : undefined,
+			languageCode: supportsTtsVoiceSettings ? languageCodeValue.trim() || undefined : undefined,
+		};
 		var req = hasApiKey
 			? saveVoiceKey(selectedProvider, apiKey.trim(), voiceOpts)
-			: sendRpc("voice.config.save_settings", {
-					provider: selectedProvider,
-					voice: voiceOpts?.voice,
-					voiceId: voiceOpts?.voice,
-					model: voiceOpts?.model,
-					languageCode: voiceOpts?.languageCode,
-				});
+			: saveVoiceSettings(selectedProvider, voiceOpts);
 		req
 			.then((res) => {
 				setSaving(false);
@@ -3166,6 +4563,7 @@ function AddVoiceProviderModal({ unconfiguredProviders, voxtralReqs, onSaved }) 
 		voiceSelectedProvider.value = providerId;
 		voiceSelectedProviderData.value = null;
 		setApiKey("");
+		setBaseUrlValue("");
 		setVoiceValue("");
 		setModelValue("");
 		setLanguageCodeValue("");
@@ -3175,6 +4573,7 @@ function AddVoiceProviderModal({ unconfiguredProviders, voxtralReqs, onSaved }) 
 	useEffect(() => {
 		var settings = voiceSelectedProviderData.value?.settings;
 		if (!settings) return;
+		setBaseUrlValue(settings.baseUrl || "");
 		setVoiceValue(settings.voiceId || settings.voice || "");
 		setModelValue(settings.model || "");
 		setLanguageCodeValue(settings.languageCode || "");
@@ -3217,15 +4616,34 @@ function AddVoiceProviderModal({ unconfiguredProviders, voxtralReqs, onSaved }) 
 			return html`<${Modal} show=${voiceShowAddModal.value} onClose=${onClose} title="Add ${providerMeta.name}">
 				<div class="channel-form">
 					<div class="text-sm text-[var(--text-strong)]">${providerMeta.name}</div>
-					<div class="text-xs text-[var(--muted)]" style="margin-bottom:12px;">${providerMeta.description}</div>
+					<div class="mb-3 text-xs text-[var(--muted)]">${providerMeta.description}</div>
 
 					<label class="text-xs text-[var(--muted)]">API Key</label>
-					<input type="password" class="provider-key-input" style="width:100%;"
+					<input type="password" class="provider-key-input w-full"
 						value=${apiKey} onInput=${(e) => setApiKey(e.target.value)}
 						placeholder=${providerMeta.keyPlaceholder || "Leave blank to keep existing key"} />
-					<div class="text-xs text-[var(--muted)]">
+					${
+						providerMeta.keyUrl
+							? html`<div class="text-xs text-[var(--muted)]">
 						Get your API key at <a href=${providerMeta.keyUrl} target="_blank" rel="noopener" class="hover:underline text-[var(--accent)]">${providerMeta.keyUrlLabel}</a>
+					</div>`
+							: null
+					}
+
+					${
+						supportsBaseUrl
+							? html`<div class="mt-2 flex flex-col gap-2">
+					<label class="text-xs text-[var(--muted)]">Base URL</label>
+					<input type="text" class="provider-key-input w-full"
+						data-field="baseUrl"
+						value=${baseUrlValue} onInput=${(e) => setBaseUrlValue(e.target.value)}
+						placeholder="http://localhost:8000/v1" />
+					<div class="text-xs text-[var(--muted)]">
+						Use this for a local or OpenAI-compatible server. Leave the API key blank if your endpoint does not require one.
 					</div>
+				</div>`
+							: null
+					}
 
 					${
 						supportsTtsVoiceSettings
@@ -3235,13 +4653,13 @@ function AddVoiceProviderModal({ unconfiguredProviders, voxtralReqs, onSaved }) 
 					${isElevenLabsProvider && elevenlabsCatalog.warning ? html`<div class="text-xs text-[var(--muted)]">${elevenlabsCatalog.warning}</div>` : null}
 					${
 						isElevenLabsProvider && elevenlabsCatalog.voices.length > 0
-							? html`<select class="provider-key-input" style="width:100%;" onChange=${(e) => setVoiceValue(e.target.value)}>
+							? html`<select class="provider-key-input w-full" onChange=${(e) => setVoiceValue(e.target.value)}>
 						<option value="">Pick a voice from your account...</option>
 						${elevenlabsCatalog.voices.map((v) => html`<option value=${v.id}>${v.name} (${v.id})</option>`)}
 					</select>`
 							: null
 					}
-					<input type="text" class="provider-key-input" style="width:100%;"
+					<input type="text" class="provider-key-input w-full"
 						value=${voiceValue} onInput=${(e) => setVoiceValue(e.target.value)}
 						list=${isElevenLabsProvider ? "elevenlabs-voice-options" : undefined}
 						placeholder="voice id / name (optional)" />
@@ -3256,13 +4674,13 @@ function AddVoiceProviderModal({ unconfiguredProviders, voxtralReqs, onSaved }) 
 					<label class="text-xs text-[var(--muted)]">Model</label>
 					${
 						isElevenLabsProvider && elevenlabsCatalog.models.length > 0
-							? html`<select class="provider-key-input" style="width:100%;" onChange=${(e) => setModelValue(e.target.value)}>
+							? html`<select class="provider-key-input w-full" onChange=${(e) => setModelValue(e.target.value)}>
 						<option value="">Pick a model...</option>
 						${elevenlabsCatalog.models.map((m) => html`<option value=${m.id}>${m.name} (${m.id})</option>`)}
 					</select>`
 							: null
 					}
-					<input type="text" class="provider-key-input" style="width:100%;"
+					<input type="text" class="provider-key-input w-full"
 						value=${modelValue} onInput=${(e) => setModelValue(e.target.value)}
 						list=${isElevenLabsProvider ? "elevenlabs-model-options" : undefined}
 						placeholder="model (optional)" />
@@ -3278,7 +4696,7 @@ function AddVoiceProviderModal({ unconfiguredProviders, voxtralReqs, onSaved }) 
 						selectedProvider === "google" || selectedProvider === "google-tts"
 							? html`<div class="flex flex-col gap-2">
 							<label class="text-xs text-[var(--muted)]">Language Code</label>
-							<input type="text" class="provider-key-input" style="width:100%;"
+							<input type="text" class="provider-key-input w-full"
 								value=${languageCodeValue} onInput=${(e) => setLanguageCodeValue(e.target.value)}
 								placeholder="en-US (optional)" />
 						</div>`
@@ -3430,10 +4848,16 @@ function MemorySection() {
 	var [error, setError] = useState(null);
 
 	// Form state
+	var [style, setStyle] = useState("hybrid");
+	var [agentWriteMode, setAgentWriteMode] = useState("hybrid");
+	var [userProfileWriteMode, setUserProfileWriteMode] = useState("explicit-and-auto");
 	var [backend, setBackend] = useState("builtin");
+	var [provider, setProvider] = useState("auto");
 	var [citations, setCitations] = useState("auto");
 	var [llmReranking, setLlmReranking] = useState(false);
-	var [sessionExport, setSessionExport] = useState(false);
+	var [searchMergeStrategy, setSearchMergeStrategy] = useState("rrf");
+	var [sessionExport, setSessionExport] = useState("on-new-or-reset");
+	var [promptMemoryMode, setPromptMemoryMode] = useState("live-reload");
 
 	useEffect(() => {
 		// Fetch memory status, config, and QMD status
@@ -3445,10 +4869,16 @@ function MemorySection() {
 				if (configRes?.ok) {
 					var cfg = configRes.payload;
 					setMemConfig(cfg);
+					setStyle(cfg.style || "hybrid");
+					setAgentWriteMode(cfg.agent_write_mode || "hybrid");
+					setUserProfileWriteMode(cfg.user_profile_write_mode || "explicit-and-auto");
 					setBackend(cfg.backend || "builtin");
+					setProvider(cfg.provider || "auto");
 					setCitations(cfg.citations || "auto");
 					setLlmReranking(cfg.llm_reranking ?? false);
-					setSessionExport(cfg.session_export ?? false);
+					setSearchMergeStrategy(cfg.search_merge_strategy || "rrf");
+					setSessionExport(cfg.session_export || "on-new-or-reset");
+					setPromptMemoryMode(cfg.prompt_memory_mode || "live-reload");
 				}
 				if (qmdRes?.ok) {
 					setQmdStatus(qmdRes.payload);
@@ -3469,10 +4899,16 @@ function MemorySection() {
 		setSaved(false);
 
 		sendRpc("memory.config.update", {
+			style,
+			agent_write_mode: agentWriteMode,
+			user_profile_write_mode: userProfileWriteMode,
 			backend,
+			provider,
 			citations,
 			llm_reranking: llmReranking,
+			search_merge_strategy: searchMergeStrategy,
 			session_export: sessionExport,
+			prompt_memory_mode: promptMemoryMode,
 		}).then((res) => {
 			setSaving(false);
 			if (res?.ok) {
@@ -3536,9 +4972,26 @@ function MemorySection() {
 		}
 
 		<!-- Configuration -->
-		<form onSubmit=${onSave} style="max-width:600px;display:flex;flex-direction:column;gap:16px;">
-			<!-- Backend selection -->
-			<div>
+			<form onSubmit=${onSave} style="max-width:600px;display:flex;flex-direction:column;gap:16px;">
+				<div>
+					<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Memory Style</h3>
+					<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
+						Choose the high-level orchestration model. This controls whether prompt-visible <code>MEMORY.md</code> and memory tools are both active, one is active, or both are off.
+					</p>
+					<select class="provider-key-input" style="width:auto;min-width:240px;"
+						value=${style} onChange=${(e) => {
+							setStyle(e.target.value);
+							rerender();
+						}}>
+						<option value="hybrid">Hybrid</option>
+						<option value="prompt-only">Prompt-only</option>
+						<option value="search-only">Search-only</option>
+						<option value="off">Off</option>
+					</select>
+				</div>
+
+				<!-- Backend selection -->
+				<div>
 				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Backend</h3>
 
 				<!-- Comparison table -->
@@ -3643,8 +5096,8 @@ function MemorySection() {
 									<span style="margin:0 4px;">or</span>
 									<code style="font-family:var(--font-mono);font-size:.7rem;background:var(--surface);padding:2px 4px;border-radius:3px;">bun install -g @tobilu/qmd</code>
 								<br/><br/>
-								Then start the QMD daemon:
-								<code style="display:block;margin-top:4px;font-family:var(--font-mono);font-size:.7rem;background:var(--surface);padding:2px 4px;border-radius:3px;">qmd daemon</code>
+								Verify the CLI is available:
+								<code style="display:block;margin-top:4px;font-family:var(--font-mono);font-size:.7rem;background:var(--surface);padding:2px 4px;border-radius:3px;">qmd --version</code>
 								<br/>
 									<a href="https://github.com/tobi/qmd" target="_blank" rel="noopener"
 										style="color:var(--accent);">View documentation \u2192</a>
@@ -3657,7 +5110,95 @@ function MemorySection() {
 				}
 			</div>
 
+				<div>
+					<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Prompt Memory Mode</h3>
+					<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
+						When prompt memory is enabled, choose whether <code>MEMORY.md</code> is reread on every turn or frozen when the session starts.
+					</p>
+					<select class="provider-key-input" style="width:auto;min-width:260px;"
+						value=${promptMemoryMode}
+						disabled=${style === "search-only" || style === "off"}
+						onChange=${(e) => {
+							setPromptMemoryMode(e.target.value);
+							rerender();
+						}}>
+						<option value="live-reload">Live reload</option>
+						<option value="frozen-at-session-start">Frozen at session start</option>
+					</select>
+					${
+						style === "search-only" || style === "off"
+							? html`
+						<div class="text-xs text-[var(--muted)]" style="margin-top:8px;">
+							Prompt memory is disabled by the current memory style, so this setting will only matter after you re-enable prompt memory.
+						</div>
+					`
+							: null
+					}
+				</div>
+
+				<div>
+					<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Agent Memory Writes</h3>
+					<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
+						Control where agent-authored memory writes can land. This affects <code>memory_save</code> and silent compaction memory flushes.
+				</p>
+				<select class="provider-key-input" style="width:auto;min-width:220px;"
+					value=${agentWriteMode} onChange=${(e) => {
+						setAgentWriteMode(e.target.value);
+						rerender();
+					}}>
+					<option value="hybrid">Hybrid (MEMORY.md and memory/*.md)</option>
+					<option value="prompt-only">Prompt-only (MEMORY.md only)</option>
+					<option value="search-only">Search-only (memory/*.md only)</option>
+					<option value="off">Off</option>
+				</select>
+			</div>
+
+			<div>
+				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">USER.md Writes</h3>
+				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
+					Control whether Moltis mirrors your profile into <code>USER.md</code>, and whether browser or channel timezone/location signals can update it silently.
+				</p>
+				<select class="provider-key-input" style="width:auto;min-width:250px;"
+					value=${userProfileWriteMode} onChange=${(e) => {
+						setUserProfileWriteMode(e.target.value);
+						rerender();
+					}}>
+					<option value="explicit-and-auto">Explicit and auto</option>
+					<option value="explicit-only">Explicit only</option>
+					<option value="off">Off (moltis.toml only)</option>
+				</select>
+			</div>
+
 			<!-- Citations -->
+			<div>
+				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Embedding Provider</h3>
+				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
+					Select which embedding provider the built-in memory backend should use for RAG. QMD manages retrieval separately, so this setting is ignored while the QMD backend is active.
+				</p>
+				<select class="provider-key-input" style="width:auto;min-width:220px;"
+					value=${provider}
+					disabled=${backend === "qmd"}
+					onChange=${(e) => {
+						setProvider(e.target.value);
+						rerender();
+					}}>
+					<option value="auto">Auto-detect</option>
+					<option value="local">Local GGUF</option>
+					<option value="ollama">Ollama</option>
+					<option value="openai">OpenAI</option>
+					<option value="custom">Custom OpenAI-compatible</option>
+				</select>
+				${
+					backend === "qmd"
+						? html`
+					<div class="text-xs text-[var(--muted)]" style="margin-top:8px;">
+						This setting is kept for when you switch back to the built-in backend.
+					</div>
+				`
+						: null
+				}
+			</div>
+
 			<div>
 				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Citations</h3>
 				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
@@ -3671,6 +5212,21 @@ function MemorySection() {
 					<option value="auto">Auto (multi-file only)</option>
 					<option value="on">Always</option>
 					<option value="off">Never</option>
+				</select>
+			</div>
+
+			<div>
+				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Search Merge Strategy</h3>
+				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
+					Choose how Moltis blends vector and keyword memory hits before optional reranking.
+				</p>
+				<select class="provider-key-input" style="width:auto;min-width:180px;"
+					value=${searchMergeStrategy} onChange=${(e) => {
+						setSearchMergeStrategy(e.target.value);
+						rerender();
+					}}>
+					<option value="rrf">RRF</option>
+					<option value="linear">Linear</option>
 				</select>
 			</div>
 
@@ -3693,19 +5249,18 @@ function MemorySection() {
 
 			<!-- Session Export -->
 			<div>
-				<label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-					<input type="checkbox" checked=${sessionExport}
-						onChange=${(e) => {
-							setSessionExport(e.target.checked);
-							rerender();
-						}} />
-					<div>
-						<span class="text-sm font-medium text-[var(--text-strong)]">Session Export</span>
-						<p class="text-xs text-[var(--muted)]" style="margin:2px 0 0;">
-							Export session transcripts to memory for cross-run recall of past conversations.
-						</p>
-					</div>
-				</label>
+				<h3 class="text-sm font-medium text-[var(--text-strong)]" style="margin-bottom:8px;">Session Export</h3>
+				<p class="text-xs text-[var(--muted)]" style="margin:0 0 8px;">
+					Export session transcripts into searchable memory when a session is rolled over.
+				</p>
+				<select class="provider-key-input" style="width:auto;min-width:220px;"
+					value=${sessionExport} onChange=${(e) => {
+						setSessionExport(e.target.value);
+						rerender();
+					}}>
+					<option value="on-new-or-reset">On /new and /reset</option>
+					<option value="off">Off</option>
+				</select>
 			</div>
 
 			<div style="display:flex;align-items:center;gap:8px;padding-top:8px;border-top:1px solid var(--border);">
@@ -3942,10 +5497,12 @@ var pageSectionHandlers = {
 		init: (container) => initCrons(container, "heartbeat"),
 		teardown: teardownCrons,
 	},
+	webhooks: { init: initWebhooks, teardown: teardownWebhooks },
 	providers: { init: initProviders, teardown: teardownProviders },
 	channels: { init: initChannels, teardown: teardownChannels },
 	mcp: { init: initMcp, teardown: teardownMcp },
 	nodes: { init: initNodes, teardown: teardownNodes },
+	projects: { init: initProjects, teardown: teardownProjects },
 	hooks: { init: initHooks, teardown: teardownHooks },
 	skills: { init: initSkills, teardown: teardownSkills },
 	agents: { init: initAgents, teardown: teardownAgents },
@@ -4021,15 +5578,26 @@ function SettingsPage() {
 					}
 					${
 						ps
-							? html`<${PageSection} key=${`${section}:${subPath}`} initFn=${ps.init} teardownFn=${ps.teardown} subPath=${subPath} />`
+							? section === "terminal" && gon.get("terminal_enabled") !== true
+								? html`<div class="flex-1 flex flex-col min-w-0 p-4 gap-3 overflow-y-auto">
+									<h2 class="text-base font-medium text-[var(--text-strong)]">Terminal</h2>
+									<div class="text-xs text-[var(--muted)] max-w-form">
+										The host terminal has been disabled by the server administrator.
+										To re-enable it, set <code>terminal_enabled = true</code> under <code>[server]</code> in the configuration file,
+										or remove the <code>MOLTIS_TERMINAL_DISABLED</code> environment variable if it is set.
+									</div>
+								</div>`
+								: html`<${PageSection} key=${`${section}:${subPath}`} initFn=${ps.init} teardownFn=${ps.teardown} subPath=${subPath} />`
 							: null
 					}
 					${section === "identity" ? html`<${IdentitySection} />` : null}
 					${section === "memory" ? html`<${MemorySection} />` : null}
 					${section === "environment" ? html`<${EnvironmentSection} />` : null}
+						${section === "tools" ? html`<${ToolsSection} />` : null}
 						${section === "security" ? html`<${SecuritySection} />` : null}
 						${section === "vault" ? html`<${VaultSection} />` : null}
-						${section === "tailscale" ? html`<${TailscaleSection} />` : null}
+						${section === "ssh" ? html`<${SshSection} />` : null}
+						${section === "remote-access" ? html`<${RemoteAccessSection} />` : null}
 						${
 							section === "voice"
 								? gon.get("voice_enabled") === true
@@ -4062,13 +5630,14 @@ registerPrefix(
 		container.style.cssText = "flex-direction:row;padding:0;overflow:hidden;";
 		var parts = (param || "").replace(/:/g, "/").split("/").filter(Boolean);
 		var requestedSection = parts[0] || "";
+		var requestedSectionAlias = requestedSection === "tailscale" ? "remote-access" : requestedSection;
 		var subPath = parts.slice(1).join("/");
-		var isValidSection = requestedSection && getSectionItems().some((s) => s.id === requestedSection);
-		var section = isValidSection ? requestedSection : DEFAULT_SECTION;
+		var isValidSection = requestedSectionAlias && getSectionItems().some((s) => s.id === requestedSectionAlias);
+		var section = isValidSection ? requestedSectionAlias : DEFAULT_SECTION;
 		activeSection.value = section;
 		activeSubPath.value = isValidSection ? subPath : "";
 		mobileSidebarVisible.value = !isMobileViewport();
-		if (!isValidSection) {
+		if (!isValidSection || requestedSectionAlias !== requestedSection) {
 			history.replaceState(null, "", settingsPath(section));
 		}
 		render(html`<${SettingsPage} />`, container);

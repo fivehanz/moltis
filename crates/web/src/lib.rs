@@ -128,6 +128,49 @@ fn build_api_routes() -> Router<AppState> {
             "/api/env/{id}",
             axum::routing::delete(moltis_httpd::env_routes::env_delete),
         )
+        .route("/api/ssh", get(moltis_httpd::ssh_routes::ssh_status))
+        .route("/api/ssh/doctor", get(moltis_httpd::ssh_routes::ssh_doctor))
+        .route(
+            "/api/ssh/host-key/scan",
+            axum::routing::post(moltis_httpd::ssh_routes::ssh_scan_host_key),
+        )
+        .route(
+            "/api/ssh/doctor/test-active",
+            axum::routing::post(moltis_httpd::ssh_routes::ssh_doctor_test_active),
+        )
+        .route(
+            "/api/ssh/keys/generate",
+            axum::routing::post(moltis_httpd::ssh_routes::ssh_generate_key),
+        )
+        .route(
+            "/api/ssh/keys/import",
+            axum::routing::post(moltis_httpd::ssh_routes::ssh_import_key),
+        )
+        .route(
+            "/api/ssh/keys/{id}",
+            axum::routing::delete(moltis_httpd::ssh_routes::ssh_delete_key),
+        )
+        .route(
+            "/api/ssh/targets",
+            axum::routing::post(moltis_httpd::ssh_routes::ssh_create_target),
+        )
+        .route(
+            "/api/ssh/targets/{id}",
+            axum::routing::delete(moltis_httpd::ssh_routes::ssh_delete_target),
+        )
+        .route(
+            "/api/ssh/targets/{id}/default",
+            axum::routing::post(moltis_httpd::ssh_routes::ssh_set_default_target),
+        )
+        .route(
+            "/api/ssh/targets/{id}/test",
+            axum::routing::post(moltis_httpd::ssh_routes::ssh_test_target),
+        )
+        .route(
+            "/api/ssh/targets/{id}/pin",
+            axum::routing::post(moltis_httpd::ssh_routes::ssh_pin_target_host_key)
+                .delete(moltis_httpd::ssh_routes::ssh_clear_target_host_key),
+        )
         .route(
             "/api/config",
             get(moltis_httpd::tools_routes::config_get)
@@ -183,6 +226,9 @@ fn build_api_routes() -> Router<AppState> {
 
 /// Add feature-specific routes to API routes.
 fn add_feature_routes(routes: Router<AppState>) -> Router<AppState> {
+    #[cfg(feature = "ngrok")]
+    let routes = routes.nest("/api/ngrok", moltis_httpd::ngrok_routes::ngrok_router());
+
     #[cfg(feature = "tailscale")]
     let routes = routes.nest(
         "/api/tailscale",

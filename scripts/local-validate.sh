@@ -485,6 +485,12 @@ run_check_async "local/i18n" "$i18n_cmd"
 i18n_pid="$RUN_CHECK_ASYNC_PID"
 run_check_async "local/zizmor" "$zizmor_cmd"
 zizmor_pid="$RUN_CHECK_ASYNC_PID"
+run_check_async "local/install-names" "./scripts/check-install-package-names.sh"
+install_names_pid="$RUN_CHECK_ASYNC_PID"
+run_check_async "local/install-docs" "./scripts/check-install-docs.sh"
+install_docs_pid="$RUN_CHECK_ASYNC_PID"
+run_check_async "local/file-size" "./scripts/check-file-size.sh"
+file_size_pid="$RUN_CHECK_ASYNC_PID"
 
 parallel_failed=0
 if ! wait "$fmt_pid"; then parallel_failed=1; fi
@@ -493,6 +499,12 @@ if ! wait "$biome_pid"; then parallel_failed=1; fi
 if ! report_async_result "local/biome" "$biome_pid"; then parallel_failed=1; fi
 if ! wait "$i18n_pid"; then parallel_failed=1; fi
 if ! report_async_result "local/i18n" "$i18n_pid"; then parallel_failed=1; fi
+if ! wait "$install_names_pid"; then parallel_failed=1; fi
+if ! report_async_result "local/install-names" "$install_names_pid"; then parallel_failed=1; fi
+if ! wait "$install_docs_pid"; then parallel_failed=1; fi
+if ! report_async_result "local/install-docs" "$install_docs_pid"; then parallel_failed=1; fi
+if ! wait "$file_size_pid"; then parallel_failed=1; fi
+if ! report_async_result "local/file-size" "$file_size_pid"; then parallel_failed=1; fi
 
 if [[ "$parallel_failed" -ne 0 ]]; then
   echo "One or more parallel local checks failed." >&2

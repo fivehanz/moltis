@@ -11,8 +11,17 @@ pub use moltis_service_traits::*;
 use {
     async_trait::async_trait,
     serde_json::Value,
-    std::{collections::HashSet, path::Path, sync::Arc},
+    std::{
+        collections::HashSet,
+        path::{Path, PathBuf},
+        sync::Arc,
+    },
 };
+
+mod browser;
+mod gateway;
+
+pub use {browser::RealBrowserService, gateway::GatewayServices};
 
 fn security_audit(event: &str, details: Value) {
     let dir = moltis_config::data_dir().join("logs");
@@ -305,6 +314,9 @@ impl SkillsService for NoopSkillsService {
                     "repo_name": repo.repo_name,
                     "installed_at_ms": repo.installed_at_ms,
                     "commit_sha": repo.commit_sha,
+                    "quarantined": repo.quarantined,
+                    "quarantine_reason": repo.quarantine_reason,
+                    "provenance": repo.provenance,
                     "drifted": drifted_sources.contains(&repo.source),
                     "format": format,
                     "skill_count": repo.skills.len(),
@@ -448,6 +460,9 @@ impl SkillsService for NoopSkillsService {
                     "repo_name": repo.repo_name,
                     "installed_at_ms": repo.installed_at_ms,
                     "commit_sha": repo.commit_sha,
+                    "quarantined": repo.quarantined,
+                    "quarantine_reason": repo.quarantine_reason,
+                    "provenance": repo.provenance,
                     "drifted": drifted_sources.contains(&repo.source),
                     "format": format,
                     "skills": skills,
@@ -515,6 +530,102 @@ impl SkillsService for NoopSkillsService {
         );
 
         Ok(serde_json::json!({ "removed": source }))
+    }
+
+    async fn repos_export(&self, params: Value) -> ServiceResult {
+        let source = params
+            .get("source")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'source' parameter".to_string())?;
+        let output_path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from);
+        let install_dir =
+            moltis_skills::install::default_install_dir().map_err(ServiceError::message)?;
+        let exported = moltis_skills::portability::export_repo_bundle(
+            source,
+            &install_dir,
+            output_path.as_deref(),
+        )
+        .await
+        .map_err(ServiceError::message)?;
+
+        security_audit(
+            "skills.repos.export",
+            serde_json::json!({
+                "source": source,
+                "path": exported.bundle_path,
+            }),
+        );
+
+        Ok(serde_json::json!({
+            "source": exported.repo.source,
+            "repo_name": exported.repo.repo_name,
+            "path": exported.bundle_path,
+        }))
+    }
+
+    async fn repos_import(&self, params: Value) -> ServiceResult {
+        let bundle_path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'path' parameter".to_string())?;
+        let install_dir =
+            moltis_skills::install::default_install_dir().map_err(ServiceError::message)?;
+        let imported =
+            moltis_skills::portability::import_repo_bundle(Path::new(bundle_path), &install_dir)
+                .await
+                .map_err(ServiceError::message)?;
+
+        security_audit(
+            "skills.repos.import",
+            serde_json::json!({
+                "source": imported.source,
+                "repo_name": imported.repo_name,
+                "path": imported.bundle_path,
+                "skill_count": imported.skills.len(),
+            }),
+        );
+
+        Ok(serde_json::json!({
+            "source": imported.source,
+            "repo_name": imported.repo_name,
+            "format": imported.format,
+            "path": imported.bundle_path,
+            "quarantined": true,
+            "skill_count": imported.skills.len(),
+            "skills": imported.skills.iter().map(|skill| serde_json::json!({
+                "name": skill.name,
+                "description": skill.description,
+                "path": skill.path.to_string_lossy(),
+            })).collect::<Vec<_>>(),
+        }))
+    }
+
+    async fn repos_unquarantine(&self, params: Value) -> ServiceResult {
+        let source = params
+            .get("source")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| "missing 'source' parameter".to_string())?;
+
+        let manifest_path = moltis_skills::manifest::ManifestStore::default_path()
+            .map_err(ServiceError::message)?;
+        let store = moltis_skills::manifest::ManifestStore::new(manifest_path);
+        let mut manifest = store.load().map_err(ServiceError::message)?;
+        let repo = manifest
+            .find_repo_mut(source)
+            .ok_or_else(|| format!("repo '{source}' not found"))?;
+        repo.quarantined = false;
+        repo.quarantine_reason = None;
+        store.save(&manifest).map_err(ServiceError::message)?;
+
+        security_audit(
+            "skills.repos.unquarantine",
+            serde_json::json!({ "source": source }),
+        );
+
+        Ok(serde_json::json!({ "source": source, "quarantined": false }))
     }
 
     async fn emergency_disable(&self) -> ServiceResult {
@@ -660,6 +771,9 @@ impl SkillsService for NoopSkillsService {
                     "install_options": elig.install_options,
                     "trusted": skill_state.trusted,
                     "enabled": skill_state.enabled,
+                    "quarantined": repo.quarantined,
+                    "quarantine_reason": repo.quarantine_reason,
+                    "provenance": repo.provenance,
                     "drifted": drifted_sources.contains(source),
                     "commit_sha": commit_sha,
                     "commit_url": commit_url,
@@ -705,6 +819,9 @@ impl SkillsService for NoopSkillsService {
                     "install_options": empty,
                     "trusted": skill_state.trusted,
                     "enabled": skill_state.enabled,
+                    "quarantined": repo.quarantined,
+                    "quarantine_reason": repo.quarantine_reason,
+                    "provenance": repo.provenance,
                     "drifted": drifted_sources.contains(source),
                     "commit_sha": commit_sha,
                     "commit_url": commit_url,
@@ -1102,6 +1219,17 @@ fn toggle_skill(params: &Value, enabled: bool) -> ServiceResult {
     }
 
     if enabled {
+        let quarantined = manifest
+            .find_repo(source)
+            .map(|repo| repo.quarantined)
+            .ok_or_else(|| format!("repo '{source}' not found"))?;
+        if quarantined {
+            return Err(format!(
+                "repo '{source}' is quarantined. Review it and run skills.repos.unquarantine before enabling"
+            )
+            .into());
+        }
+
         if drifted_sources.contains(source) {
             return Err(format!(
                 "skill '{skill_name}' source changed since it was last trusted. Review and run skills.skill.trust before enabling"
@@ -1172,347 +1300,6 @@ fn set_skill_trusted(params: &Value, trusted: bool) -> ServiceResult {
         }),
     );
     Ok(serde_json::json!({ "source": source, "skill": skill_name, "trusted": trusted }))
-}
-
-// ── Browser (Real implementation — depends on moltis-browser) ───────────────
-
-/// Real browser service using BrowserManager.
-pub struct RealBrowserService {
-    config: moltis_browser::BrowserConfig,
-    manager: tokio::sync::OnceCell<Arc<moltis_browser::BrowserManager>>,
-}
-
-impl RealBrowserService {
-    pub fn new(config: &moltis_config::schema::BrowserConfig, container_prefix: String) -> Self {
-        let mut browser_config = moltis_browser::BrowserConfig::from(config);
-        browser_config.container_prefix = container_prefix;
-        Self {
-            config: browser_config,
-            manager: tokio::sync::OnceCell::new(),
-        }
-    }
-
-    pub fn from_config(
-        config: &moltis_config::schema::MoltisConfig,
-        container_prefix: String,
-    ) -> Option<Self> {
-        if !config.tools.browser.enabled {
-            return None;
-        }
-        Some(Self::new(&config.tools.browser, container_prefix))
-    }
-
-    async fn manager(&self) -> Arc<moltis_browser::BrowserManager> {
-        Arc::clone(
-            self.manager
-                .get_or_init(|| async {
-                    let config = self.config.clone();
-                    match tokio::task::spawn_blocking(move || {
-                        // Browser detection and stale-container cleanup can block;
-                        // run these off the async runtime worker threads.
-                        moltis_browser::detect::check_and_warn(config.chrome_path.as_deref());
-                        Arc::new(moltis_browser::BrowserManager::new(config))
-                    })
-                    .await
-                    {
-                        Ok(manager) => manager,
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                "browser warmup worker failed, falling back to inline initialization"
-                            );
-                            let config = self.config.clone();
-                            moltis_browser::detect::check_and_warn(config.chrome_path.as_deref());
-                            Arc::new(moltis_browser::BrowserManager::new(config))
-                        },
-                    }
-                })
-                .await,
-        )
-    }
-
-    fn manager_if_initialized(&self) -> Option<Arc<moltis_browser::BrowserManager>> {
-        self.manager.get().map(Arc::clone)
-    }
-}
-
-#[async_trait]
-impl BrowserService for RealBrowserService {
-    async fn request(&self, params: Value) -> ServiceResult {
-        let request: moltis_browser::BrowserRequest =
-            serde_json::from_value(params).map_err(|e| format!("invalid request: {e}"))?;
-
-        let manager = self.manager().await;
-        let response = manager.handle_request(request).await;
-
-        Ok(serde_json::to_value(&response).map_err(|e| format!("serialization error: {e}"))?)
-    }
-
-    async fn warmup(&self) {
-        let started = std::time::Instant::now();
-        let _ = self.manager().await;
-        tracing::debug!(
-            elapsed_ms = started.elapsed().as_millis(),
-            "browser service warmup complete"
-        );
-    }
-
-    async fn cleanup_idle(&self) {
-        if let Some(manager) = self.manager_if_initialized() {
-            manager.cleanup_idle().await;
-        }
-    }
-
-    async fn shutdown(&self) {
-        if let Some(manager) = self.manager_if_initialized() {
-            manager.shutdown().await;
-        }
-    }
-
-    async fn close_all(&self) {
-        if let Some(manager) = self.manager_if_initialized() {
-            manager.shutdown().await;
-        }
-    }
-}
-
-// ── Bundled services ────────────────────────────────────────────────────────
-
-/// All domain services the gateway delegates to.
-pub struct GatewayServices {
-    pub agent: Arc<dyn AgentService>,
-    pub session: Arc<dyn SessionService>,
-    pub channel: Arc<dyn ChannelService>,
-    pub config: Arc<dyn ConfigService>,
-    pub cron: Arc<dyn CronService>,
-    pub chat: Arc<dyn ChatService>,
-    pub tts: Arc<dyn TtsService>,
-    pub stt: Arc<dyn SttService>,
-    pub skills: Arc<dyn SkillsService>,
-    pub mcp: Arc<dyn McpService>,
-    pub browser: Arc<dyn BrowserService>,
-    pub usage: Arc<dyn UsageService>,
-    pub exec_approval: Arc<dyn ExecApprovalService>,
-    pub onboarding: Arc<dyn OnboardingService>,
-    pub update: Arc<dyn UpdateService>,
-    pub model: Arc<dyn ModelService>,
-    pub web_login: Arc<dyn WebLoginService>,
-    pub voicewake: Arc<dyn VoicewakeService>,
-    pub logs: Arc<dyn LogsService>,
-    pub provider_setup: Arc<dyn ProviderSetupService>,
-    pub project: Arc<dyn ProjectService>,
-    pub local_llm: Arc<dyn LocalLlmService>,
-    pub network_audit: Arc<dyn crate::network_audit::NetworkAuditService>,
-    /// Optional channel registry for direct plugin access (thread context, etc.).
-    pub channel_registry: Option<Arc<moltis_channels::ChannelRegistry>>,
-    /// Optional channel outbound for sending replies back to channels.
-    channel_outbound: Option<Arc<dyn moltis_channels::ChannelOutbound>>,
-    /// Optional channel stream outbound for edit-in-place channel streaming.
-    channel_stream_outbound: Option<Arc<dyn moltis_channels::ChannelStreamOutbound>>,
-    /// Optional session metadata for cross-service access (e.g. channel binding).
-    pub session_metadata: Option<Arc<moltis_sessions::metadata::SqliteSessionMetadata>>,
-    /// Optional session store for message-index lookups (e.g. deduplication).
-    pub session_store: Option<Arc<moltis_sessions::store::SessionStore>>,
-    /// Optional session share store for immutable snapshot links.
-    pub session_share_store: Option<Arc<crate::share_store::ShareStore>>,
-    /// Optional agent persona store for multi-agent support.
-    pub agent_persona_store: Option<Arc<crate::agent_persona::AgentPersonaStore>>,
-    /// Shared agents config (presets) for spawn_agent and RPC sync.
-    pub agents_config: Option<Arc<tokio::sync::RwLock<moltis_config::AgentsConfig>>>,
-}
-
-impl GatewayServices {
-    pub fn with_chat(mut self, chat: Arc<dyn ChatService>) -> Self {
-        self.chat = chat;
-        self
-    }
-
-    pub fn with_model(mut self, model: Arc<dyn ModelService>) -> Self {
-        self.model = model;
-        self
-    }
-
-    pub fn with_cron(mut self, cron: Arc<dyn CronService>) -> Self {
-        self.cron = cron;
-        self
-    }
-
-    pub fn with_provider_setup(mut self, ps: Arc<dyn ProviderSetupService>) -> Self {
-        self.provider_setup = ps;
-        self
-    }
-
-    pub fn with_channel_registry(
-        mut self,
-        registry: Arc<moltis_channels::ChannelRegistry>,
-    ) -> Self {
-        self.channel_registry = Some(registry);
-        self
-    }
-
-    pub fn with_channel_outbound(
-        mut self,
-        outbound: Arc<dyn moltis_channels::ChannelOutbound>,
-    ) -> Self {
-        self.channel_outbound = Some(outbound);
-        self
-    }
-
-    pub fn with_channel_stream_outbound(
-        mut self,
-        outbound: Arc<dyn moltis_channels::ChannelStreamOutbound>,
-    ) -> Self {
-        self.channel_stream_outbound = Some(outbound);
-        self
-    }
-
-    pub fn channel_outbound_arc(&self) -> Option<Arc<dyn moltis_channels::ChannelOutbound>> {
-        self.channel_outbound.clone()
-    }
-
-    pub fn channel_stream_outbound_arc(
-        &self,
-    ) -> Option<Arc<dyn moltis_channels::ChannelStreamOutbound>> {
-        self.channel_stream_outbound.clone()
-    }
-
-    /// Create a service bundle with all noop implementations.
-    pub fn noop() -> Self {
-        Self {
-            agent: Arc::new(NoopAgentService),
-            session: Arc::new(NoopSessionService),
-            channel: Arc::new(NoopChannelService),
-            config: Arc::new(NoopConfigService),
-            cron: Arc::new(NoopCronService),
-            chat: Arc::new(NoopChatService),
-            tts: Arc::new(NoopTtsService),
-            stt: Arc::new(NoopSttService),
-            skills: Arc::new(NoopSkillsService),
-            mcp: Arc::new(NoopMcpService),
-            browser: Arc::new(NoopBrowserService),
-            usage: Arc::new(NoopUsageService),
-            exec_approval: Arc::new(NoopExecApprovalService),
-            onboarding: Arc::new(NoopOnboardingService),
-            update: Arc::new(NoopUpdateService),
-            model: Arc::new(NoopModelService),
-            web_login: Arc::new(NoopWebLoginService),
-            voicewake: Arc::new(NoopVoicewakeService),
-            logs: Arc::new(NoopLogsService),
-            provider_setup: Arc::new(NoopProviderSetupService),
-            project: Arc::new(NoopProjectService),
-            local_llm: Arc::new(NoopLocalLlmService),
-            network_audit: Arc::new(crate::network_audit::NoopNetworkAuditService),
-            channel_registry: None,
-            channel_outbound: None,
-            channel_stream_outbound: None,
-            session_metadata: None,
-            session_store: None,
-            session_share_store: None,
-            agent_persona_store: None,
-            agents_config: None,
-        }
-    }
-
-    pub fn with_local_llm(mut self, local_llm: Arc<dyn LocalLlmService>) -> Self {
-        self.local_llm = local_llm;
-        self
-    }
-
-    pub fn with_network_audit(
-        mut self,
-        svc: Arc<dyn crate::network_audit::NetworkAuditService>,
-    ) -> Self {
-        self.network_audit = svc;
-        self
-    }
-
-    pub fn with_onboarding(mut self, onboarding: Arc<dyn OnboardingService>) -> Self {
-        self.onboarding = onboarding;
-        self
-    }
-
-    pub fn with_project(mut self, project: Arc<dyn ProjectService>) -> Self {
-        self.project = project;
-        self
-    }
-
-    pub fn with_session_metadata(
-        mut self,
-        meta: Arc<moltis_sessions::metadata::SqliteSessionMetadata>,
-    ) -> Self {
-        self.session_metadata = Some(meta);
-        self
-    }
-
-    pub fn with_session_store(mut self, store: Arc<moltis_sessions::store::SessionStore>) -> Self {
-        self.session_store = Some(store);
-        self
-    }
-
-    pub fn with_session_share_store(mut self, store: Arc<crate::share_store::ShareStore>) -> Self {
-        self.session_share_store = Some(store);
-        self
-    }
-
-    pub fn with_agent_persona_store(
-        mut self,
-        store: Arc<crate::agent_persona::AgentPersonaStore>,
-    ) -> Self {
-        self.agent_persona_store = Some(store);
-        self
-    }
-
-    pub fn with_agents_config(
-        mut self,
-        agents_config: Arc<tokio::sync::RwLock<moltis_config::AgentsConfig>>,
-    ) -> Self {
-        self.agents_config = Some(agents_config);
-        self
-    }
-
-    pub fn with_tts(mut self, tts: Arc<dyn TtsService>) -> Self {
-        self.tts = tts;
-        self
-    }
-
-    pub fn with_stt(mut self, stt: Arc<dyn SttService>) -> Self {
-        self.stt = stt;
-        self
-    }
-
-    /// Create a [`Services`] bundle for sharing with the GraphQL schema.
-    ///
-    /// Clones all service `Arc`s (cheap pointer bumps) into the shared bundle.
-    /// The `system_info` service is provided separately because it needs the
-    /// fully-constructed `GatewayState` which isn't available during
-    /// `GatewayServices` construction.
-    pub fn to_services(&self, system_info: Arc<dyn SystemInfoService>) -> Arc<Services> {
-        Arc::new(Services {
-            agent: self.agent.clone(),
-            session: self.session.clone(),
-            channel: self.channel.clone(),
-            config: self.config.clone(),
-            cron: self.cron.clone(),
-            chat: self.chat.clone(),
-            tts: self.tts.clone(),
-            stt: self.stt.clone(),
-            skills: self.skills.clone(),
-            mcp: self.mcp.clone(),
-            browser: self.browser.clone(),
-            usage: self.usage.clone(),
-            exec_approval: self.exec_approval.clone(),
-            onboarding: self.onboarding.clone(),
-            update: self.update.clone(),
-            model: self.model.clone(),
-            web_login: self.web_login.clone(),
-            voicewake: self.voicewake.clone(),
-            logs: self.logs.clone(),
-            provider_setup: self.provider_setup.clone(),
-            project: self.project.clone(),
-            local_llm: self.local_llm.clone(),
-            system_info,
-        })
-    }
 }
 
 #[cfg(test)]

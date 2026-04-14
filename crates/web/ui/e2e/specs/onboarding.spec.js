@@ -212,10 +212,13 @@ async function moveToChannelStep(page) {
 	const channelHeading = page.getByRole("heading", { name: "Connect a Channel", exact: true });
 	if (await isVisible(channelHeading)) return true;
 
-	for (let i = 0; i < 4; i++) {
-		const skipBtn = page.getByRole("button", { name: "Skip for now", exact: true });
-		if (!(await isVisible(skipBtn))) break;
-		await skipBtn.click();
+	for (let i = 0; i < 6; i++) {
+		if (await clickFirstVisibleButton(page, { name: "Skip for now", exact: true })) {
+			if (await isVisible(channelHeading)) return true;
+			continue;
+		}
+
+		if (!(await clickFirstVisibleButton(page, { name: "Continue", exact: true }))) break;
 		if (await isVisible(channelHeading)) return true;
 	}
 
@@ -344,6 +347,19 @@ test.describe("Onboarding wizard", () => {
 		expect(importIdx).toBeLessThan(llmIdx);
 	});
 
+	test("step indicator orders Remote before Channel", async ({ page }) => {
+		await page.goto("/onboarding");
+		await page.waitForLoadState("networkidle");
+
+		const labels = (await page.locator(".onboarding-step-label").allTextContents()).map((value) => value.trim());
+		const remoteAccessIdx = labels.indexOf("Remote");
+		const channelIdx = labels.indexOf("Channel");
+
+		expect(remoteAccessIdx).toBeGreaterThan(-1);
+		expect(channelIdx).toBeGreaterThan(-1);
+		expect(remoteAccessIdx).toBeLessThan(channelIdx);
+	});
+
 	test("auth step renders actionable controls when shown", async ({ page }) => {
 		await page.goto("/onboarding");
 		await page.waitForLoadState("networkidle");
@@ -398,7 +414,7 @@ test.describe("Onboarding wizard", () => {
 			const currentHeading = page.locator(".onboarding-card h2").first();
 			await expect(currentHeading).toBeVisible();
 			const headingText = (await currentHeading.textContent())?.trim() || "";
-			expect(["Add LLMs", "Voice (optional)", "Connect a Channel"]).toContain(headingText);
+			expect(["Add LLMs", "Voice (optional)", "Remote Access", "Connect a Channel"]).toContain(headingText);
 			const canSkip = await clickFirstVisibleButton(page, { name: /skip/i });
 			const canContinue = await clickFirstVisibleButton(page, { name: /continue/i });
 			expect(canSkip || canContinue).toBeTruthy();
@@ -593,6 +609,178 @@ test.describe("Onboarding wizard", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
+	test("matrix onboarding renders a real mask icon", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.goto("/onboarding");
+		await expect.poll(() => new URL(page.url()).pathname, { timeout: 15_000 }).toMatch(/^\/(?:onboarding|chats\/.+)$/);
+		await page.waitForLoadState("networkidle");
+
+		await page.evaluate(() => {
+			const probe = document.createElement("span");
+			probe.className = "icon icon-xl icon-matrix";
+			probe.id = "matrix-icon-probe";
+			document.body.append(probe);
+		});
+
+		const matrixIcon = page.locator("#matrix-icon-probe");
+		await expect(matrixIcon).toBeVisible();
+		await expect
+			.poll(() => {
+				return matrixIcon.evaluate((node) => {
+					const style = window.getComputedStyle(node);
+					return style.maskImage || style.webkitMaskImage || "";
+				});
+			})
+			.not.toBe("none");
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("onboarding channel selector styles render a 3-column grid and the nostr icon", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.goto("/onboarding");
+		await page.waitForLoadState("networkidle");
+
+		await page.setViewportSize({ width: 1280, height: 900 });
+		await page.evaluate(() => {
+			const existing = document.getElementById("channel-selector-probe");
+			if (existing) existing.remove();
+
+			const selector = document.createElement("div");
+			selector.id = "channel-selector-probe";
+			selector.className = "grid grid-cols-2 gap-3 md:grid-cols-3";
+			const button = document.createElement("button");
+			button.type = "button";
+			button.className = "backend-card w-full min-h-[120px] items-center justify-center gap-4 px-4 py-8 text-center";
+			const icon = document.createElement("span");
+			icon.className = "icon icon-xl icon-nostr";
+			const label = document.createElement("span");
+			label.textContent = "Nostr";
+			button.append(icon, label);
+			selector.append(button);
+			document.body.append(selector);
+		});
+
+		const selector = page.locator("#channel-selector-probe");
+		await expect(selector).toBeVisible();
+
+		await expect
+			.poll(() =>
+				selector.evaluate((node) => {
+					const columns = window.getComputedStyle(node).gridTemplateColumns;
+					return columns.split(" ").filter(Boolean).length;
+				}),
+			)
+			.toBe(3);
+
+		const icon = selector.locator(".icon.icon-nostr");
+		await expect(icon).toBeVisible();
+		await expect
+			.poll(() =>
+				icon.evaluate((node) => {
+					const style = window.getComputedStyle(node);
+					return style.maskImage || style.webkitMaskImage || "";
+				}),
+			)
+			.not.toBe("none");
+
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("matrix onboarding exposes advanced config patch and storage note", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.goto("/onboarding");
+		await page.waitForLoadState("networkidle");
+
+		const reachedChannel = await moveToChannelStep(page);
+		if (!reachedChannel) {
+			test.skip(true, "could not reach channel step in this onboarding flow");
+			return;
+		}
+
+		await expect(page.getByText(/stored in Moltis's internal database \(.+moltis\.db\)/)).toBeVisible();
+
+		const matrixSelectBtn = page.getByRole("button", { name: "Matrix", exact: true });
+		if (await isVisible(matrixSelectBtn)) {
+			await matrixSelectBtn.click();
+		}
+
+		const homeserverInput = page.locator('input[name="matrix_homeserver"]');
+		if (!(await isVisible(homeserverInput))) {
+			test.skip(true, "Matrix onboarding option is not available in this run");
+			return;
+		}
+		await expect(page.getByText("Encrypted Matrix chats require Password auth.", { exact: false })).toBeVisible();
+		await expect(
+			page.getByText("Password is the default because it supports encrypted Matrix chats", { exact: false }),
+		).toBeVisible();
+		await expect(
+			page.getByText("Use Password so Moltis creates and persists its own Matrix device keys", { exact: false }),
+		).toBeVisible();
+		await expect(
+			page.getByText("do not transfer that device's private encryption keys into Moltis", { exact: false }),
+		).toBeVisible();
+		await expect(page.getByText("verify yes", { exact: false })).toBeVisible();
+
+		await page.evaluate(async () => {
+			const onboardingScript = document.querySelector('script[type="module"][src*="js/onboarding-app.js"]');
+			if (!onboardingScript) throw new Error("onboarding-app.js script not found");
+			const appUrl = new URL(onboardingScript.src, window.location.origin).href;
+			const marker = "js/onboarding-app.js";
+			const markerIdx = appUrl.indexOf(marker);
+			if (markerIdx < 0) throw new Error("onboarding-app.js marker not found in script URL");
+			const prefix = appUrl.slice(0, markerIdx);
+			const state = await import(`${prefix}js/state.js`);
+			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
+			window.__matrixOnboardingAddRequest = null;
+			state.setConnected(true);
+			state.setWs({
+				readyState: wsOpen,
+				send(raw) {
+					const req = JSON.parse(raw || "{}");
+					const resolver = state.pending[req.id];
+					if (!resolver) return;
+					if (req.method === "channels.add") {
+						window.__matrixOnboardingAddRequest = req.params || null;
+						resolver({ ok: true, payload: {} });
+					} else if (req.method === "channels.status") {
+						resolver({ ok: true, payload: { channels: [] } });
+					} else {
+						resolver({ ok: false, error: { message: `unexpected rpc in onboarding matrix test: ${req.method}` } });
+					}
+					delete state.pending[req.id];
+				},
+			});
+		});
+
+		const authSelect = page.getByText("Authentication", { exact: true }).locator("xpath=following-sibling::select[1]");
+		await expect(authSelect).toHaveValue("password");
+		await homeserverInput.fill("https://matrix.example.com");
+		await expect(page.getByLabel("Let Moltis own this Matrix account", { exact: true })).toBeChecked();
+		await authSelect.selectOption("access_token");
+		await page.locator('input[name="matrix_credential"]').fill("syt_test_token");
+		await page.getByText("Advanced Config JSON", { exact: true }).click();
+		await page
+			.locator('textarea[name="channel_advanced_config"]')
+			.fill('{"reply_to_message":true,"stream_mode":"off"}');
+		await page.getByRole("button", { name: "Connect Matrix", exact: true }).click();
+
+		await expect.poll(() => page.evaluate(() => window.__matrixOnboardingAddRequest)).not.toBeNull();
+
+		const sentRequest = await page.evaluate(() => window.__matrixOnboardingAddRequest);
+		expect(sentRequest.account_id).toMatch(/^matrix-example-com-[a-z0-9]{6}$/);
+		expect(sentRequest.config).toMatchObject({
+			homeserver: "https://matrix.example.com",
+			access_token: "syt_test_token",
+			ownership_mode: "user_managed",
+			otp_self_approval: true,
+			otp_cooldown_secs: 300,
+			reply_to_message: true,
+			stream_mode: "off",
+		});
+		expect(pageErrors).toEqual([]);
+	});
+
 	test("llm provider api key form includes key source hint", async ({ page }) => {
 		const pageErrors = watchPageErrors(page);
 		await page.goto("/onboarding");
@@ -693,6 +881,101 @@ test.describe("Onboarding wizard", () => {
 		expect(styles.background).not.toBe("rgba(0, 0, 0, 0)");
 		expect(styles.radius).toBeGreaterThan(8);
 
+		expect(pageErrors).toEqual([]);
+	});
+
+	test("voice onboarding saves whisper base URL without requiring an API key", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.goto("/onboarding");
+		await page.waitForLoadState("networkidle");
+
+		await expect.poll(() => new URL(page.url()).pathname, { timeout: 15_000 }).toMatch(/^\/(?:onboarding|chats\/.+)$/);
+		if (/^\/chats\//.test(new URL(page.url()).pathname)) {
+			expect(pageErrors).toEqual([]);
+			return;
+		}
+
+		const reachedVoice = await moveToVoiceStep(page);
+		if (!reachedVoice) {
+			test.skip(true, "voice step not reachable in this onboarding run");
+			return;
+		}
+
+		const whisperRow = page
+			.locator(".onboarding-card .rounded-md.border")
+			.filter({ has: page.getByText("OpenAI Whisper", { exact: true }) })
+			.first();
+		if (!(await isVisible(whisperRow))) {
+			test.skip(true, "OpenAI Whisper row not available in this onboarding run");
+			return;
+		}
+
+		await page.evaluate(async () => {
+			const onboardingScript = document.querySelector('script[type="module"][src*="js/onboarding-app.js"]');
+			if (!onboardingScript) throw new Error("onboarding-app.js script not found");
+			const appUrl = new URL(onboardingScript.src, window.location.origin).href;
+			const marker = "js/onboarding-app.js";
+			const markerIdx = appUrl.indexOf(marker);
+			if (markerIdx < 0) throw new Error("onboarding-app.js marker not found in script URL");
+			const prefix = appUrl.slice(0, markerIdx);
+			const state = await import(`${prefix}js/state.js`);
+			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
+			window.__voiceOnboardingSaveSettingsRequest = null;
+			state.setConnected(true);
+			state.setWs({
+				readyState: wsOpen,
+				send(raw) {
+					const req = JSON.parse(raw || "{}");
+					const resolver = state.pending[req.id];
+					if (!resolver) return;
+					if (req.method === "voice.config.save_settings") {
+						window.__voiceOnboardingSaveSettingsRequest = req.params || null;
+						resolver({ ok: true, payload: { ok: true } });
+					} else if (req.method === "voice.provider.toggle") {
+						resolver({ ok: true, payload: { ok: true } });
+					} else if (req.method === "voice.providers.all") {
+						resolver({
+							ok: true,
+							payload: {
+								stt: [
+									{
+										id: "whisper",
+										name: "OpenAI Whisper",
+										type: "stt",
+										category: "cloud",
+										description: "Best accuracy, handles accents and background noise",
+										available: true,
+										enabled: true,
+										keySource: "config",
+										settings: { baseUrl: "http://127.0.0.1:8001/v1" },
+										capabilities: { baseUrl: true },
+									},
+								],
+								tts: [],
+							},
+						});
+					} else {
+						resolver({
+							ok: false,
+							error: { message: `unexpected rpc in onboarding voice test: ${req.method}` },
+						});
+					}
+					delete state.pending[req.id];
+				},
+			});
+		});
+
+		await whisperRow.getByRole("button", { name: "Configure", exact: true }).click();
+		await whisperRow.locator('input[data-field="baseUrl"]').fill("http://127.0.0.1:8001/v1");
+		await whisperRow.getByRole("button", { name: "Save", exact: true }).click();
+
+		await expect.poll(() => page.evaluate(() => window.__voiceOnboardingSaveSettingsRequest)).not.toBeNull();
+
+		const sentRequest = await page.evaluate(() => window.__voiceOnboardingSaveSettingsRequest);
+		expect(sentRequest).toMatchObject({
+			provider: "whisper",
+			baseUrl: "http://127.0.0.1:8001/v1",
+		});
 		expect(pageErrors).toEqual([]);
 	});
 });

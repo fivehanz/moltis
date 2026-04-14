@@ -131,7 +131,17 @@
       <span class="header-link-label">Settings</span>
     </button>
     <a
-      href="https://github.com/moltis-org/moltis/issues/new"
+      href="https://www.moltis.org/changelog/"
+      target="_blank"
+      rel="noopener noreferrer"
+      class="header-link-btn"
+      title="Changelog"
+    >
+      <span class="icon icon-document"></span>
+      <span class="header-link-label" data-i18n="common:header.changelog">Changelog</span>
+    </a>
+    <a
+      href="https://github.com/moltis-org/moltis/issues/new/choose"
       target="_blank"
       rel="noopener noreferrer"
       class="header-link-btn"
@@ -238,6 +248,10 @@
       <button class="session-tab flex-1 py-1.5 text-center cursor-pointer bg-transparent border-b-2 border-transparent text-[var(--muted)] hover:text-[var(--text)] transition-colors" data-tab="sessions" role="tab">Sessions</button>
       <button class="session-tab flex-1 py-1.5 text-center cursor-pointer bg-transparent border-b-2 border-transparent text-[var(--muted)] hover:text-[var(--text)] transition-colors" data-tab="cron" role="tab">Cron</button>
     </div>
+    <label id="archivedSessionsRow" class="px-3 py-2 border-b border-[var(--border)] hidden text-xs text-[var(--muted)] flex items-center gap-2 cursor-pointer select-none">
+      <input id="showArchivedSessions" type="checkbox" class="cursor-pointer" />
+      <span>Show archived sessions</span>
+    </label>
     <div class="flex-1 overflow-y-auto" id="sessionList"></div>
   </div>
 
@@ -252,89 +266,6 @@
 
 <!-- Modals (created on demand by modals.js) -->
 <div id="modalRoot"></div>
-
-<!-- Tailscale section hidden elements (toggled by page-settings.js) -->
-<div id="ts-installed-bar" style="display:none">
-  <div class="info-bar">
-    <span class="info-field">
-      <span class="status-dot connected"></span>
-      <span class="info-label">Installed</span>
-      <span data-info-version class="info-version"></span>
-    </span>
-    <span data-ts-tailnet-wrap class="info-field" style="display:none">
-      <span class="info-label">Tailnet:</span>
-      <span data-ts-tailnet class="info-value-strong"></span>
-    </span>
-    <span data-ts-account-wrap class="info-field" style="display:none">
-      <span class="info-label">Account:</span>
-      <span data-ts-account class="info-value"></span>
-    </span>
-    <span data-ts-ip-wrap class="info-field" style="display:none">
-      <span class="info-label">IP:</span>
-      <span data-ts-ip class="info-value-mono"></span>
-    </span>
-  </div>
-</div>
-
-<div id="ts-not-installed" style="display:none">
-  <div class="info-bar" style="justify-content:center;flex-direction:column;gap:12px;text-align:center">
-    <p style="font-size:.875rem;color:var(--text);margin:0">
-      The <code style="font-family:var(--font-mono);font-size:.875rem">tailscale</code> CLI was not found on this machine.
-    </p>
-    <div>
-      <a href="https://tailscale.com/download" target="_blank" rel="noopener"
-        class="provider-btn" style="display:inline-block;text-decoration:none">
-        Install Tailscale
-      </a>
-      <button data-ts-recheck class="provider-btn provider-btn-secondary" style="margin-left:8px">
-        Re-check
-      </button>
-    </div>
-  </div>
-</div>
-
-<div id="ts-error" class="settings-alert-error whitespace-pre-line max-w-form" style="display:none">
-  <span class="icon icon-lg icon-warn-triangle shrink-0 mt-0.5"></span>
-  <span data-ts-error-text class="whitespace-pre-line"></span>
-</div>
-
-<div id="ts-not-running" class="alert-warning-text max-w-form" style="display:none">
-  <span class="alert-label-warn">Warning:</span>
-  Tailscale is not running. Start it with <code class="font-mono">tailscale up</code> or open the Tailscale app.
-</div>
-
-<div id="ts-mode-section" class="max-w-form" style="display:none">
-  <h3 class="text-sm font-medium text-[var(--text-strong)] mb-2">Mode</h3>
-  <div data-ts-mode-btns class="flex gap-2"></div>
-  <div data-ts-configuring class="text-xs text-[var(--muted)] mt-1.5" style="display:none"></div>
-</div>
-
-<div id="ts-hostname" class="max-w-form" style="display:none">
-  <h3 class="text-sm font-medium text-[var(--text-strong)] mb-1">Hostname</h3>
-  <a data-ts-hostname-link href="#" target="_blank" rel="noopener" class="font-mono text-sm text-[var(--text)] no-underline pointer-events-none">
-    <span data-ts-hostname-value></span>
-  </a>
-</div>
-
-<div id="ts-url" class="max-w-form" style="display:none">
-  <h3 class="text-sm font-medium text-[var(--text-strong)] mb-1">URL</h3>
-  <div class="font-mono text-sm">
-    <a data-ts-url-link href="#" target="_blank" rel="noopener" class="text-[var(--accent)] no-underline"></a>
-  </div>
-</div>
-
-<div id="ts-funnel-warning" class="alert-warning-text max-w-form" style="display:none">
-  <span class="alert-label-warn">Warning:</span>
-  Funnel exposes your gateway to the public internet. Make sure password authentication is configured.
-</div>
-
-<div id="ts-funnel-security-warning" class="alert-warning-text max-w-form" style="display:none">
-  <span class="alert-label-warn">Warning:</span>
-  Enabling Funnel exposes moltis to the public internet. This code has not been security-audited. Use at your own risk.
-</div>
-<div id="ts-funnel-auth-btn" style="display:none">
-  <a href="{{ routes.security }}" class="provider-btn">Set up authentication</a>
-</div>
 
 <!-- Voice provider setup instructions (toggled by page-settings.js) -->
 <div id="voice-whisper-cli-instructions" class="text-xs text-[var(--muted)]" style="display:none;line-height:1.6;">

@@ -372,10 +372,7 @@ pub fn has_stored_tokens() -> bool {
 }
 
 pub fn default_model_catalog() -> Vec<super::DiscoveredModel> {
-    DEFAULT_CODEX_MODELS
-        .iter()
-        .map(|(id, name)| super::DiscoveredModel::new(*id, *name))
-        .collect()
+    super::catalog_to_discovered(DEFAULT_CODEX_MODELS, 3)
 }
 
 fn formatted_model_name(model_id: &str) -> String {
@@ -686,6 +683,7 @@ impl LlmProvider for OpenAiCodexProvider {
         let mut fn_call_args: Vec<String> = vec![];
         let mut input_tokens: u32 = 0;
         let mut output_tokens: u32 = 0;
+        let mut cache_read_tokens: u32 = 0;
 
         let mut byte_stream = http_resp.bytes_stream();
         let mut buf = String::new();
@@ -742,6 +740,11 @@ impl LlmProvider for OpenAiCodexProvider {
                                 u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                             output_tokens =
                                 u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            cache_read_tokens =
+                                u.get("input_tokens_details")
+                                    .and_then(|d| d.get("cached_tokens"))
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0) as u32;
                         }
                     },
                     "error" | "response.failed" => {
@@ -779,6 +782,7 @@ impl LlmProvider for OpenAiCodexProvider {
             usage: Usage {
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
                 ..Default::default()
             },
         })
@@ -877,6 +881,7 @@ impl LlmProvider for OpenAiCodexProvider {
             let mut buf = String::new();
             let mut input_tokens: u32 = 0;
             let mut output_tokens: u32 = 0;
+            let mut cache_read_tokens: u32 = 0;
 
             // Track tool calls being streamed (index -> (id, name))
             let mut tool_calls: std::collections::HashMap<usize, (String, String)> =
@@ -910,7 +915,12 @@ impl LlmProvider for OpenAiCodexProvider {
                         for index in tool_calls.keys() {
                             yield StreamEvent::ToolCallComplete { index: *index };
                         }
-                        yield StreamEvent::Done(Usage { input_tokens, output_tokens, ..Default::default() });
+                        yield StreamEvent::Done(Usage {
+                            input_tokens,
+                            output_tokens,
+                            cache_read_tokens,
+                            ..Default::default()
+                        });
                         return;
                     }
 
@@ -964,12 +974,22 @@ impl LlmProvider for OpenAiCodexProvider {
                                     output_tokens = u.get("output_tokens")
                                         .and_then(|v| v.as_u64())
                                         .unwrap_or(0) as u32;
+                                    cache_read_tokens = u
+                                        .get("input_tokens_details")
+                                        .and_then(|d| d.get("cached_tokens"))
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32;
                                 }
                                 // Emit completion for any pending tool calls
                                 for index in tool_calls.keys() {
                                     yield StreamEvent::ToolCallComplete { index: *index };
                                 }
-                                yield StreamEvent::Done(Usage { input_tokens, output_tokens, ..Default::default() });
+                                yield StreamEvent::Done(Usage {
+                                    input_tokens,
+                                    output_tokens,
+                                    cache_read_tokens,
+                                    ..Default::default()
+                                });
                                 return;
                             }
                             "error" | "response.failed" => {

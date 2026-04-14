@@ -1,0 +1,49 @@
+{
+  "scenarios": [
+    {
+      "id": "issue-693-falsy-null-serialization",
+      "prompt": "Call serialization_probe with timeout 0, replace_all false, offset 0, multiline false, and type null.",
+      "tool": {
+        "name": "serialization_probe",
+        "description": "You MUST call this tool exactly once with the exact values requested by the user. Do not convert, normalize, or omit values.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timeout": { "type": "integer" },
+            "replace_all": { "type": "boolean" },
+            "offset": { "type": "integer" },
+            "multiline": { "type": "boolean" },
+            "type": {
+              "type": "null",
+              "description": "Must be literal JSON null, never an empty string, text, or omission."
+            }
+          },
+          "required": ["timeout", "replace_all", "offset", "multiline", "type"]
+        }
+      },
+      "expected_arguments": {
+        "timeout": 0,
+        "replace_all": false,
+        "offset": 0,
+        "multiline": false,
+        "type": null
+      },
+      "providers": {
+        "zai": {
+          "mode": "must_pass"
+        },
+        "alibaba-coding": {
+          "mode": "allow_known_mismatch",
+          "reason": "qwen3.5-plus currently serializes null as an empty string on the Alibaba coding endpoint",
+          "observed_arguments": {
+            "timeout": 0,
+            "replace_all": false,
+            "offset": 0,
+            "multiline": false,
+            "type": ""
+          }
+        }
+      }
+    }
+  ]
+}

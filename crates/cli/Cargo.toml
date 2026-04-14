@@ -101,19 +101,27 @@ tikv-jemallocator = { optional = true, workspace = true }
 tempfile = { workspace = true }
 
 [features]
-agent = ["moltis-gateway/agent", "moltis-web?/agent"]
+agent  = ["moltis-gateway/agent", "moltis-web?/agent"]
 caldav = ["moltis-gateway/caldav"]
+# User-facing integrations stay default-on in the CLI crate per workspace policy,
+# even when the underlying implementation remains feature-gated in lower crates.
 default = [
   "agent",
   "caldav",
   "code-splitter",
   "file-watcher",
+  "firecrawl",
+  "fs-tools",
   "graphql",
   "jemalloc",
+  "llm-compaction",
   "local-llm",
   "local-llm-metal",
+  "matrix",
   "mdns",
   "metrics",
+  "ngrok",
+  "nostr",
   "openclaw-import",
   "prometheus",
   "push-notifications",
@@ -127,12 +135,15 @@ default = [
   "web-ui",
   "whatsapp",
 ]
+llm-compaction = ["moltis-gateway/llm-compaction"]
 # Minimal build for memory-constrained devices (Raspberry Pi, etc.).
 # Build with: cargo build --release --no-default-features --features lightweight
 code-splitter   = ["moltis-memory/code-splitter"]
 embedded-assets = ["moltis-web?/embedded-assets"]
 embedded-wasm   = ["moltis-tools/embedded-wasm"]
 file-watcher    = ["moltis-gateway/file-watcher"]
+firecrawl       = ["moltis-gateway/firecrawl"]
+fs-tools        = ["moltis-gateway/fs-tools"]
 graphql         = ["moltis-httpd/graphql", "moltis-web?/graphql"]
 jemalloc        = ["dep:tikv-jemallocator"]
 lang-bash       = ["moltis-memory/lang-bash"]
@@ -153,8 +164,11 @@ local-llm          = ["moltis-gateway/local-llm"]
 local-llm-cuda     = ["local-llm", "moltis-gateway/local-llm-cuda"]
 local-llm-metal    = ["local-llm", "moltis-gateway/local-llm-metal"]
 local-llm-vulkan   = ["local-llm", "moltis-gateway/local-llm-vulkan"]
+matrix             = ["moltis-httpd/matrix"]
 mdns               = ["moltis-gateway/mdns"]
 metrics            = ["moltis-httpd/metrics", "moltis-web?/metrics"]
+ngrok              = ["moltis-httpd/ngrok", "moltis-web?/ngrok"]
+nostr              = ["moltis-httpd/nostr"]
 openclaw-import    = ["dep:moltis-openclaw-import", "moltis-gateway/openclaw-import"]
 prometheus         = ["moltis-httpd/prometheus"]
 push-notifications = ["moltis-httpd/push-notifications", "moltis-web?/push-notifications"]

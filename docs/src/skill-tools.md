@@ -24,6 +24,10 @@ Skills created this way are personal and stored in the configured data
 directory's `skills/` folder. They become available on the next message
 automatically thanks to the skill watcher.
 
+Before any built-in skill mutation runs, Moltis creates an automatic
+checkpoint. Tool results include a `checkpointId` you can later restore with
+`checkpoint_restore`.
+
 ## Skill Watcher
 
 The skill watcher (`crates/skills/src/watcher.rs`) monitors skill directories
@@ -102,7 +106,5 @@ Safety rules:
 This removes the entire `<data_dir>/skills/summarize-pr/` directory, including
 any supplementary files written alongside `SKILL.md`.
 
-```admonish warning
-Deleted skills cannot be recovered. The agent should confirm with the user
-before deleting a skill.
-```
+Deleted skills can be restored from the returned `checkpointId` with
+`checkpoint_restore`, as long as the checkpoint still exists.

@@ -5,6 +5,7 @@ prompts
 .env
 .env.*
 .DS_Store
+.claude/worktrees/
 .playwright-mcp/
 features/
 .moltis/
@@ -34,3 +35,4 @@ crates/gateway/ui/test-results/
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+.codesight/

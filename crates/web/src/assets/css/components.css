@@ -1113,6 +1113,10 @@
   -webkit-mask-image: url("../icons/masks/mask-2f9b873ab7f9e17f.svg");
   mask-image: url("../icons/masks/mask-2f9b873ab7f9e17f.svg");
 }
+.settings-nav-item[data-section="projects"]::before {
+  -webkit-mask-image: url("../icons/masks/mask-9efc91f08692af1a.svg");
+  mask-image: url("../icons/masks/mask-9efc91f08692af1a.svg");
+}
 .settings-nav-item[data-section="environment"]::before,
 .settings-nav-item[data-section="terminal"]::before {
   -webkit-mask-image: url("../icons/masks/mask-2920334234a725b2.svg");
@@ -1130,6 +1134,10 @@
   -webkit-mask-image: url("../icons/masks/mask-47feaf85cf1fb335.svg");
   mask-image: url("../icons/masks/mask-47feaf85cf1fb335.svg");
 }
+.settings-nav-item[data-section="webhooks"]::before {
+  -webkit-mask-image: url("../icons/masks/mask-c29a75ad443b68da.svg");
+  mask-image: url("../icons/masks/mask-c29a75ad443b68da.svg");
+}
 .settings-nav-item[data-section="heartbeat"]::before {
   -webkit-mask-image: url("../icons/masks/mask-d5a45eb7a122c9aa.svg");
   mask-image: url("../icons/masks/mask-d5a45eb7a122c9aa.svg");
@@ -1142,7 +1150,11 @@
   -webkit-mask-image: url("../icons/masks/mask-a19898b61d24faac.svg");
   mask-image: url("../icons/masks/mask-a19898b61d24faac.svg");
 }
-.settings-nav-item[data-section="tailscale"]::before {
+.settings-nav-item[data-section="ssh"]::before {
+  -webkit-mask-image: url("../icons/masks/mask-882cc0c8c4c9754a.svg");
+  mask-image: url("../icons/masks/mask-882cc0c8c4c9754a.svg");
+}
+.settings-nav-item[data-section="remote-access"]::before {
   -webkit-mask-image: url("../icons/masks/mask-06addc3a60571644.svg");
   mask-image: url("../icons/masks/mask-06addc3a60571644.svg");
 }
@@ -1165,6 +1177,10 @@
 .settings-nav-item[data-section="providers"]::before {
   -webkit-mask-image: url("../icons/masks/mask-9dc51b3e5cc77ae4.svg");
   mask-image: url("../icons/masks/mask-9dc51b3e5cc77ae4.svg");
+}
+.settings-nav-item[data-section="tools"]::before {
+  -webkit-mask-image: url("../icons/masks/mask-d1685f507bef1bcc.svg");
+  mask-image: url("../icons/masks/mask-d1685f507bef1bcc.svg");
 }
 .settings-nav-item[data-section="mcp"]::before {
   -webkit-mask-image: url("../icons/masks/mask-d579c16638bc3452.svg");

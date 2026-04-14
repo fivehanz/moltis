@@ -183,6 +183,14 @@ type ConfigQuery {
 type ContextFile {
 	path: String
 	content: String
+	kind: String
+	warnings: [ContextWarning!]
+}
+
+type ContextWarning {
+	code: String
+	severity: String
+	message: String
 }
 
 type CronJob {
@@ -512,11 +520,17 @@ type McpTool {
 }
 
 type MemoryConfig {
+	style: String
+	agentWriteMode: String
+	userProfileWriteMode: String
 	backend: String
+	provider: String
 	citations: String
 	disableRag: Boolean
 	llmReranking: Boolean
-	sessionExport: Boolean
+	searchMergeStrategy: String
+	sessionExport: String
+	promptMemoryMode: String
 	qmdFeatureEnabled: Boolean
 }
 
@@ -575,6 +589,7 @@ type ModelInfo {
 	enabled: Boolean
 	supportsTools: Boolean
 	supportsVision: Boolean
+	supportsReasoning: Boolean
 	supportsStreaming: Boolean
 	contextWindow: Int
 	maxOutputTokens: Int

@@ -58,6 +58,44 @@ priority_models = ["gpt-5.2"]
 
 See [Providers](providers.md) for the full list of supported providers and configuration options.
 
+## Remote Execution
+
+Command execution can stay local, route to a paired node, or use SSH:
+
+```toml
+[tools.exec]
+host = "local"                 # "local", "node", or "ssh"
+# node = "mac-mini"            # default paired node when host = "node"
+# ssh_target = "deploy@box"    # default SSH target when host = "ssh"
+```
+
+When `host = "ssh"`, Moltis can work in two modes:
+
+- **System OpenSSH**: reuse your existing host aliases, agent forwarding policy,
+  and `~/.ssh/config`.
+- **Managed targets**: create or import a deploy key in **Settings → SSH**,
+  then bind that key to a named target. Moltis stores the private key in its
+  credential store and encrypts it with the vault whenever the vault is
+  unsealed. Imported keys may be passphrase-protected, Moltis strips the
+  passphrase during import so runtime execution can stay non-interactive.
+
+For stricter SSH verification, managed targets also accept a pasted
+`known_hosts` line from `ssh-keyscan -H host`. The SSH settings page can scan
+that for you, and saved targets can refresh or clear their stored pin later.
+When present, Moltis uses that pin instead of your global OpenSSH known-host
+policy for that target.
+
+Managed targets appear in the Nodes page and chat node picker, so users can see
+where `exec` will run without digging through config. If multiple managed
+targets exist, the default one is used when `tools.exec.host = "ssh"` and no
+session-specific route is selected. `moltis doctor` also reports remote-exec
+inventory, active backend mode, and obvious SSH setup problems from the CLI.
+
+`Settings -> Tools` shows the effective tool inventory for the active session
+and model, including tool-calling support, MCP server state, skills/plugins,
+and available execution routes. It is session-aware by design, switching the
+model or disabling MCP for a session changes what appears there.
+
 ## Sandbox Configuration
 
 Commands run inside isolated containers for security:
@@ -147,10 +185,13 @@ replay queued messages one-by-one or merge them into a single follow-up message.
 ```toml
 [chat]
 message_queue_mode = "followup"  # Default: one-by-one replay
+prompt_memory_mode = "live-reload"
 
 # Options:
 #   "followup" - Queue each message and run them sequentially
 #   "collect"  - Merge queued text and run once after the active run
+#   "live-reload" - Re-read MEMORY.md before each turn
+#   "frozen-at-session-start" - Keep the first MEMORY.md snapshot for the session
 ```
 
 ## Memory System
@@ -159,13 +200,27 @@ Long-term memory uses embeddings for semantic search:
 
 ```toml
 [memory]
+style = "hybrid"              # Or "prompt-only", "search-only", "off"
+agent_write_mode = "hybrid"   # Or "prompt-only", "search-only", "off"
+user_profile_write_mode = "explicit-and-auto" # Or "explicit-only", "off"
 backend = "builtin"             # Or "qmd"
 provider = "openai"             # Or "local", "ollama", "custom"
 model = "text-embedding-3-small"
 citations = "auto"              # "on", "off", or "auto"
 llm_reranking = false
-session_export = false
+search_merge_strategy = "rrf"   # Or "linear"
+session_export = "on-new-or-reset" # Or "off"
 ```
+
+See [Memory Surfaces](memory-surfaces.md) for the boundary between
+`session_state`, prompt memory, searchable memory, and sandbox persistence.
+`memory.style` chooses the high-level behavior, while
+`chat.prompt_memory_mode` only affects prompt-visible `MEMORY.md`.
+`memory.agent_write_mode` controls where agent-authored writes are allowed to
+land. `memory.user_profile_write_mode` controls whether Moltis writes the
+managed `USER.md` surface, and whether browser/channel timezone or location
+signals may update it silently. `memory.session_export` controls whether
+session rollover exports are written at all.
 
 ## Authentication
 
@@ -223,6 +278,11 @@ env = { GITHUB_TOKEN = "ghp_..." }
 transport = "sse"
 url = "https://mcp.example.com/mcp?api_key=$REMOTE_MCP_KEY"
 headers = { Authorization = "Bearer ${REMOTE_MCP_TOKEN}" }
+
+[mcp.servers.remote_http]
+transport = "streamable-http"
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer ${API_KEY}" }
 ```
 
 Remote MCP URLs and headers support `$NAME` or `${NAME}` placeholders. For live remote servers, values resolve from Moltis-managed env overrides, either `[env]` in config or **Settings** → **Environment Variables**.

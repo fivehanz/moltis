@@ -4,14 +4,15 @@
 // component that auto-rerenders from sessionStore signals.
 
 import { html } from "htm/preact";
-import { useEffect, useRef, useState } from "preact/hooks";
-import * as gon from "../gon.js";
+import { useEffect, useRef } from "preact/hooks";
 import {
 	makeBranchIcon,
 	makeChatIcon,
 	makeCronIcon,
 	makeDiscordIcon,
+	makeMatrixIcon,
 	makeProjectIcon,
+	makeSlackIcon,
 	makeTeamsIcon,
 	makeTelegramIcon,
 } from "../icons.js";
@@ -41,6 +42,8 @@ function channelSessionType(s) {
 	if (key.startsWith("telegram:")) return "telegram";
 	if (key.startsWith("msteams:")) return "msteams";
 	if (key.startsWith("discord:")) return "discord";
+	if (key.startsWith("slack:")) return "slack";
+	if (key.startsWith("matrix:")) return "matrix";
 	var binding = s.channelBinding || null;
 	if (!binding) return null;
 	try {
@@ -68,6 +71,8 @@ function SessionIcon({ session, isBranch }) {
 		else if (channelType === "telegram") icon = makeTelegramIcon();
 		else if (channelType === "msteams") icon = makeTeamsIcon();
 		else if (channelType === "discord") icon = makeDiscordIcon();
+		else if (channelType === "slack") icon = makeSlackIcon();
+		else if (channelType === "matrix") icon = makeMatrixIcon();
 		else icon = makeChatIcon();
 		iconRef.current.appendChild(icon);
 	}, [session.key, isBranch]);
@@ -81,7 +86,16 @@ function SessionIcon({ session, isBranch }) {
 	} else {
 		iconStyle.color = "var(--muted)";
 	}
-	var channelLabel = channelType === "msteams" ? "Microsoft Teams" : channelType === "discord" ? "Discord" : "Telegram";
+	var channelLabel =
+		channelType === "msteams"
+			? "Microsoft Teams"
+			: channelType === "discord"
+				? "Discord"
+				: channelType === "slack"
+					? "Slack"
+					: channelType === "matrix"
+						? "Matrix"
+						: "Telegram";
 	var title = channelBound
 		? session.activeChannel
 			? `Active ${channelLabel} session`
@@ -172,16 +186,22 @@ function SessionItem({ session, activeKey, depth, keyMap, refreshing }) {
 	var agentId = session.agent_id || "main";
 	var showAgentBadge = !!agentId && agentId !== "main";
 
-	function onClick() {
+	var href = sessionPath(session.key);
+
+	function onClick(event) {
+		if (event.defaultPrevented) return;
+		if (event.button !== 0) return;
+		if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+		event.preventDefault();
 		if (currentPrefix !== "/chats") {
-			navigate(sessionPath(session.key));
+			navigate(href);
 		} else {
 			switchSession(session.key);
 		}
 	}
 
 	return html`
-		<div class=${className} data-session-key=${session.key} style=${style} onClick=${onClick}>
+		<a href=${href} class=${className} data-session-key=${session.key} style=${style} onClick=${onClick}>
 			<div class="session-info">
 				<div class="session-label">
 					<${SessionIcon} session=${session} isBranch=${isBranch} />
@@ -209,7 +229,7 @@ function SessionItem({ session, activeKey, depth, keyMap, refreshing }) {
 				${preview && html`<div class="session-preview">${preview}</div>`}
 				<${SessionMeta} session=${session} />
 			</div>
-		</div>
+		</a>
 	`;
 }
 
@@ -220,15 +240,7 @@ export function SessionList() {
 	var refreshingKey = sessionStore.refreshInProgressKey.value;
 	var filterId = projectStore.projectFilterId.value;
 	var tab = sessionStore.sessionListTab.value;
-
-	// Hide session list when the vault is sealed — session data is
-	// encrypted and cannot be displayed.
-	var [vaultStatus, setVaultStatus] = useState(gon.get("vault_status"));
-	useEffect(() => {
-		setVaultStatus(gon.get("vault_status"));
-		gon.onChange("vault_status", setVaultStatus);
-		return () => gon.offChange("vault_status", setVaultStatus);
-	}, []);
+	var showArchived = sessionStore.showArchivedSessions.value;
 
 	// Spinner animation via setInterval
 	var spinnersRef = useRef(null);
@@ -245,13 +257,9 @@ export function SessionList() {
 		return () => clearInterval(timer);
 	}, []);
 
-	if (vaultStatus === "sealed") {
-		return html`<div class="text-xs text-[var(--muted)] p-3">Vault is sealed</div>`;
-	}
-
 	var filtered = filterId ? allSessions.filter((s) => s.projectId === filterId) : allSessions;
 	if (tab === "sessions") {
-		filtered = filtered.filter((s) => !(s.key || "").startsWith("cron:"));
+		filtered = filtered.filter((s) => !(s.key || "").startsWith("cron:") && (showArchived || !s.archived));
 	} else if (tab === "cron") {
 		filtered = filtered.filter((s) => (s.key || "").startsWith("cron:"));
 	}

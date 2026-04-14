@@ -455,11 +455,12 @@ pub fn is_loopback_addr(addr: &str) -> bool {
 /// Validate tailscale configuration constraints.
 ///
 /// - When tailscale mode is not "off", the gateway must be bound to a loopback address.
-/// - When funnel mode is requested, password auth must be set up (setup complete).
+/// - Funnel is allowed on loopback even before auth setup completes. Remote
+///   requests will still be gated by the HTTP auth middleware.
 pub fn validate_tailscale_config(
     mode: TailscaleMode,
     bind_addr: &str,
-    auth_setup_complete: bool,
+    _auth_setup_complete: bool,
 ) -> Result<()> {
     if mode == TailscaleMode::Off {
         return Ok(());
@@ -470,12 +471,6 @@ pub fn validate_tailscale_config(
             "tailscale {} requires the gateway to bind to a loopback address (127.0.0.1, ::1, or localhost), but got '{bind_addr}'",
             mode
         )));
-    }
-
-    if mode == TailscaleMode::Funnel && !auth_setup_complete {
-        return Err(Error::message(
-            "tailscale funnel requires password authentication to be configured. Set a password first (via setup code or MOLTIS_PASSWORD) before enabling funnel.",
-        ));
     }
 
     Ok(())
@@ -533,9 +528,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_funnel_requires_password() {
+    fn validate_funnel_allows_loopback_before_password_setup() {
         assert!(validate_tailscale_config(TailscaleMode::Funnel, "127.0.0.1", true).is_ok());
-        assert!(validate_tailscale_config(TailscaleMode::Funnel, "127.0.0.1", false).is_err());
+        assert!(validate_tailscale_config(TailscaleMode::Funnel, "127.0.0.1", false).is_ok());
     }
 
     #[test]

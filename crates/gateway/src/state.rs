@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -83,6 +83,7 @@ use {moltis_channels::ChannelReplyTarget, moltis_sessions::session_events::Sessi
 
 use crate::{
     auth::{CredentialStore, ResolvedAuth},
+    broadcast::Broadcaster,
     nodes::NodeRegistry,
     pairing::{PairingState, PairingStore},
     services::GatewayServices,
@@ -261,6 +262,8 @@ pub struct GatewayInner {
     /// One-time setup code displayed at startup, required during initial setup.
     /// Cleared after successful setup.
     pub setup_code: Option<secrecy::Secret<String>>,
+    /// When the setup code was created (for 30-minute expiry).
+    pub setup_code_created_at: Option<Instant>,
     /// Auto-update availability state from GitHub releases.
     pub update: crate::update_check::UpdateAvailability,
     /// Last error per run_id (short-lived, for send_sync to retrieve).
@@ -309,6 +312,7 @@ impl GatewayInner {
             discovered_hooks: Vec::new(),
             disabled_hooks: HashSet::new(),
             setup_code: None,
+            setup_code_created_at: None,
             update: crate::update_check::UpdateAvailability::default(),
             run_errors: HashMap::new(),
             #[cfg(feature = "metrics")]
@@ -316,10 +320,15 @@ impl GatewayInner {
             #[cfg(feature = "push-notifications")]
             push_service: None,
             llm_providers: None,
-            cached_location: moltis_config::load_user().and_then(|u| u.location),
+            cached_location: moltis_config::resolve_user_profile().location,
             channel_status_log: HashMap::new(),
             channel_command_mode_sessions: HashSet::new(),
-            channels_offered: vec!["telegram".into()],
+            channels_offered: vec![
+                "telegram".into(),
+                "discord".into(),
+                "slack".into(),
+                "matrix".into(),
+            ],
             passkey_host_update_pending: HashSet::new(),
             shiki_cdn_url: None,
         }
@@ -352,6 +361,8 @@ pub struct GatewayState {
     pub version: String,
     /// Hostname for HelloOk.
     pub hostname: String,
+    /// Loaded configuration snapshot for read-mostly request helpers.
+    pub config: moltis_config::schema::MoltisConfig,
     /// Auth configuration.
     pub auth: ResolvedAuth,
     /// Domain services.
@@ -365,9 +376,9 @@ pub struct GatewayState {
     /// SQLite-backed pairing store for device token persistence.
     /// `None` in tests that don't need pairing.
     pub pairing_store: Option<Arc<PairingStore>>,
-    /// Memory manager for long-term memory search (None if no embedding provider).
+    /// Memory runtime for long-term memory search.
     /// `Arc` because it is cloned into background tokio tasks.
-    pub memory_manager: Option<Arc<moltis_memory::manager::MemoryManager>>,
+    pub memory_manager: Option<moltis_memory::runtime::DynMemoryRuntime>,
     /// Whether the server is bound to a loopback address (localhost/127.0.0.1/::1).
     pub localhost_only: bool,
     /// Whether the server is known to be behind a reverse proxy.
@@ -381,9 +392,6 @@ pub struct GatewayState {
     /// Runtime GraphQL availability toggle.
     #[cfg(feature = "graphql")]
     pub graphql_enabled: AtomicBool,
-    /// Broadcast channel for GraphQL subscriptions. Events are `(event_name, payload)`.
-    #[cfg(feature = "graphql")]
-    pub graphql_broadcast: tokio::sync::broadcast::Sender<(String, serde_json::Value)>,
     /// Session event bus for cross-UI synchronisation (macOS ↔ web).
     pub session_event_bus: SessionEventBus,
     /// Cloud deploy platform (e.g. "flyio", "digitalocean"), read from
@@ -412,15 +420,26 @@ pub struct GatewayState {
     /// Per-(channel, account) rate limiter for channel webhooks.
     pub channel_webhook_rate_limiter: crate::channel_webhook_rate_limit::ChannelWebhookRateLimiter,
 
+    // ── Generic webhook ingress ───────────────────────────────────────────────
+    /// Webhook store for direct access from HTTP ingress handlers.
+    pub webhook_store: std::sync::OnceLock<Arc<dyn moltis_webhooks::store::WebhookStore>>,
+    /// Per-webhook rate limiter for generic webhook ingress.
+    pub webhook_rate_limiter: moltis_webhooks::rate_limit::WebhookRateLimiter,
+    /// Sender for queueing delivery IDs to the webhook worker.
+    pub webhook_worker_tx: std::sync::OnceLock<mpsc::Sender<i64>>,
+
     // ── Atomics (lock-free) ─────────────────────────────────────────────────
-    /// Monotonically increasing sequence counter for broadcast events.
-    pub seq: AtomicU64,
-    /// Sequential counter for TTS test phrase round-robin picking.
     pub tts_phrase_counter: AtomicUsize,
     /// Live count of connected nodes.  Shared with `ExecTool` via the
     /// `GatewayNodeExecProvider` so `parameters_schema()` can check it
     /// without awaiting the inner lock.
     pub node_count: Arc<AtomicUsize>,
+    /// Count of configured SSH targets exposed as remote execution options.
+    pub ssh_target_count: Arc<AtomicUsize>,
+
+    // ── Broadcast state (lock-free) ─────────────────────────────────────────
+    /// Lock-free broadcast state (seq counter, GraphQL subscription channel).
+    pub broadcaster: Arc<Broadcaster>,
 
     // ── Mutable runtime state (single lock) ─────────────────────────────────
     /// All mutable runtime state, behind a single lock.
@@ -432,6 +451,7 @@ impl GatewayState {
         Self::with_options(
             auth,
             services,
+            moltis_config::MoltisConfig::default(),
             None,
             None,
             None,
@@ -457,6 +477,7 @@ impl GatewayState {
     pub fn with_options(
         auth: ResolvedAuth,
         services: GatewayServices,
+        config: moltis_config::schema::MoltisConfig,
         sandbox_router: Option<Arc<SandboxRouter>>,
         credential_store: Option<Arc<CredentialStore>>,
         pairing_store: Option<Arc<PairingStore>>,
@@ -464,7 +485,7 @@ impl GatewayState {
         behind_proxy: bool,
         tls_active: bool,
         hook_registry: Option<Arc<moltis_common::hooks::HookRegistry>>,
-        memory_manager: Option<Arc<moltis_memory::manager::MemoryManager>>,
+        memory_manager: Option<moltis_memory::runtime::DynMemoryRuntime>,
         port: u16,
         ws_request_logs: bool,
         deploy_platform: Option<String>,
@@ -481,6 +502,7 @@ impl GatewayState {
         Arc::new(Self {
             version: moltis_config::VERSION.to_string(),
             hostname,
+            config,
             auth,
             services,
             credential_store,
@@ -508,14 +530,13 @@ impl GatewayState {
             ),
             channel_webhook_rate_limiter:
                 crate::channel_webhook_rate_limit::ChannelWebhookRateLimiter::new(),
-            seq: AtomicU64::new(0),
+            webhook_store: std::sync::OnceLock::new(),
+            webhook_rate_limiter: moltis_webhooks::rate_limit::WebhookRateLimiter::default(),
+            webhook_worker_tx: std::sync::OnceLock::new(),
             tts_phrase_counter: AtomicUsize::new(0),
             node_count: Arc::new(AtomicUsize::new(0)),
-            #[cfg(feature = "graphql")]
-            graphql_broadcast: {
-                let (tx, _) = tokio::sync::broadcast::channel(256);
-                tx
-            },
+            ssh_target_count: Arc::new(AtomicUsize::new(0)),
+            broadcaster: Arc::new(Broadcaster::new()),
             inner: RwLock::new(GatewayInner::new(hook_registry)),
         })
     }
@@ -565,7 +586,7 @@ impl GatewayState {
     }
 
     pub fn next_seq(&self) -> u64 {
-        self.seq.fetch_add(1, Ordering::Relaxed) + 1
+        self.broadcaster.next_seq()
     }
 
     #[cfg(feature = "graphql")]
@@ -851,7 +872,7 @@ impl GatewayState {
         let mut inner = self.inner.write().await;
 
         // Build and serialize the notification frame.
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let seq = self.broadcaster.next_seq();
         let frame = EventFrame::new(
             "auth.credentials_changed",
             serde_json::json!({ "reason": reason }),
@@ -949,6 +970,18 @@ mod tests {
             negotiated_protocol: moltis_protocol::PROTOCOL_VERSION,
         };
         (client, rx)
+    }
+
+    #[tokio::test]
+    async fn default_channels_offered_include_matrix() {
+        let state = test_state();
+        let inner = state.inner.read().await;
+        assert_eq!(inner.channels_offered, vec![
+            "telegram".to_owned(),
+            "discord".to_owned(),
+            "slack".to_owned(),
+            "matrix".to_owned(),
+        ]);
     }
 
     #[tokio::test]
