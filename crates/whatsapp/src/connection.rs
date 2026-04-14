@@ -64,6 +64,7 @@ pub async fn start_connection(
         )
         .with_http_client(whatsapp_rust_ureq_http_client::UreqHttpClient::new())
         .with_runtime(whatsapp_rust::TokioRuntime)
+        .skip_history_sync()
         .on_event(move |event, client| {
             let state_ref = Arc::clone(&state_ref_handler);
             let accounts = Arc::clone(&accounts_handler);
