@@ -800,6 +800,14 @@ pub(super) async fn complete_startup(
             tool_registry.register(Box::new(moltis_memory::tools::MemorySaveTool::new(
                 Arc::clone(mm),
             )));
+            tool_registry.register(Box::new(moltis_memory::tools::MemoryDeleteTool::new(
+                Arc::clone(mm),
+            )));
+            tool_registry.register(Box::new(moltis_chat::MemoryForgetTool::new(
+                Arc::clone(mm),
+                Arc::clone(&registry),
+                Arc::clone(&session_metadata),
+            )));
         }
 
         {

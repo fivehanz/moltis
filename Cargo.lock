@@ -7700,6 +7700,7 @@ dependencies = [
  "moltis-agents",
  "moltis-common",
  "moltis-metrics",
+ "moltis-tools",
  "notify-debouncer-full",
  "reqwest 0.13.2",
  "secrecy 0.8.0",
