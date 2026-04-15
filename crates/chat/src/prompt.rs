@@ -128,6 +128,7 @@ pub(crate) fn load_prompt_persona_base_for_agent(agent_id: &str) -> PromptPerson
         boot_text: moltis_config::load_boot_md_for_agent(agent_id),
         agents_text: moltis_config::load_agents_md_for_agent(agent_id),
         tools_text: moltis_config::load_tools_md_for_agent(agent_id),
+        guidelines_text: moltis_config::load_guidelines_md_for_agent(agent_id),
         memory_text: None,
         memory_status: prompt_memory_status(
             memory_style,

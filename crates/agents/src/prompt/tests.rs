@@ -92,7 +92,7 @@ fn test_skills_injected_into_prompt() {
         ..Default::default()
     }];
     let prompt = build_system_prompt_with_session_runtime(
-        &tools, true, None, &skills, None, None, None, None, None, None, None, None,
+        &tools, true, None, &skills, None, None, None, None, None, None, None, None, None,
     );
     assert!(prompt.contains("<available_skills>"));
     assert!(prompt.contains("commit"));
@@ -108,6 +108,7 @@ fn test_no_skills_block_when_empty() {
         true,
         None,
         &[],
+        None,
         None,
         None,
         None,
@@ -146,6 +147,7 @@ fn test_identity_injected_into_prompt() {
         None,
         None,
         None,
+        None,
     );
     assert!(prompt.contains("Your name is Momo 🦜."));
     assert!(prompt.contains("Your theme: cheerful parrot."));
@@ -174,6 +176,7 @@ fn test_custom_soul_injected() {
         None,
         None,
         None,
+        None,
     );
     assert!(prompt.contains("## Soul"));
     assert!(prompt.contains("loyal companion who loves fetch"));
@@ -188,6 +191,7 @@ fn test_no_identity_no_extra_lines() {
         true,
         None,
         &[],
+        None,
         None,
         None,
         None,
@@ -218,6 +222,7 @@ fn test_workspace_files_injected_when_provided() {
         Some("Prefer read-only tools first."),
         None,
         None,
+        None,
     );
     assert!(prompt.contains("## Workspace Files"));
     assert!(prompt.contains("### AGENTS.md (workspace)"));
@@ -245,6 +250,7 @@ fn test_workspace_file_metadata_marks_truncation() {
         PromptBuildLimits {
             workspace_file_max_chars: 10,
         },
+        None,
     );
 
     assert!(output.metadata.truncated());
@@ -320,6 +326,7 @@ fn test_runtime_context_injected_when_provided() {
         None,
         Some(&runtime),
         None,
+        None,
     );
 
     assert!(prompt.contains("## Runtime"));
@@ -378,6 +385,7 @@ fn test_runtime_context_sandbox_without_sudo_omits_sudo_hint() {
         None,
         Some(&runtime),
         None,
+        None,
     );
 
     assert!(prompt.contains("Sandbox(exec): enabled=true"));
@@ -412,6 +420,7 @@ fn test_runtime_context_no_sandbox_uses_host_only_routing() {
         None,
         None,
         Some(&runtime),
+        None,
         None,
     );
 
@@ -451,6 +460,7 @@ fn test_runtime_context_no_sandbox_with_sudo_includes_sudo_hint() {
         None,
         Some(&runtime),
         None,
+        None,
     );
 
     assert!(prompt.contains("`exec` runs on the host"));
@@ -483,6 +493,7 @@ fn test_runtime_context_includes_location_when_set() {
         None,
         None,
         Some(&runtime),
+        None,
         None,
     );
 
@@ -520,6 +531,7 @@ fn test_runtime_context_includes_channel_surface_fields_when_set() {
         None,
         Some(&runtime),
         None,
+        None,
     );
 
     assert!(prompt.contains("surface=telegram"));
@@ -556,6 +568,7 @@ fn test_runtime_context_omits_location_when_none() {
         None,
         Some(&runtime),
         None,
+        None,
     );
 
     assert!(!prompt.contains("location="));
@@ -582,6 +595,7 @@ fn test_minimal_prompt_runtime_does_not_add_exec_routing_block() {
         None,
         Some(&runtime),
         None,
+        None,
     );
 
     assert!(prompt.contains("## Runtime"));
@@ -605,8 +619,9 @@ fn test_silent_replies_section_in_tool_prompt() {
 
 #[test]
 fn test_silent_replies_not_in_minimal_prompt() {
-    let prompt =
-        build_system_prompt_minimal_runtime(None, None, None, None, None, None, None, None, None);
+    let prompt = build_system_prompt_minimal_runtime(
+        None, None, None, None, None, None, None, None, None, None,
+    );
     assert!(!prompt.contains("## Silent Replies"));
 }
 
@@ -627,6 +642,7 @@ fn test_memory_text_injected_into_prompt() {
         None,
         None,
         Some(memory),
+        None,
     );
     assert!(prompt.contains("## Long-Term Memory"));
     assert!(prompt.contains("Lives in Paris"));
@@ -647,6 +663,7 @@ fn test_boot_text_injected_into_prompt() {
         None,
         None,
         Some(boot),
+        None,
         None,
         None,
         None,
@@ -674,6 +691,7 @@ fn test_memory_text_truncated_at_limit() {
         None,
         None,
         Some(&large_memory),
+        None,
     );
     assert!(prompt.contains("## Long-Term Memory"));
     assert!(prompt.contains("MEMORY.md truncated"));
@@ -688,6 +706,7 @@ fn test_no_memory_section_without_memory_or_tools() {
         true,
         None,
         &[],
+        None,
         None,
         None,
         None,
@@ -713,6 +732,7 @@ fn test_memory_text_in_minimal_prompt() {
         None,
         None,
         Some(memory),
+        None,
     );
     assert!(prompt.contains("## Long-Term Memory"));
     assert!(prompt.contains("Important fact"));
@@ -762,6 +782,7 @@ fn test_memory_save_hint_injected_when_tool_registered() {
         None,
         None,
         None,
+        None,
     );
     assert!(prompt.contains("## Long-Term Memory"));
     assert!(prompt.contains("MUST call `memory_save`"));
@@ -775,6 +796,7 @@ fn test_memory_save_hint_absent_without_tool() {
         true,
         None,
         &[],
+        None,
         None,
         None,
         None,
@@ -804,6 +826,7 @@ fn test_memory_search_and_save_hints_both_present() {
         None,
         None,
         Some(memory),
+        None,
     );
     assert!(prompt.contains("## Long-Term Memory"));
     assert!(prompt.contains("Likes coffee"));
@@ -836,6 +859,7 @@ fn test_system_prompt_does_not_contain_datetime() {
         None,
         None,
         Some(&runtime),
+        None,
         None,
     );
 
@@ -1025,4 +1049,37 @@ fn text_mode_prompt_uses_compact_schema() {
     assert!(prompt.contains("Params: command (string, required)"));
     assert!(prompt.contains("## How to call tools"));
     assert!(prompt.contains("```tool_call"));
+}
+
+#[test]
+fn test_custom_guidelines_replaces_hardcoded() {
+    let tools = ToolRegistry::new();
+    let custom = "## My Guidelines\n- Always be terse.\n";
+    let prompt = build_system_prompt_with_session_runtime(
+        &tools, true, None, &[], None, None, None, None, None, None, None, None,
+        Some(custom),
+    );
+    assert!(prompt.contains("My Guidelines"));
+    assert!(!prompt.contains("## Silent Replies")); // hardcoded TOOL_GUIDELINES absent
+}
+
+#[test]
+fn test_none_guidelines_uses_tool_guidelines() {
+    let tools = ToolRegistry::new();
+    let prompt = build_system_prompt_with_session_runtime(
+        &tools, true, None, &[], None, None, None, None, None, None, None, None,
+        None,
+    );
+    assert!(prompt.contains("## Silent Replies"));
+}
+
+#[test]
+fn test_empty_string_guidelines_falls_through_to_hardcoded() {
+    let tools = ToolRegistry::new();
+    let prompt = build_system_prompt_with_session_runtime(
+        &tools, true, None, &[], None, None, None, None, None, None, None, None,
+        Some(""),
+    );
+    // Some("") should fall through to TOOL_GUIDELINES, not produce no guidelines
+    assert!(prompt.contains("## Silent Replies"));
 }

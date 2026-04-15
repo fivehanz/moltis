@@ -81,6 +81,7 @@ pub fn build_system_prompt(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -98,6 +99,7 @@ pub fn build_system_prompt_with_session_runtime(
     tools_text: Option<&str>,
     runtime_context: Option<&PromptRuntimeContext>,
     memory_text: Option<&str>,
+    guidelines_text: Option<&str>,
 ) -> String {
     build_system_prompt_with_session_runtime_details(
         tools,
@@ -113,6 +115,7 @@ pub fn build_system_prompt_with_session_runtime(
         runtime_context,
         memory_text,
         PromptBuildLimits::default(),
+        guidelines_text,
     )
     .prompt
 }
@@ -132,6 +135,7 @@ pub fn build_system_prompt_with_session_runtime_details(
     runtime_context: Option<&PromptRuntimeContext>,
     memory_text: Option<&str>,
     limits: PromptBuildLimits,
+    guidelines_text: Option<&str>,
 ) -> PromptBuildOutput {
     build_system_prompt_full(
         tools,
@@ -148,6 +152,7 @@ pub fn build_system_prompt_with_session_runtime_details(
         true,
         memory_text,
         limits,
+        guidelines_text,
     )
 }
 
@@ -162,6 +167,7 @@ pub fn build_system_prompt_minimal_runtime(
     tools_text: Option<&str>,
     runtime_context: Option<&PromptRuntimeContext>,
     memory_text: Option<&str>,
+    guidelines_text: Option<&str>,
 ) -> String {
     build_system_prompt_minimal_runtime_details(
         project_context,
@@ -174,6 +180,7 @@ pub fn build_system_prompt_minimal_runtime(
         runtime_context,
         memory_text,
         PromptBuildLimits::default(),
+        guidelines_text,
     )
     .prompt
 }
@@ -190,6 +197,7 @@ pub fn build_system_prompt_minimal_runtime_details(
     runtime_context: Option<&PromptRuntimeContext>,
     memory_text: Option<&str>,
     limits: PromptBuildLimits,
+    guidelines_text: Option<&str>,
 ) -> PromptBuildOutput {
     build_system_prompt_full(
         &ToolRegistry::new(),
@@ -206,6 +214,7 @@ pub fn build_system_prompt_minimal_runtime_details(
         false,
         memory_text,
         limits,
+        guidelines_text,
     )
 }
 
@@ -246,6 +255,7 @@ fn build_system_prompt_full(
     include_tools: bool,
     memory_text: Option<&str>,
     limits: PromptBuildLimits,
+    guidelines_text: Option<&str>,
 ) -> PromptBuildOutput {
     let tool_schemas = if include_tools {
         tools.list_schemas()
@@ -269,7 +279,7 @@ fn build_system_prompt_full(
     let model_id = runtime_context.and_then(|ctx| ctx.host.model.as_deref());
     append_available_tools_section(&mut prompt, native_tools, &tool_schemas);
     append_tool_call_guidance(&mut prompt, native_tools, &tool_schemas, model_id);
-    append_guidelines_section(&mut prompt, include_tools);
+    append_guidelines_section(&mut prompt, include_tools, guidelines_text);
 
     PromptBuildOutput {
         prompt,
@@ -547,7 +557,17 @@ fn append_tool_call_guidance(
     }
 }
 
-fn append_guidelines_section(prompt: &mut String, include_tools: bool) {
+fn append_guidelines_section(
+    prompt: &mut String,
+    include_tools: bool,
+    guidelines_text: Option<&str>,
+) {
+    if let Some(text) = guidelines_text {
+        if !text.is_empty() {
+            prompt.push_str(text);
+            return;
+        }
+    }
     prompt.push_str(if include_tools {
         TOOL_GUIDELINES
     } else {

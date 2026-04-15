@@ -1032,6 +1032,7 @@ impl ChatService for LiveChatService {
                 Some(&runtime_context),
                 persona.memory_text.as_deref(),
                 prompt_limits,
+                persona.guidelines_text.as_deref(),
             )
         } else {
             build_system_prompt_minimal_runtime_details(
@@ -1045,6 +1046,7 @@ impl ChatService for LiveChatService {
                 Some(&runtime_context),
                 persona.memory_text.as_deref(),
                 prompt_limits,
+                persona.guidelines_text.as_deref(),
             )
         };
 
@@ -1155,6 +1157,7 @@ impl ChatService for LiveChatService {
                 Some(&runtime_context),
                 persona.memory_text.as_deref(),
                 prompt_limits,
+                persona.guidelines_text.as_deref(),
             )
         } else {
             build_system_prompt_minimal_runtime_details(
@@ -1168,6 +1171,7 @@ impl ChatService for LiveChatService {
                 Some(&runtime_context),
                 persona.memory_text.as_deref(),
                 prompt_limits,
+                persona.guidelines_text.as_deref(),
             )
         };
 

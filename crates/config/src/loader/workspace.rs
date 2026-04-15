@@ -270,6 +270,17 @@ pub fn load_tools_md_for_agent(agent_id: &str) -> Option<String> {
     load_workspace_markdown(agent_path).or_else(load_tools_md)
 }
 
+/// Load GUIDELINES.md from the docs/moltis directory if present and non-empty.
+pub fn load_guidelines_md() -> Option<String> {
+    load_workspace_markdown(guidelines_path())
+}
+
+/// Load GUIDELINES.md for a specific agent, falling back to the root file.
+pub fn load_guidelines_md_for_agent(agent_id: &str) -> Option<String> {
+    let agent_path = agent_workspace_dir(agent_id).join("GUIDELINES.md");
+    load_workspace_markdown(agent_path).or_else(load_guidelines_md)
+}
+
 /// Load HEARTBEAT.md from the workspace root (`data_dir`) if present and non-empty.
 pub fn load_heartbeat_md() -> Option<String> {
     load_workspace_markdown(heartbeat_path())

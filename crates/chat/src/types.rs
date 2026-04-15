@@ -975,6 +975,7 @@ pub(crate) struct PromptPersona {
     pub boot_text: Option<String>,
     pub agents_text: Option<String>,
     pub tools_text: Option<String>,
+    pub guidelines_text: Option<String>,
     pub memory_text: Option<String>,
     pub memory_status: PromptMemoryStatus,
 }

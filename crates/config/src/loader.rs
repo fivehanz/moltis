@@ -215,6 +215,11 @@ pub fn tools_path() -> PathBuf {
     data_dir().join("TOOLS.md")
 }
 
+/// Path to workspace guidelines override markdown.
+pub fn guidelines_path() -> PathBuf {
+    data_dir().join("docs/moltis/GUIDELINES.md")
+}
+
 /// Path to workspace heartbeat markdown.
 pub fn heartbeat_path() -> PathBuf {
     data_dir().join("HEARTBEAT.md")

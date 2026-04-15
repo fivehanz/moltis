@@ -146,6 +146,7 @@ pub(crate) async fn run_streaming(
         runtime_context,
         persona.memory_text.as_deref(),
         prompt_build_limits_from_config(&persona.config),
+        persona.guidelines_text.as_deref(),
     )
     .prompt;
 
