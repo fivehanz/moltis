@@ -173,7 +173,8 @@ impl OpenAiProvider {
             self.apply_system_prompt_rewrite(&mut body);
 
             if !tools.is_empty() {
-                body["tools"] = serde_json::Value::Array(to_openai_tools(&tools));
+                body["tools"] =
+                    serde_json::Value::Array(to_openai_tools(&tools, self.needs_strict_tools()));
             }
 
             self.apply_reasoning_effort_chat(&mut body);

@@ -214,22 +214,25 @@ pub fn patch_schema_for_strict_mode(schema: &mut serde_json::Value) {
 /// { "type": "function", "function": { "name": "...", ... } }
 /// ```
 ///
-/// Adds `strict: true` and patches schemas for strict mode compliance:
+/// When `strict` is `true`, patches schemas for strict mode compliance:
 /// - `additionalProperties: false` on all object schemas
 /// - All properties included in `required` array
+/// - Originally-optional properties made nullable via array-form types
 ///
-/// This is required by some APIs (Claude via Copilot) to ensure the model
-/// provides all required fields.
+/// When `strict` is `false`, schemas are sanitized but not patched for strict
+/// mode. This avoids array-form types like `["boolean", "null"]` that
+/// non-OpenAI backends (e.g. Google via OpenRouter) reject.
 ///
 /// See: <https://platform.openai.com/docs/guides/function-calling>
-pub fn to_openai_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
+pub fn to_openai_tools(tools: &[serde_json::Value], strict: bool) -> Vec<serde_json::Value> {
     let result: Vec<serde_json::Value> = tools
         .iter()
         .filter_map(|t| {
-            // Clone parameters and patch for strict mode
             let mut params = t["parameters"].clone();
             sanitize_schema_for_openai_compat(&mut params);
-            patch_schema_for_strict_mode(&mut params);
+            if strict {
+                patch_schema_for_strict_mode(&mut params);
+            }
 
             let name = t["name"].as_str()?.to_string();
             let description = t["description"].as_str().unwrap_or("").to_string();
@@ -241,11 +244,11 @@ pub fn to_openai_tools(tools: &[serde_json::Value]) -> Vec<serde_json::Value> {
                     name: name.clone(),
                     description,
                     parameters: params,
-                    strict: true,
+                    strict,
                 },
             };
 
-            trace!(tool_name = %name, "converted tool to Chat Completions format");
+            trace!(tool_name = %name, strict, "converted tool to Chat Completions format");
 
             // Serialize to Value for compatibility with existing API
             serde_json::to_value(tool).ok()
@@ -1117,7 +1120,7 @@ pub fn parse_responses_completion(resp: &serde_json::Value) -> CompletionRespons
 mod tests {
     use super::{
         parse_responses_completion, parse_tool_calls, sanitize_schema_for_openai_compat,
-        to_responses_api_tools,
+        to_openai_tools, to_responses_api_tools,
     };
 
     #[test]
@@ -1379,5 +1382,153 @@ mod tests {
         };
         assert!(tuple_items[0].get("not").is_none());
         assert!(tuple_items[1].get("patternProperties").is_none());
+    }
+
+    #[test]
+    fn to_openai_tools_strict_mode_applied_by_default() {
+        let tools = vec![serde_json::json!({
+            "name": "create_file",
+            "description": "Create a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" },
+                    "overwrite": { "type": "boolean" }
+                },
+                "required": ["path"]
+            }
+        })];
+
+        let converted = to_openai_tools(&tools, true);
+        assert_eq!(converted.len(), 1);
+
+        let func = &converted[0]["function"];
+        assert_eq!(func["strict"], true);
+        assert_eq!(func["parameters"]["additionalProperties"], false);
+
+        // All properties must be in the required array.
+        let Some(required) = func["parameters"]["required"].as_array() else {
+            panic!("required should be an array");
+        };
+        let required_names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(required_names.contains(&"path"));
+        assert!(required_names.contains(&"content"));
+        assert!(required_names.contains(&"overwrite"));
+    }
+
+    #[test]
+    fn to_openai_tools_non_strict_skips_patching() {
+        let tools = vec![serde_json::json!({
+            "name": "create_file",
+            "description": "Create a file",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "content": { "type": "string" },
+                    "overwrite": { "type": "boolean" }
+                },
+                "required": ["path"]
+            }
+        })];
+
+        let converted = to_openai_tools(&tools, false);
+        assert_eq!(converted.len(), 1);
+
+        let func = &converted[0]["function"];
+        assert_eq!(func["strict"], false);
+
+        // strict-mode patching must NOT have run: no additionalProperties
+        // and no array-form nullable types like ["boolean","null"].
+        let serialized = func["parameters"].to_string();
+        assert!(
+            !serialized.contains("additionalProperties"),
+            "strict mode should not inject additionalProperties: {serialized}"
+        );
+        assert!(
+            !serialized.contains("[\"boolean\""),
+            "strict mode should not produce array-form types: {serialized}"
+        );
+        assert!(
+            !serialized.contains("[\"string\""),
+            "strict mode should not produce array-form types: {serialized}"
+        );
+    }
+
+    #[test]
+    fn to_openai_tools_non_strict_complex_cron_like_schema() {
+        // Schema modeled after the cron tool's `job` property: nested objects,
+        // optional booleans, enum fields — the shapes that trigger Google's
+        // INVALID_ARGUMENT when strict-mode array types are present.
+        let tools = vec![serde_json::json!({
+            "name": "schedule_cron",
+            "description": "Schedule a cron job",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "job": {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" },
+                            "schedule": { "type": "string" },
+                            "retry": { "type": "boolean" },
+                            "mode": {
+                                "type": "string",
+                                "enum": ["once", "recurring"]
+                            },
+                            "config": {
+                                "type": "object",
+                                "properties": {
+                                    "timeout": { "type": "integer" },
+                                    "verbose": { "type": "boolean" }
+                                },
+                                "required": ["timeout"]
+                            }
+                        },
+                        "required": ["schedule"]
+                    }
+                },
+                "required": ["name", "job"]
+            }
+        })];
+
+        let converted = to_openai_tools(&tools, false);
+        let func = &converted[0]["function"];
+        assert_eq!(func["strict"], false);
+
+        // No array-form types anywhere in the output.
+        let serialized = func["parameters"].to_string();
+        // Array-form types look like `["boolean","null"]` — must not appear.
+        assert!(
+            !serialized.contains("[\"boolean\""),
+            "should not contain array-form types: {serialized}"
+        );
+        assert!(
+            !serialized.contains("[\"string\""),
+            "should not contain array-form types: {serialized}"
+        );
+        assert!(
+            !serialized.contains("[\"integer\""),
+            "should not contain array-form types: {serialized}"
+        );
+
+        // Original required arrays preserved.
+        let Some(job_required) = func["parameters"]["properties"]["job"]["required"].as_array()
+        else {
+            panic!("job required should be an array");
+        };
+        assert_eq!(job_required.len(), 1);
+        assert_eq!(job_required[0], "schedule");
+
+        // Nested object required array also preserved.
+        let Some(config_required) =
+            func["parameters"]["properties"]["job"]["properties"]["config"]["required"].as_array()
+        else {
+            panic!("config required should be an array");
+        };
+        assert_eq!(config_required.len(), 1);
+        assert_eq!(config_required[0], "timeout");
     }
 }

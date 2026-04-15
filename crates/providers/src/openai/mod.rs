@@ -27,6 +27,8 @@ pub struct OpenAiProvider {
     reasoning_effort: Option<moltis_agents::model::ReasoningEffort>,
     /// Prompt cache retention policy (used for OpenRouter Anthropic passthrough).
     cache_retention: moltis_config::CacheRetention,
+    /// Explicit override for strict tool schema mode. `None` = auto-detect.
+    strict_tools_override: Option<bool>,
 }
 
 const OPENAI_MODELS_ENDPOINT_PATH: &str = "/models";

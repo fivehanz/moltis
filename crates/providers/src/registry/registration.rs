@@ -202,6 +202,9 @@ impl ProviderRegistry {
                 if !matches!(effective_tool_mode, moltis_config::ToolMode::Auto) {
                     oai = oai.with_tool_mode(effective_tool_mode);
                 }
+                if let Some(strict) = config.get(def.config_name).and_then(|e| e.strict_tools) {
+                    oai = oai.with_strict_tools(strict);
+                }
 
                 self.register(
                     ModelInfo {
@@ -899,6 +902,9 @@ impl ProviderRegistry {
                 if !matches!(effective_tool_mode, moltis_config::ToolMode::Auto) {
                     oai = oai.with_tool_mode(effective_tool_mode);
                 }
+                if let Some(strict) = config.get(def.config_name).and_then(|e| e.strict_tools) {
+                    oai = oai.with_strict_tools(strict);
+                }
 
                 let provider = Arc::new(oai);
                 self.register(
@@ -988,6 +994,9 @@ impl ProviderRegistry {
                 }
                 if !matches!(custom_tool_mode, moltis_config::ToolMode::Auto) {
                     oai = oai.with_tool_mode(custom_tool_mode);
+                }
+                if let Some(strict) = entry.strict_tools {
+                    oai = oai.with_strict_tools(strict);
                 }
                 let provider = Arc::new(oai);
                 self.register(

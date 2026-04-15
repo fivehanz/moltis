@@ -545,7 +545,7 @@ async fn collect_streamed_completion(
     });
 
     if !tools.is_empty() {
-        body["tools"] = serde_json::Value::Array(to_openai_tools(tools));
+        body["tools"] = serde_json::Value::Array(to_openai_tools(tools, true));
     }
 
     debug!(
@@ -888,7 +888,7 @@ impl LlmProvider for GitHubCopilotProvider {
         });
 
         if !tools.is_empty() {
-            body["tools"] = serde_json::Value::Array(to_openai_tools(tools));
+            body["tools"] = serde_json::Value::Array(to_openai_tools(tools, true));
         }
 
         debug!(
@@ -1222,7 +1222,7 @@ impl GitHubCopilotProvider {
             });
 
             if !tools.is_empty() {
-                body["tools"] = serde_json::Value::Array(to_openai_tools(&tools));
+                body["tools"] = serde_json::Value::Array(to_openai_tools(&tools, true));
             }
 
             debug!(

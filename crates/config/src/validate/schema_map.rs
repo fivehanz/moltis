@@ -43,6 +43,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
             ("alias", Leaf),
             ("tool_mode", Leaf),
             ("cache_retention", Leaf),
+            ("strict_tools", Leaf),
             ("policy", tool_policy_entry()),
         ]))
     };

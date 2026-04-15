@@ -235,3 +235,21 @@ async fn alibaba_coding_serialization_scenarios_non_streaming() {
 
     run_provider_scenarios(config.provider_name, provider).await;
 }
+
+#[tokio::test]
+#[ignore]
+async fn openrouter_google_serialization_scenarios_non_streaming() {
+    let config = ProviderConfig {
+        provider_name: "openrouter-google",
+        api_key_env: "OPENROUTER_API_KEY",
+        base_url_env: None,
+        default_base_url: "https://openrouter.ai/api/v1",
+        model_env: "SERIALIZATION_TEST_OPENROUTER_GOOGLE_MODEL",
+        default_model: "google/gemma-4-31b-it:free",
+    };
+    let Some(provider) = configured_provider(&config) else {
+        return;
+    };
+
+    run_provider_scenarios(config.provider_name, provider).await;
+}

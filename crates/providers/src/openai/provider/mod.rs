@@ -36,6 +36,7 @@ impl OpenAiProvider {
             tool_mode_override: None,
             reasoning_effort: None,
             cache_retention: moltis_config::CacheRetention::Short,
+            strict_tools_override: None,
         }
     }
 
@@ -57,6 +58,7 @@ impl OpenAiProvider {
             tool_mode_override: None,
             reasoning_effort: None,
             cache_retention: moltis_config::CacheRetention::Short,
+            strict_tools_override: None,
         }
     }
 
@@ -81,6 +83,12 @@ impl OpenAiProvider {
     #[must_use]
     pub fn with_wire_api(mut self, wire_api: WireApi) -> Self {
         self.wire_api = wire_api;
+        self
+    }
+
+    #[must_use]
+    pub fn with_strict_tools(mut self, strict: bool) -> Self {
+        self.strict_tools_override = Some(strict);
         self
     }
 
@@ -163,6 +171,7 @@ impl LlmProvider for OpenAiProvider {
             reasoning_effort: Some(effort),
             wire_api: self.wire_api,
             cache_retention: self.cache_retention,
+            strict_tools_override: self.strict_tools_override,
         }))
     }
 
