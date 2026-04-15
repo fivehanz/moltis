@@ -87,16 +87,15 @@ pub async fn handle_event(
             }
             mirror_latest_qr(&accounts, &state.account_id, None);
 
-            // Auto-approve the owner's phone and LID JIDs so they don't
-            // need to manually add themselves to the allowlist.
+            // Auto-approve the owner's phone number so they don't need to
+            // manually add themselves to the allowlist.  Only the PN JID is
+            // needed — incoming messages always use the PN format.
             {
                 let own_pn = state.client.get_pn().await;
-                let own_lid = state.client.get_lid().await;
-                auto_approve_owner_jids(
+                auto_approve_owner_jid(
                     &accounts,
                     &state.account_id,
                     own_pn.as_ref(),
-                    own_lid.as_ref(),
                 );
             }
 
@@ -857,35 +856,33 @@ fn message_mentions_owner(msg: &wa::Message, own_pn: Option<&Jid>, own_lid: Opti
 
 /// Auto-add the owner's phone and LID JIDs to the allowlist so they're
 /// always approved without manual configuration or OTP.
-fn auto_approve_owner_jids(
+fn auto_approve_owner_jid(
     accounts: &AccountStateMap,
     account_id: &str,
     own_pn: Option<&Jid>,
-    own_lid: Option<&Jid>,
 ) {
+    let Some(jid) = own_pn else { return };
     let mut map = accounts.write().unwrap_or_else(|e| e.into_inner());
     let Some(state) = map.get_mut(account_id) else {
         return;
     };
 
-    for jid in own_pn.into_iter().chain(own_lid.into_iter()) {
-        // Use "user@server" without the device suffix — incoming messages
-        // arrive as e.g. "15551234567@s.whatsapp.net" (no ":35" device).
-        let canonical = format!("{}@{}", jid.user, jid.server);
-        let user = &jid.user;
-        let already = state
-            .config
-            .allowlist
-            .iter()
-            .any(|entry| entry == user || entry == &canonical);
-        if !already {
-            info!(
-                account_id,
-                jid = %canonical,
-                "auto-adding owner JID to allowlist"
-            );
-            state.config.allowlist.push(canonical);
-        }
+    // Use "user@server" without the device suffix — incoming messages
+    // arrive as e.g. "15551234567@s.whatsapp.net" (no ":35" device).
+    let canonical = format!("{}@{}", jid.user, jid.server);
+    let user = &jid.user;
+    let already = state
+        .config
+        .allowlist
+        .iter()
+        .any(|entry| entry == user || entry == &canonical);
+    if !already {
+        info!(
+            account_id,
+            jid = %canonical,
+            "auto-adding owner JID to allowlist"
+        );
+        state.config.allowlist.push(canonical);
     }
 }
 
