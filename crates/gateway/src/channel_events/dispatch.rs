@@ -38,7 +38,7 @@ pub(in crate::channel_events) async fn dispatch_to_chat(
             "sessionKey": &session_key,
         });
         broadcast(state, "chat", payload, BroadcastOpts {
-            drop_if_slow: true,
+            drop_if_slow: false,
             ..Default::default()
         })
         .await;

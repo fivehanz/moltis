@@ -205,7 +205,7 @@ pub struct ChannelToolPolicyOverride {
 #[serde(default)]
 pub struct ChannelsConfig {
     /// Which channel types are offered in the web UI (onboarding + channels page).
-    /// Defaults to `["telegram", "msteams", "discord", "slack", "matrix", "nostr"]`. Add `"whatsapp"` to opt in.
+    /// Defaults to `["telegram", "whatsapp", "msteams", "discord", "slack", "matrix", "nostr"]`.
     #[serde(
         default = "default_channels_offered",
         skip_serializing_if = "Vec::is_empty"
@@ -286,6 +286,7 @@ impl ChannelsConfig {
 fn default_channels_offered() -> Vec<String> {
     vec![
         "telegram".into(),
+        "whatsapp".into(),
         "msteams".into(),
         "discord".into(),
         "slack".into(),

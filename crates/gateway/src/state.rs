@@ -325,6 +325,7 @@ impl GatewayInner {
             channel_command_mode_sessions: HashSet::new(),
             channels_offered: vec![
                 "telegram".into(),
+                "whatsapp".into(),
                 "discord".into(),
                 "slack".into(),
                 "matrix".into(),
@@ -978,6 +979,7 @@ mod tests {
         let inner = state.inner.read().await;
         assert_eq!(inner.channels_offered, vec![
             "telegram".to_owned(),
+            "whatsapp".to_owned(),
             "discord".to_owned(),
             "slack".to_owned(),
             "matrix".to_owned(),

@@ -376,6 +376,7 @@ fn channels_config_defaults_offered() {
     let config = ChannelsConfig::default();
     assert_eq!(config.offered, vec![
         "telegram".to_string(),
+        "whatsapp".to_string(),
         "msteams".to_string(),
         "discord".to_string(),
         "slack".to_string(),
@@ -389,6 +390,7 @@ fn channels_config_empty_toml_defaults_offered() {
     let config: ChannelsConfig = toml::from_str("").unwrap();
     assert_eq!(config.offered, vec![
         "telegram".to_string(),
+        "whatsapp".to_string(),
         "msteams".to_string(),
         "discord".to_string(),
         "slack".to_string(),

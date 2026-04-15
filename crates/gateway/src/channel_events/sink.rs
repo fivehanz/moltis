@@ -46,8 +46,12 @@ pub(super) async fn emit(
             payload
         };
 
+        // QR code events are large and frequent — drop them if the client
+        // is slow.  Pairing result events (complete/failed) are critical
+        // one-shots that must not be lost.
+        let droppable = matches!(event, ChannelEvent::PairingQrCode { .. });
         broadcast(state, "channel", payload, BroadcastOpts {
-            drop_if_slow: true,
+            drop_if_slow: droppable,
             ..Default::default()
         })
         .await;

@@ -57,7 +57,7 @@ import {
 	transcribeAudio,
 	VOICE_COUNTERPART_IDS,
 } from "./voice-utils.js";
-import { connectWs } from "./ws-connect.js";
+import { connectWs, subscribeEvents } from "./ws-connect.js";
 
 var wsStarted = false;
 function ensureWsConnected() {
@@ -65,6 +65,9 @@ function ensureWsConnected() {
 	wsStarted = true;
 	connectWs({
 		backoff: { factor: 2, max: 10000 },
+		onConnected: () => {
+			subscribeEvents(["channel"]);
+		},
 		onFrame: (frame) => {
 			if (frame.type !== "event") return;
 			var listeners = eventListeners[frame.event] || [];
@@ -3334,6 +3337,7 @@ function WhatsAppForm({ onConnected, error, setError }) {
 	var [qrSvgUrl, setQrSvgUrl] = useState(null);
 	var [pairingError, setPairingError] = useState(null);
 	var unsubRef = useRef(null);
+	var hadQrRef = useRef(false);
 
 	// Clean up event subscription on unmount.
 	useEffect(() => {
@@ -3341,6 +3345,38 @@ function WhatsAppForm({ onConnected, error, setError }) {
 			if (unsubRef.current) unsubRef.current();
 		};
 	}, []);
+
+	// Poll channels.status as a fallback for both QR code display and
+	// connection detection (WebSocket events may be missed).
+	useEffect(() => {
+		if (!pairingStarted) return undefined;
+		var id = accountId.trim() || "main";
+		var timer = setInterval(async () => {
+			try {
+				var res = await sendRpc("channels.status");
+				if (!res?.ok) return;
+				var ch = (res.payload?.channels || []).find((c) => c.type === "whatsapp" && c.account_id === id);
+				if (!ch) return;
+				if (ch.status === "connected") {
+					onConnected(id, "whatsapp");
+					return;
+				}
+				// QR cleared + not connected = pairing succeeded, connecting.
+				if (hadQrRef.current && !ch.extra?.qr_data) {
+					onConnected(id, "whatsapp");
+					return;
+				}
+				if (ch.extra?.qr_data) {
+					hadQrRef.current = true;
+					setQrData(ch.extra.qr_data);
+					if (ch.extra.qr_svg) setQrSvg(ch.extra.qr_svg);
+				}
+			} catch (_e) {
+				/* ignore */
+			}
+		}, 2000);
+		return () => clearInterval(timer);
+	}, [pairingStarted]);
 
 	useEffect(() => {
 		if (!qrSvg) {
@@ -3361,11 +3397,7 @@ function WhatsAppForm({ onConnected, error, setError }) {
 
 	function onStartPairing(e) {
 		e.preventDefault();
-		var id = accountId.trim();
-		if (!id) {
-			setError("Account ID is required.");
-			return;
-		}
+		var id = accountId.trim() || "main";
 		var advancedPatch = parseChannelConfigPatch(advancedConfig);
 		if (!advancedPatch.ok) {
 			setError(advancedPatch.error);
@@ -3434,24 +3466,27 @@ function WhatsAppForm({ onConnected, error, setError }) {
 			<div class="text-xs text-[var(--muted)] text-center">
 				Scan the QR code from your terminal, or open WhatsApp > Settings > Linked Devices > Link a Device.
 			</div>
+			<div class="text-xs text-[var(--muted)] text-center italic">
+				Only new messages will be processed. Past conversations are not synced.
+			</div>
 		</div>`;
 	}
 
 	return html`<form onSubmit=${onStartPairing} class="flex flex-col gap-3">
 		<div class="rounded-md border border-[var(--border)] bg-[var(--surface2)] p-3 text-xs text-[var(--muted)] flex flex-col gap-1">
 			<span class="font-medium text-[var(--text-strong)]">Link your WhatsApp</span>
-			<span>1. Choose an account ID below (any name you like)</span>
-			<span>2. Click "Start Pairing" to generate a QR code</span>
-			<span>3. Open WhatsApp > Settings > Linked Devices > Link a Device</span>
-			<span>4. Scan the QR code to connect</span>
+			<span>1. Click "Start Pairing" to generate a QR code</span>
+			<span>2. Open WhatsApp > Settings > Linked Devices > Link a Device</span>
+			<span>3. Scan the QR code to connect</span>
+			<span class="mt-1 italic">Only new messages will be processed — past conversations are not synced.</span>
 		</div>
 		<div>
-			<label class="text-xs text-[var(--muted)] mb-1 block">Account ID</label>
+			<label class="text-xs text-[var(--muted)] mb-1 block">Account ID (optional)</label>
 			<input type="text" class="provider-key-input w-full"
 				value=${accountId} onInput=${(e) => setAccountId(e.target.value)}
-				placeholder="e.g. my-whatsapp"
+				placeholder="main"
 				autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false"
-				name="whatsapp_account_id" autofocus />
+				name="whatsapp_account_id" />
 		</div>
 		<div>
 			<label class="text-xs text-[var(--muted)] mb-1 block">DM Policy</label>
@@ -3622,7 +3657,7 @@ function NostrForm({ onConnected, error, setError }) {
 }
 
 function ChannelStep({ onNext, onBack }) {
-	var offeredList = getGon("channels_offered") || ["telegram", "discord", "slack", "matrix"];
+	var offeredList = getGon("channels_offered") || ["telegram", "whatsapp", "discord", "slack", "matrix"];
 	var offered = new Set(offeredList);
 	var singleType = offeredList.length === 1 ? offeredList[0] : null;
 

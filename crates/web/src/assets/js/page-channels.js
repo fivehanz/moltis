@@ -3,7 +3,7 @@
 import { signal, useSignal } from "@preact/signals";
 import { html } from "htm/preact";
 import { render } from "preact";
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import {
 	addChannel,
 	buildTeamsEndpoint,
@@ -441,8 +441,8 @@ function ChannelCard(props) {
 
 // ── Connect channel buttons ──────────────────────────────────
 function ConnectButtons() {
-	var offered = new Set(getGon("channels_offered") || ["telegram", "discord", "slack", "matrix"]);
-	return html`<div class="flex gap-2">
+	var offered = new Set(getGon("channels_offered") || ["telegram", "whatsapp", "discord", "slack", "matrix"]);
+	return html`<div class="flex gap-2 flex-wrap">
 		${
 			offered.has("telegram") &&
 			html`<button class="provider-btn provider-btn-secondary inline-flex items-center gap-1.5"
@@ -1748,14 +1748,11 @@ function AddWhatsAppModal() {
 	var allowlistItems = useSignal([]);
 	var accountDraft = useSignal("");
 	var advancedConfigPatch = useSignal("");
+	var qrPollRef = useRef(null);
 
 	function onStartPairing(e) {
 		e.preventDefault();
-		var accountId = accountDraft.value.trim();
-		if (!accountId) {
-			error.value = "Account ID is required.";
-			return;
-		}
+		var accountId = accountDraft.value.trim() || "main";
 		var form = e.target.closest(".channel-form");
 		var advancedPatch = parseChannelConfigPatch(advancedConfigPatch.value);
 		if (!advancedPatch.ok) {
@@ -1783,6 +1780,33 @@ function AddWhatsAppModal() {
 			saving.value = false;
 			if (res?.ok) {
 				pairingStarted.value = true;
+				// Poll channels.status as fallback for QR display and connection detection.
+				if (qrPollRef.current) clearInterval(qrPollRef.current);
+				qrPollRef.current = setInterval(async () => {
+					try {
+						var st = await sendRpc("channels.status");
+						if (!st?.ok) return;
+						var ch = (st.payload?.channels || []).find((c) => c.type === "whatsapp" && c.account_id === accountId);
+						if (!ch) return;
+						if (ch.status === "connected" || (waQrData.value && !ch.extra?.qr_data)) {
+							clearInterval(qrPollRef.current);
+							qrPollRef.current = null;
+							showToast("WhatsApp connected!");
+							showAddWhatsApp.value = false;
+							waPairingAccountId.value = null;
+							waQrData.value = null;
+							waQrSvg.value = null;
+							loadChannels();
+							return;
+						}
+						if (ch.extra?.qr_data) {
+							waQrData.value = ch.extra.qr_data;
+							if (ch.extra.qr_svg) waQrSvg.value = ch.extra.qr_svg;
+						}
+					} catch (_e) {
+						/* ignore */
+					}
+				}, 2000);
 			} else {
 				error.value = (res?.error && (res.error.message || res.error.detail)) || "Failed to start pairing.";
 			}
@@ -1790,6 +1814,10 @@ function AddWhatsAppModal() {
 	}
 
 	function onClose() {
+		if (qrPollRef.current) {
+			clearInterval(qrPollRef.current);
+			qrPollRef.current = null;
+		}
 		showAddWhatsApp.value = false;
 		pairingStarted.value = false;
 		waQrData.value = null;
@@ -1818,7 +1846,7 @@ function AddWhatsAppModal() {
 							? html`<div class="text-sm text-[var(--error)]">${waPairingError.value}</div>`
 							: html`<${QrCodeDisplay} data=${waQrData.value} svg=${waQrSvg.value} />`
 					}
-          <div class="text-xs text-[var(--muted)]">QR code refreshes automatically. Keep this window open.</div>
+          <div class="text-xs text-[var(--muted)]">QR code refreshes automatically. Keep this window open.<br/>Only new messages will be processed — past conversations are not synced.</div>
         </div>
       `
 					: html`
@@ -1833,7 +1861,7 @@ function AddWhatsAppModal() {
         </div>
         <${ConnectionModeHint} type="whatsapp" />
         <label class="text-xs text-[var(--muted)]">Account ID</label>
-        <input data-field="accountId" type="text" placeholder="e.g. my-whatsapp" class="channel-input"
+        <input data-field="accountId" type="text" placeholder="main" class="channel-input"
           value=${accountDraft.value}
           onInput=${(e) => {
 						accountDraft.value = e.target.value;

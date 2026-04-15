@@ -87,6 +87,14 @@ pub async fn handle_event(
             }
             mirror_latest_qr(&accounts, &state.account_id, None);
 
+            // Auto-approve the owner's phone number so they don't need to
+            // manually add themselves to the allowlist.  Only the PN JID is
+            // needed — incoming messages always use the PN format.
+            {
+                let own_pn = state.client.get_pn().await;
+                auto_approve_owner_jid(&accounts, &state.account_id, own_pn.as_ref());
+            }
+
             let display_name = state.client.get_push_name().await;
             let display = if display_name.is_empty() {
                 None
@@ -99,6 +107,26 @@ pub async fn handle_event(
                     channel_type: ChannelType::Whatsapp,
                     account_id: state.account_id.clone(),
                     display_name: display,
+                })
+                .await;
+            }
+        },
+        Event::PairSuccess(ref pair) => {
+            info!(account_id = %state.account_id, jid = %pair.id, "WhatsApp pairing succeeded");
+
+            // Clear QR immediately so the UI stops showing it.
+            if let Ok(mut qr) = state.latest_qr.write() {
+                *qr = None;
+            }
+            mirror_latest_qr(&accounts, &state.account_id, None);
+
+            // Emit PairingComplete now — don't wait for the reconnect cycle.
+            // The UI will transition from QR → success immediately.
+            if let Some(ref sink) = state.event_sink {
+                sink.emit(ChannelEvent::PairingComplete {
+                    channel_type: ChannelType::Whatsapp,
+                    account_id: state.account_id.clone(),
+                    display_name: None,
                 })
                 .await;
             }
@@ -160,7 +188,9 @@ async fn handle_message(
 
     let peer_id = sender_jid.to_string();
     let chat_id = chat_jid.to_string();
-    let username = sender_jid.user.clone();
+    // Use the sender's user part as display username.  Resolved later for
+    // self-chat so the phone number appears instead of the opaque LID.
+    let mut username = sender_jid.user.clone();
     let sender_name = if info.push_name.is_empty() {
         None
     } else {
@@ -192,6 +222,18 @@ async fn handle_message(
     let is_self_chat = is_owner_user(chat_jid, own_pn.as_ref(), own_lid.as_ref());
     let sender_is_owner = is_owner_user(sender_jid, own_pn.as_ref(), own_lid.as_ref());
 
+    debug!(
+        account_id = %state.account_id,
+        sender = %sender_jid,
+        chat = %chat_jid,
+        own_pn = ?own_pn.as_ref().map(|j| j.to_string()),
+        own_lid = ?own_lid.as_ref().map(|j| j.to_string()),
+        is_from_me = info.source.is_from_me,
+        is_self_chat,
+        sender_is_owner,
+        "inbound message owner detection"
+    );
+
     if info.source.is_from_me || (is_self_chat && sender_is_owner) {
         // Check text for bot watermark as secondary loop detection.
         let raw_text = msg
@@ -222,6 +264,21 @@ async fn handle_message(
         );
         is_owner_self_chat = true;
     }
+
+    // For self-chat, the chat JID is the LID which doesn't work as a reply
+    // target and shows an opaque ID in the UI.  Use just the phone number
+    // as the chat_id — it's human-readable, URL-safe (no dots), and the
+    // outbound layer resolves it to a full PN JID before sending.
+    let chat_id = if is_owner_self_chat {
+        if let Some(ref pn) = own_pn {
+            username = pn.user.clone();
+            pn.user.clone()
+        } else {
+            chat_id
+        }
+    } else {
+        chat_id
+    };
 
     // Extract text from the message.
     let text = msg
@@ -808,6 +865,36 @@ fn message_mentions_owner(msg: &wa::Message, own_pn: Option<&Jid>, own_lid: Opti
         own_pn,
         own_lid,
     )
+}
+
+/// Auto-add the owner's phone and LID JIDs to the allowlist so they're
+/// always approved without manual configuration or OTP.
+fn auto_approve_owner_jid(accounts: &AccountStateMap, account_id: &str, own_pn: Option<&Jid>) {
+    let Some(jid) = own_pn else {
+        return;
+    };
+    let mut map = accounts.write().unwrap_or_else(|e| e.into_inner());
+    let Some(state) = map.get_mut(account_id) else {
+        return;
+    };
+
+    // Use "user@server" without the device suffix — incoming messages
+    // arrive as e.g. "15551234567@s.whatsapp.net" (no ":35" device).
+    let canonical = format!("{}@{}", jid.user, jid.server);
+    let user = &jid.user;
+    let already = state
+        .config
+        .allowlist
+        .iter()
+        .any(|entry| entry == user || entry == &canonical);
+    if !already {
+        info!(
+            account_id,
+            jid = %canonical,
+            "auto-adding owner JID to allowlist"
+        );
+        state.config.allowlist.push(canonical);
+    }
 }
 
 fn should_ignore_inbound_chat(source: &wacore::types::message::MessageSource) -> bool {
