@@ -4,7 +4,7 @@ import { sendRpc } from "./helpers.js";
 import { t } from "./i18n.js";
 import { showModelNotice } from "./page-chat.js";
 import * as S from "./state.js";
-import { REASONING_SEP, modelStore } from "./stores/model-store.js";
+import { modelStore, REASONING_SEP } from "./stores/model-store.js";
 
 function setSessionModel(sessionKey, modelId) {
 	sendRpc("sessions.patch", { key: sessionKey, model: modelId });

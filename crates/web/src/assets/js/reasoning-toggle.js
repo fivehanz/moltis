@@ -20,7 +20,12 @@ var reasoningDropdownList = null;
 var disposeVisibility = null;
 
 function effortLabel(effort) {
-	var map = { "": t("chat:reasoningOff"), low: t("chat:reasoningLow"), medium: t("chat:reasoningMedium"), high: t("chat:reasoningHigh") };
+	var map = {
+		"": t("chat:reasoningOff"),
+		low: t("chat:reasoningLow"),
+		medium: t("chat:reasoningMedium"),
+		high: t("chat:reasoningHigh"),
+	};
 	return map[effort] ?? t("chat:reasoningOff");
 }
 

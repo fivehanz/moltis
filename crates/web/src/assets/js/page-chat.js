@@ -17,7 +17,6 @@ import {
 import { bindModelComboEvents, setSessionModel } from "./models.js";
 import { bindNodeComboEvents, fetchNodes, unbindNodeEvents } from "./nodes-selector.js";
 import { bindReasoningToggle, unbindReasoningToggle } from "./reasoning-toggle.js";
-import { modelStore } from "./stores/model-store.js";
 import { registerPrefix, sessionPath } from "./router.js";
 import { routes } from "./routes.js";
 import { bindSandboxImageEvents, bindSandboxToggleEvents, updateSandboxImageUI, updateSandboxUI } from "./sandbox.js";
@@ -32,6 +31,7 @@ import {
 	switchSession,
 } from "./sessions.js";
 import * as S from "./state.js";
+import { modelStore } from "./stores/model-store.js";
 import { sessionStore } from "./stores/session-store.js";
 import { initVoiceInput, teardownVoiceInput } from "./voice-input.js";
 
