@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-## [20260416.01] - 2026-04-16
+## [20260416.02] - 2026-04-16
 ### Added
 - [providers] Configurable context windows + oldest-first compaction (#737)
 
@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [nostr] Replace tokio RwLock with std RwLock to prevent panic (#742)
 - [providers] Restore type annotations stripped by schema canonicalization (#740)
 - [ci] Retry Linux dependency installs and align Darwin validation
+- [ci] Install openssh client in Linux build container
 
 ## [20260415.01] - 2026-04-15
 ### Added
