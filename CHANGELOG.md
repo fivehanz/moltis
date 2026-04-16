@@ -19,6 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260416.01] - 2026-04-16
+### Added
+- [providers] Configurable context windows + oldest-first compaction (#737)
+
+
+### Changed
+- [tests] Split oversized Rust test modules
+
+
+### Fixed
+- [ci] Repair MCP e2e and iOS chat event handling
+- [providers] Detect Grok 3/4 as reasoning-capable models (#741)
+- [nostr] Replace tokio RwLock with std RwLock to prevent panic (#742)
+- [providers] Restore type annotations stripped by schema canonicalization (#740)
+- [ci] Retry Linux dependency installs and align Darwin validation
+
 ## [20260415.01] - 2026-04-15
 ### Added
 - Allow GUIDELINES.md file override for hardcoded tool guidelines
