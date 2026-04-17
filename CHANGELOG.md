@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260417.01] - 2026-04-17
+### Added
+- [web] Add reasoning effort toggle to chat toolbar (#750)
+
+
+### Fixed
+- [providers] Sanitize MCP tool schemas regardless of JSON Schema draft (#746)
+- [node-host] Install rustls CryptoProvider before wss:// connections (#749)
+- [providers] Prune orphaned required entries from tool schemas (#751)
+- [web] Satisfy biome and format gates
+- [testing] Avoid CUDA features in Darwin test recipes
+- [web] Stabilize session delete flow
+- [ci] Harden linux dependency installer
+
 ## [20260416.02] - 2026-04-16
 ### Added
 - [providers] Configurable context windows + oldest-first compaction (#737)
