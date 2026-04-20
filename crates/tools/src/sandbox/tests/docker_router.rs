@@ -529,6 +529,38 @@ fn test_sandbox_image_dockerfile_installs_gogcli() {
 }
 
 #[test]
+fn test_sandbox_image_dockerfile_adds_nodesource_for_nodejs() {
+    let dockerfile = sandbox_image_dockerfile("ubuntu:25.10", &["curl".into(), "nodejs".into()]);
+    assert!(dockerfile.contains("nodesource.gpg"));
+    assert!(dockerfile.contains("node_22.x"));
+    // Bootstraps curl+gnupg before using them
+    assert!(dockerfile.contains("apt-get install -y -qq curl gnupg"));
+    // nodejs should remain in the main apt-get install line
+    assert!(dockerfile.contains("nodejs"));
+    // npm is superseded by NodeSource nodejs and should be filtered out
+    let dockerfile_with_npm = sandbox_image_dockerfile("ubuntu:25.10", &[
+        "curl".into(),
+        "nodejs".into(),
+        "npm".into(),
+    ]);
+    assert!(!dockerfile_with_npm.contains(" npm "));
+}
+
+#[test]
+fn test_sandbox_image_dockerfile_no_nodesource_without_nodejs() {
+    let dockerfile = sandbox_image_dockerfile("ubuntu:25.10", &["curl".into(), "git".into()]);
+    assert!(!dockerfile.contains("nodesource"));
+}
+
+#[test]
+fn test_sandbox_image_dockerfile_npm_without_nodejs_kept() {
+    // npm without nodejs is a valid config — should not be filtered
+    let dockerfile = sandbox_image_dockerfile("ubuntu:25.10", &["npm".into(), "curl".into()]);
+    assert!(dockerfile.contains("npm"));
+    assert!(!dockerfile.contains("nodesource"));
+}
+
+#[test]
 fn test_docker_image_tag_changes_with_base() {
     let packages = vec!["curl".into()];
     let t1 = sandbox_image_tag("moltis-main-sandbox", "ubuntu:25.10", &packages);
