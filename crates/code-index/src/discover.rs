@@ -27,8 +27,10 @@ pub fn discover_tracked_files(repo_dir: &Path) -> Result<Vec<PathBuf>> {
         full: open_opts.clone(),
         reduced: open_opts,
     };
-    let mut discover_opts = gix::discover::upwards::Options::default();
-    discover_opts.required_trust = gix::sec::Trust::Reduced;
+    let discover_opts = gix::discover::upwards::Options {
+        required_trust: gix::sec::Trust::Reduced,
+        ..Default::default()
+    };
     let repo = gix::ThreadSafeRepository::discover_opts(repo_dir, discover_opts, trust_map)
         .map_err(|e| Error::GitRepoNotFound {
             path: repo_dir.to_path_buf(),
