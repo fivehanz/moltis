@@ -19,7 +19,7 @@ use crate::error::{Error, Result};
 /// excluded. The returned paths are relative to the repository work
 /// tree root.
 pub fn discover_tracked_files(repo_dir: &Path) -> Result<Vec<PathBuf>> {
-    // Use permissive open options so gix skips ownership checks.
+    // Use permissive options so gix skips ownership checks.
     // In CI containers the workspace owner differs from the runner uid.
     let mut open_opts = gix::open::Options::default();
     open_opts.permissions = gix::open::Permissions::all();
@@ -27,7 +27,9 @@ pub fn discover_tracked_files(repo_dir: &Path) -> Result<Vec<PathBuf>> {
         full: open_opts.clone(),
         reduced: open_opts,
     };
-    let repo = gix::ThreadSafeRepository::discover_opts(repo_dir, Default::default(), trust_map)
+    let mut discover_opts = gix::discover::upwards::Options::default();
+    discover_opts.required_trust = gix::sec::Trust::Reduced;
+    let repo = gix::ThreadSafeRepository::discover_opts(repo_dir, discover_opts, trust_map)
         .map_err(|e| Error::GitRepoNotFound {
             path: repo_dir.to_path_buf(),
             message: e.to_string(),
