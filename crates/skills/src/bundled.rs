@@ -298,10 +298,7 @@ fn list_sidecars_embedded(name: &str) -> Vec<(String, u64)> {
     for sub in crate::SIDECAR_SUBDIRS {
         // Use get_dir with the full path since include_dir stores full paths.
         let sub_path = skill_dir.path().join(sub);
-        let Some(sub_dir) = skill_dir
-            .dirs()
-            .find(|d| d.path() == sub_path)
-        else {
+        let Some(sub_dir) = skill_dir.dirs().find(|d| d.path() == sub_path) else {
             continue;
         };
         for file in sub_dir.files() {

@@ -37,9 +37,24 @@ lint: lockfile-check
 build-css:
     cd crates/web/ui && ./build.sh
 
+# Ad-hoc codesign debug binary (macOS only, requires MACOS_CODESIGN_IDENTITY).
+# Prevents Little Snitch from prompting on every rebuild during local dev.
+[private]
+codesign-debug:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ "$(uname -s)" = "Darwin" ] || exit 0
+    [ -n "${MACOS_CODESIGN_IDENTITY:-}" ] || exit 0
+    bin="target/debug/moltis"
+    [ -f "$bin" ] || exit 0
+    codesign --force --sign "$MACOS_CODESIGN_IDENTITY" \
+        --identifier "${MACOS_CODESIGN_IDENTIFIER:-org.moltis.dev}" \
+        "$bin" 2>/dev/null || true
+
 # Build the project
 build: build-css
     cargo build
+    just codesign-debug
 
 # Build in release mode
 build-release:
@@ -60,6 +75,8 @@ build-release-with-wasm: build-wasm-artifacts
 
 # Run local dev server with workspace-local config/data dirs.
 dev-server:
+    cargo build --bin moltis
+    just codesign-debug
     MOLTIS_CONFIG_DIR=.moltis/config MOLTIS_DATA_DIR=.moltis/ cargo run --bin moltis
 
 # Build Debian package for the current architecture
@@ -232,6 +249,7 @@ build-test: build-css
     else
         cargo +{{nightly_toolchain}} build --workspace --all-features --all-targets
     fi
+    just codesign-debug
     echo "==> Build complete. Running Rust tests and E2E tests in parallel..."
 
     RUST_LOG="$(mktemp)"
@@ -340,11 +358,13 @@ ui-e2e-install:
 # Run gateway web UI e2e tests (Playwright).
 ui-e2e:
     cargo +{{nightly_toolchain}} build --bin moltis
+    just codesign-debug
     cd crates/web/ui && npm run e2e
 
 # Run gateway web UI e2e tests with headed browser.
 ui-e2e-headed:
     cargo +{{nightly_toolchain}} build --bin moltis
+    just codesign-debug
     cd crates/web/ui && npm run e2e:headed
 
 # Build all Linux packages (deb + rpm + arch + appimage) for all architectures
