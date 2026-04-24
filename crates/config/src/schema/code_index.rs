@@ -96,6 +96,7 @@ pub fn parse_byte_size(s: &str) -> Result<u64, String> {
     Ok(bytes as u64)
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use super::*;
