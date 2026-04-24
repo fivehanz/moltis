@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260424.09] - 2026-04-24
+### Fixed
+- Replace expect() with let-else in splitter tests
+- [benchmarks] Update code_index bench to use free-function chunker API
+
 ## [20260424.08] - 2026-04-24
 
 ## [20260424.07] - 2026-04-24
