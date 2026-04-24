@@ -6,14 +6,17 @@ const { navigateAndWait, waitForWsConnected, watchPageErrors } = require("../hel
  * aren't blown away by a late renderHistory() call.
  */
 async function waitForSessionReady(page) {
-	await page.waitForFunction(async () => {
-		var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-		if (!appScript) return false;
-		var appUrl = new URL(appScript.src, window.location.origin);
-		var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
-		var state = await import(`${prefix}js/state.js`);
-		return !(state.sessionSwitchInProgress || state.chatBatchLoading);
-	}, { timeout: 10_000 });
+	await page.waitForFunction(
+		async () => {
+			var appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
+			if (!appScript) return false;
+			var appUrl = new URL(appScript.src, window.location.origin);
+			var prefix = appUrl.href.slice(0, appUrl.href.length - "js/app.js".length);
+			var state = await import(`${prefix}js/state.js`);
+			return !(state.sessionSwitchInProgress || state.chatBatchLoading);
+		},
+		{ timeout: 10_000 },
+	);
 }
 
 /**
@@ -33,18 +36,21 @@ async function getModulePrefix(page) {
  */
 async function injectScrollableMessages(page, count) {
 	const prefix = await getModulePrefix(page);
-	await page.evaluate(({ prefix, msgCount }) => {
-		var box = document.getElementById("messages");
-		if (!box) throw new Error("chatMsgBox not mounted");
-		for (var i = 0; i < msgCount; i++) {
-			var el = document.createElement("div");
-			el.className = "msg assistant";
-			el.textContent = `Message ${i + 1}`;
-			el.style.minHeight = "80px";
-			box.appendChild(el);
-		}
-		box.scrollTop = box.scrollHeight;
-	}, { prefix, msgCount: count });
+	await page.evaluate(
+		({ prefix, msgCount }) => {
+			var box = document.getElementById("messages");
+			if (!box) throw new Error("chatMsgBox not mounted");
+			for (var i = 0; i < msgCount; i++) {
+				var el = document.createElement("div");
+				el.className = "msg assistant";
+				el.textContent = `Message ${i + 1}`;
+				el.style.minHeight = "80px";
+				box.appendChild(el);
+			}
+			box.scrollTop = box.scrollHeight;
+		},
+		{ prefix, msgCount: count },
+	);
 }
 
 /**
