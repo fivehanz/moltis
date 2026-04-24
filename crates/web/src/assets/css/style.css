@@ -861,6 +861,9 @@
   .bg-\[var\(--surface-alt\)\] {
     background-color: var(--surface-alt);
   }
+  .bg-\[var\(--surface1\)\] {
+    background-color: var(--surface1);
+  }
   .bg-\[var\(--surface2\)\] {
     background-color: var(--surface2);
   }

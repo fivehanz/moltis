@@ -1,4 +1,4 @@
-import { c2 as l, q as connected, c3 as localizeRpcError, c4 as pending, c5 as setConnected, c6 as nextId, c7 as getPreferredLocale, c8 as setReconnectDelay, c9 as reconnectDelay, b as sendRpc, ca as setWs } from "./theme.js";
+import { c3 as l, r as connected, c4 as localizeRpcError, c5 as pending, c6 as setConnected, c7 as nextId, c8 as getPreferredLocale, c9 as setReconnectDelay, ca as reconnectDelay, b as sendRpc, cb as setWs } from "./theme.js";
 var f = 0;
 function u(e, t, n, o, i, u2) {
   t || (t = {});

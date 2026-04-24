@@ -1,7 +1,7 @@
 const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["chunks/index.js","chunks/theme.js","chunks/open-modal.js","chunks/ws-connect.js","chunks/branding.js","chunks/voice-utils.js","chunks/time-format.js"])))=>i.map(i=>d[i]);
 var _a, _b;
 import { u, f as forceReconnect, c as connectWs, s as subscribeEvents, _ as _wsConnect } from "./chunks/ws-connect.js";
-import { $, s as sessionTokens, f as formatTokens$1, c as chatMsgBox, u as updateCountdown, p as parseErrorMessage, a as chatInput, b as sendRpc, d as commandModeEnabled, e as sessionExecPromptSymbol, g as chatBatchLoading, h as sessionContextWindow, i as sessionToolsEnabled, j as sessionExecMode, k as sessionCurrentInputTokens, _ as __vitePreload, l as setUnseenErrors, m as setUnseenWarns, n as unseenErrors, o as unseenWarns, q as connected, r as sessionStore, t as sessions, v as activeSessionKey, w as lastHistoryIndex, x as setLastHistoryIndex, y as renderAudioPlayer, z as renderMarkdown, A as setSessionContextWindow, B as setSessionTokens, C as setSessionCurrentInputTokens, D as setSessionToolsEnabled, E as toolCallSummary, F as renderScreenshot, G as renderDocument, H as formatAssistantTokenUsage, I as formatTokenSpeed, J as tokenSpeedTone, K as modelStore, L as parseAgentsListPayload, M as setHostExecIsRoot, N as setSessionExecMode, O as setSessionExecPromptSymbol, P as setChatBatchLoading, Q as setChatSeq, R as y, S as g, T as nodeComboBtn, U as nodeDropdownList, V as nodeCombo, W as nodeDropdown, X as nodeComboLabel, Y as projectComboLabel, Z as t, a0 as projects, a1 as activeProjectId, a2 as projectCombo, a3 as projectDropdown, a4 as projectDropdownList, a5 as setActiveProjectId, a6 as projectComboBtn, a7 as j, a8 as setSessionSandboxEnabled, a9 as hostExecIsRoot, aa as sandboxLabel, ab as sandboxToggleBtn, ac as sessionSandboxEnabled, ad as setSessionSandboxImage, ae as sandboxImageLabel, af as sandboxInfo, ag as sandboxImageDropdown, ah as sandboxImageBtn, ai as sessionSandboxImage, aj as projectStore, ak as setSessions, al as insertSessionInOrder, am as Session, an as chatSeq, ao as setSelectedModelId, ap as modelComboLabel, aq as setSessionSwitchInProgress, ar as setStreamEl, as as setStreamText, at as setLastToolOutput, au as setVoicePending, av as setActiveSessionKey, aw as y$1, ax as d, ay as A, az as S, aA as projectFilterId, aB as getById$1, aC as q, aD as setProjects, aE as setProjectFilterId, aF as warmAudioPlayback, aG as selectedModelId, aH as formatBytes$3, aI as setCommandModeEnabled, aJ as chatHistory, aK as chatHistoryIdx, aL as setChatHistoryDraft, aM as setChatHistoryIdx, aN as chatHistoryDraft, aO as setChatHistory, aP as R, aQ as setChatMsgBox, aR as setChatInput, aS as setChatSendBtn, aT as setModelCombo, aU as setModelComboBtn, aV as setModelComboLabel, aW as setModelDropdown, aX as setModelSearchInput, aY as setModelDropdownList, aZ as setNodeCombo, a_ as setNodeComboBtn, a$ as setNodeComboLabel, b0 as setNodeDropdown, b1 as setNodeDropdownList, b2 as setSandboxToggleBtn, b3 as setSandboxLabel, b4 as setProjectCombo, b5 as setProjectComboBtn, b6 as setProjectComboLabel, b7 as setProjectDropdown, b8 as setProjectDropdownList, b9 as setSandboxImageBtn, ba as setSandboxImageLabel, bb as setSandboxImageDropdown, bc as models, bd as chatSendBtn, be as setModels, bf as modelComboBtn, bg as modelSearchInput, bh as modelDropdownList, bi as modelCombo, bj as modelDropdown, bk as setModelIdx, bl as modelIdx, bm as REASONING_SEP, bn as models$1, bo as useSignal, bp as connected$1, bq as setCachedChannels, br as setRefreshChannelsPage, bs as cachedChannels, bt as setChannelEventUnsub, bu as channelEventUnsub, bv as refreshProvidersPage, bw as modelVersionScore, bx as streamEl, by as renderMapPointGroups, bz as renderMapLinks, bA as lastToolOutput, bB as localizeStructuredError, bC as voicePending, bD as streamText, bE as setSandboxInfo, bF as networkAuditEventHandler, bG as logsEventHandler, bH as setSubscribed, bI as projects$1, bJ as sandboxInfo$1, bK as localizedApiErrorMessage, bL as setLogsEventHandler, bM as setNetworkAuditEventHandler, bN as setRefreshProvidersPage, bO as setLocale, bP as esc, bQ as projectStore$1, bR as _modelStore, bS as S$1, bT as _sessionStoreModule, bU as _i18n, bV as _helpers, bW as initTheme, bX as injectMarkdownStyles, bY as init, bZ as translateStaticElements, b_ as setAll$1, b$ as setAll$2, c0 as select$1, c1 as selectedModelId$1 } from "./chunks/theme.js";
+import { $, s as sessionTokens, f as formatTokens$1, c as chatMsgBox, u as updateCountdown, p as parseErrorMessage, a as chatInput, b as sendRpc, d as autoScrollMode, e as commandModeEnabled, g as sessionExecPromptSymbol, h as chatBatchLoading, i as sessionContextWindow, j as sessionToolsEnabled, k as sessionExecMode, l as sessionCurrentInputTokens, _ as __vitePreload, m as setUnseenErrors, n as setUnseenWarns, o as unseenErrors, q as unseenWarns, r as connected, t as sessionStore, v as sessions, w as activeSessionKey, x as lastHistoryIndex, y as setLastHistoryIndex, z as renderAudioPlayer, A as renderMarkdown, B as setSessionContextWindow, C as setSessionTokens, D as setSessionCurrentInputTokens, E as setSessionToolsEnabled, F as toolCallSummary, G as renderScreenshot, H as renderDocument, I as formatAssistantTokenUsage, J as formatTokenSpeed, K as tokenSpeedTone, L as modelStore, M as parseAgentsListPayload, N as setHostExecIsRoot, O as setSessionExecMode, P as setSessionExecPromptSymbol, Q as setChatBatchLoading, R as setChatSeq, S as y, T as g, U as nodeComboBtn, V as nodeDropdownList, W as nodeCombo, X as nodeDropdown, Y as nodeComboLabel, Z as projectComboLabel, a0 as t, a1 as projects, a2 as activeProjectId, a3 as projectCombo, a4 as projectDropdown, a5 as projectDropdownList, a6 as setActiveProjectId, a7 as projectComboBtn, a8 as j, a9 as setSessionSandboxEnabled, aa as hostExecIsRoot, ab as sandboxLabel, ac as sandboxToggleBtn, ad as sessionSandboxEnabled, ae as setSessionSandboxImage, af as sandboxImageLabel, ag as sandboxInfo, ah as sandboxImageDropdown, ai as sandboxImageBtn, aj as sessionSandboxImage, ak as projectStore, al as setSessions, am as insertSessionInOrder, an as Session, ao as chatSeq, ap as setSelectedModelId, aq as modelComboLabel, ar as setSessionSwitchInProgress, as as setStreamEl, at as setStreamText, au as setLastToolOutput, av as setVoicePending, aw as setActiveSessionKey, ax as y$1, ay as d, az as A, aA as S, aB as projectFilterId, aC as getById$1, aD as q, aE as setProjects, aF as setProjectFilterId, aG as warmAudioPlayback, aH as selectedModelId, aI as formatBytes$3, aJ as setCommandModeEnabled, aK as chatHistory, aL as chatHistoryIdx, aM as setChatHistoryDraft, aN as setChatHistoryIdx, aO as chatHistoryDraft, aP as setChatHistory, aQ as R, aR as setChatMsgBox, aS as setChatInput, aT as setChatSendBtn, aU as setModelCombo, aV as setModelComboBtn, aW as setModelComboLabel, aX as setModelDropdown, aY as setModelSearchInput, aZ as setModelDropdownList, a_ as setNodeCombo, a$ as setNodeComboBtn, b0 as setNodeComboLabel, b1 as setNodeDropdown, b2 as setNodeDropdownList, b3 as setSandboxToggleBtn, b4 as setSandboxLabel, b5 as setProjectCombo, b6 as setProjectComboBtn, b7 as setProjectComboLabel, b8 as setProjectDropdown, b9 as setProjectDropdownList, ba as setSandboxImageBtn, bb as setSandboxImageLabel, bc as setSandboxImageDropdown, bd as models, be as chatSendBtn, bf as setModels, bg as modelComboBtn, bh as modelSearchInput, bi as modelDropdownList, bj as modelCombo, bk as modelDropdown, bl as setModelIdx, bm as modelIdx, bn as REASONING_SEP, bo as models$1, bp as useSignal, bq as connected$1, br as setCachedChannels, bs as setRefreshChannelsPage, bt as cachedChannels, bu as setChannelEventUnsub, bv as channelEventUnsub, bw as refreshProvidersPage, bx as modelVersionScore, by as streamEl, bz as renderMapPointGroups, bA as renderMapLinks, bB as lastToolOutput, bC as localizeStructuredError, bD as voicePending, bE as streamText, bF as setSandboxInfo, bG as networkAuditEventHandler, bH as logsEventHandler, bI as setSubscribed, bJ as projects$1, bK as sandboxInfo$1, bL as localizedApiErrorMessage, bM as setLogsEventHandler, bN as setNetworkAuditEventHandler, bO as setRefreshProvidersPage, bP as setLocale, bQ as esc, bR as projectStore$1, bS as _modelStore, bT as S$1, bU as _sessionStoreModule, bV as _i18n, bW as _helpers, bX as initTheme, bY as injectMarkdownStyles, bZ as init, b_ as translateStaticElements, b$ as setAll$1, c0 as setAll$2, c1 as select$1, c2 as selectedModelId$1 } from "./chunks/theme.js";
 import { f as formatPageTitle, a as applyIdentityFavicon } from "./chunks/branding.js";
 import { g as get, o as onEvent, C as ChannelType, a as onChange, t as targetValue, v as validateChannelFields, p as parseChannelConfigPatch, b as addChannel, M as MATRIX_DEFAULT_HOMESERVER, c as MATRIX_ENCRYPTION_GUIDANCE, n as normalizeMatrixAuthMode, m as matrixAuthModeGuidance, d as targetChecked, e as normalizeMatrixOwnershipMode, f as matrixOwnershipModeGuidance, h as matrixCredentialLabel, i as matrixCredentialPlaceholder, j as MATRIX_DOCS_URL, k as deriveMatrixAccountId, l as normalizeMatrixOtpCooldown, q as fetchChannelStatus, r as deriveSignalAccountId, s as buildTeamsEndpoint, u as generateWebhookSecretHex, w as defaultTeamsBaseUrl, T as TabBar$1, x as channelStorageNote, y as providerApiKeyHelp, z as validateProviderKey, A as completeProviderOAuth, B as startProviderOAuth, D as saveProviderKey, E as testModel, F as isModelServiceNotConfigured, G as isTimeoutError, H as humanizeProbeError, I as eventListeners, J as refresh, K as isRepoSource, S as SkillSource, L as CATEGORY_META, N as categoryLabel, O as isDiscoveredSource, P as EmojiPicker, Q as validateIdentityFields, R as updateIdentity, U as set, V as prepareCreationOptions, W as detectPasskeyName, X as fetchVoiceProviders, Y as fetchPhrase, Z as testTts, _ as decodeBase64Safe, $ as transcribeAudio$1, a0 as toggleVoiceProvider, a1 as saveVoiceKey, a2 as saveVoiceSettings, a3 as gon, a4 as _events } from "./chunks/voice-utils.js";
 import "./chunks/time-format.js";
@@ -117,6 +117,42 @@ function scrollChatToBottom() {
   setTimeout(() => {
     observer.disconnect();
   }, 500);
+  hideNewContentIndicator();
+}
+function isChatAtBottom(threshold = 60) {
+  if (!chatMsgBox) return true;
+  const { scrollTop, scrollHeight, clientHeight } = chatMsgBox;
+  return scrollHeight - scrollTop - clientHeight < threshold;
+}
+function smartScrollToBottom() {
+  if (autoScrollMode === "always") {
+    scrollChatToBottom();
+    return;
+  }
+  if (isChatAtBottom()) {
+    scrollChatToBottom();
+  } else {
+    showNewContentIndicator();
+  }
+}
+function showNewContentIndicator() {
+  if (!chatMsgBox) return;
+  let indicator = chatMsgBox.querySelector(".new-content-indicator");
+  if (!indicator) {
+    indicator = document.createElement("button");
+    indicator.className = "new-content-indicator";
+    indicator.type = "button";
+    indicator.textContent = "↓ New messages";
+    indicator.addEventListener("click", () => {
+      scrollChatToBottom();
+    });
+    chatMsgBox.appendChild(indicator);
+  }
+}
+function hideNewContentIndicator() {
+  if (!chatMsgBox) return;
+  const indicator = chatMsgBox.querySelector(".new-content-indicator");
+  if (indicator) indicator.remove();
 }
 function chatAddMsg(cls, content, isHtml) {
   if (!chatMsgBox) return null;
@@ -132,7 +168,10 @@ function chatAddMsg(cls, content, isHtml) {
     el.textContent = content;
   }
   chatMsgBox.appendChild(el);
-  if (!chatBatchLoading) chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  if (!chatBatchLoading) {
+    if (cls === "user") scrollChatToBottom();
+    else smartScrollToBottom();
+  }
   return el;
 }
 function chatAddMsgWithImages(cls, htmlContent, images2) {
@@ -158,7 +197,10 @@ function chatAddMsgWithImages(cls, htmlContent, images2) {
     el.appendChild(thumbRow);
   }
   chatMsgBox.appendChild(el);
-  if (!chatBatchLoading) chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  if (!chatBatchLoading) {
+    if (cls === "user") scrollChatToBottom();
+    else smartScrollToBottom();
+  }
   return el;
 }
 function stripChannelPrefix(text) {
@@ -246,7 +288,7 @@ function chatAddErrorCard(err) {
     el.appendChild(body);
   }
   chatMsgBox.appendChild(el);
-  chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  smartScrollToBottom();
 }
 function chatAddErrorMsg(message) {
   chatAddErrorCard(parseErrorMessage(message));
@@ -282,7 +324,7 @@ function renderApprovalCard(requestId, command) {
   }, 1e3);
   countdown.textContent = `${remaining}s`;
   chatMsgBox.appendChild(card);
-  chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  smartScrollToBottom();
 }
 function resolveApproval(requestId, decision, command, card) {
   const params = { requestId, decision };
@@ -412,12 +454,16 @@ const _chatUi = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.definePrope
   chatAddMsg,
   chatAddMsgWithImages,
   chatAutoResize: chatAutoResize$1,
+  hideNewContentIndicator,
   highlightAndScroll,
   highlightTermInElement,
+  isChatAtBottom,
   removeThinking,
   renderApprovalCard,
   resolveApproval,
   scrollChatToBottom,
+  showNewContentIndicator,
+  smartScrollToBottom,
   stripChannelPrefix,
   updateCommandInputUI,
   updateTokenBar
@@ -4962,7 +5008,7 @@ async function transcribeAudio() {
   if (chatMsgBox) {
     transcribingEl = createTranscribingIndicator(t("chat:voiceTranscribingMessage"));
     chatMsgBox.appendChild(transcribingEl);
-    chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+    smartScrollToBottom();
   }
   try {
     const blob = new Blob(audioChunks, { type: "audio/webm" });
@@ -5277,7 +5323,7 @@ function renderContextCard(data) {
   renderContextPromptMemorySection(card, data);
   renderContextTokensSection(card, data);
   chatMsgBox.appendChild(card);
-  chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  smartScrollToBottom();
 }
 const slashCommands = [
   { name: "clear", description: "Clear conversation history" },
@@ -5737,7 +5783,7 @@ function renderCompactCard(data) {
     card.appendChild(hintSec);
   }
   chatMsgBox.appendChild(card);
-  chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  smartScrollToBottom();
 }
 function setDebugModalOpen(open) {
   const modal = $("debugModal");
@@ -6063,7 +6109,7 @@ function showModelNotice(model) {
   const providerEl = card.querySelector("[data-provider]");
   if (providerEl) providerEl.textContent = model.provider || "local";
   chatMsgBox.appendChild(card);
-  chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  smartScrollToBottom();
 }
 function msgRole(el) {
   if (el.classList.contains("user")) return "You";
@@ -6329,10 +6375,11 @@ function initializeChatMediaDrop() {
   initMediaDrop(chatMsgBox, inputArea);
 }
 const chatPageHTML = '<div style="position:absolute;inset:0;display:grid;grid-template-rows:auto auto 1fr auto auto auto;overflow:hidden"><div class="chat-toolbar h-12 px-4 border-b border-[var(--border)] bg-[var(--surface)] flex items-center gap-2" style="grid-row:1;"><div id="modelCombo" class="model-combo"><button id="modelComboBtn" class="model-combo-btn" type="button"><span id="modelComboLabel">loading…</span><span class="icon icon-sm icon-chevron-down model-combo-chevron"></span></button><div id="modelDropdown" class="model-dropdown hidden"><input id="modelSearchInput" type="text" placeholder="Search models…" class="model-search-input" autocomplete="off" /><div id="modelDropdownList" class="model-dropdown-list"></div></div></div><div id="reasoningCombo" class="model-combo hidden"><button id="reasoningComboBtn" class="model-combo-btn" type="button" title="Reasoning effort"><span class="icon icon-sm icon-brain" style="flex-shrink:0;"></span><span id="reasoningComboLabel">Off</span><span class="icon icon-sm icon-chevron-down model-combo-chevron"></span></button><div id="reasoningDropdown" class="model-dropdown hidden"><div id="reasoningDropdownList" class="model-dropdown-list"></div></div></div><div id="nodeCombo" class="model-combo hidden"><button id="nodeComboBtn" class="model-combo-btn" type="button"><span class="icon icon-sm icon-server" style="flex-shrink:0;"></span><span id="nodeComboLabel">Local</span><span class="icon icon-sm icon-chevron-down model-combo-chevron"></span></button><div id="nodeDropdown" class="model-dropdown hidden" tabindex="-1"><div id="nodeDropdownList" class="model-dropdown-list"></div></div></div><div id="projectCombo" class="model-combo hidden"><button id="projectComboBtn" class="model-combo-btn" type="button"><span class="icon icon-sm icon-folder" style="flex-shrink:0;"></span><span id="projectComboLabel">No project</span><span class="icon icon-sm icon-chevron-down model-combo-chevron"></span></button><div id="projectDropdown" class="model-dropdown hidden"><div id="projectDropdownList" class="model-dropdown-list"></div></div></div><div id="sessionHeaderToolbarMount" class="ml-auto flex items-center gap-1.5"></div><button id="chatMoreBtn" type="button" class="model-combo-btn" title="More controls" aria-label="More controls"><span class="icon icon-lg icon-menu-dots-horizontal"></span></button></div><div id="chatMoreModal" class="provider-modal-backdrop hidden"><div class="provider-modal" style="width:560px;max-width:92vw;"><div class="provider-modal-header"><div class="flex items-center gap-2"><button id="chatMoreDeleteAllBtn" type="button" class="provider-btn provider-btn-sm chat-session-btn-danger inline-flex items-center gap-1.5" style="background:var(--error);border-color:var(--error);color:#fff;"><span class="icon icon-sm icon-x-circle shrink-0"></span><span id="chatMoreDeleteAllLabel">Delete all sessions</span></button></div><div id="sessionHeaderModalTopMount" class="flex items-center gap-2"></div></div><div class="provider-modal-body flex flex-col gap-3"><div class="flex flex-wrap items-center gap-2"><button id="sandboxToggle" class="sandbox-toggle text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)] inline-flex items-center gap-1" title="Toggle sandbox mode"><span class="icon icon-md icon-lock shrink-0"></span><span id="sandboxLabel">sandboxed</span></button><div style="position:relative;display:inline-block"><button id="sandboxImageBtn" class="text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)] inline-flex items-center gap-1 text-[var(--muted)]" title="Sandbox image"><span class="icon icon-md icon-cube shrink-0"></span><span id="sandboxImageLabel" class="max-w-[120px] truncate">ubuntu:25.10</span></button><div id="sandboxImageDropdown" class="hidden" style="position:absolute;top:100%;left:0;z-index:50;margin-top:4px;min-width:200px;max-height:300px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);"></div></div><button id="mcpToggleBtn" class="text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)] inline-flex items-center gap-1" title="Toggle MCP tools for this session"><span class="icon icon-md icon-link shrink-0"></span><span id="mcpToggleLabel">MCP</span></button><button id="debugPanelBtn" class="text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)] inline-flex items-center gap-1 text-[var(--muted)]" title="Show context debug info"><span class="icon icon-md icon-wrench shrink-0"></span><span id="debugPanelLabel">Debug</span></button><button id="fullContextBtn" class="text-xs border border-[var(--border)] px-2 py-1 rounded-md transition-colors cursor-pointer bg-transparent font-[var(--font-body)] inline-flex items-center gap-1 text-[var(--muted)]" title="Show full LLM context (system prompt + history)"><span class="icon icon-md icon-document shrink-0"></span><span id="fullContextLabel">Context</span></button></div><div id="sessionControlsSection" class="border-t border-[var(--border)] pt-3"><div id="sessionHeaderModalMount" class="w-full"></div></div></div></div></div><div id="debugModal" class="provider-modal-backdrop hidden"><div class="provider-modal" style="width:min(980px,96vw);max-width:96vw;max-height:88vh;"><div class="provider-modal-header"><div class="provider-item-name">Debug context</div><button id="debugModalCloseBtn" type="button" class="provider-btn provider-btn-secondary provider-btn-sm">Close</button></div><div class="provider-modal-body" style="padding:0;overflow:hidden;"><div id="debugPanel" class="px-4 py-3 overflow-y-auto" style="max-height:72vh;"></div></div></div></div><div id="fullContextModal" class="provider-modal-backdrop hidden"><div class="provider-modal" style="width:min(1080px,96vw);max-width:96vw;max-height:88vh;"><div class="provider-modal-header"><div class="provider-item-name">Full context</div><button id="fullContextModalCloseBtn" type="button" class="provider-btn provider-btn-secondary provider-btn-sm">Close</button></div><div class="provider-modal-body" style="padding:0;overflow:hidden;"><div id="fullContextPanel" class="px-4 py-3 overflow-y-auto" style="max-height:72vh;"></div></div></div></div><div class="p-4 flex flex-col gap-2" id="messages" style="grid-row:3;overflow-y:auto;min-height:0"></div><div id="queuedMessages" class="queued-tray hidden" style="grid-row:4;"></div><div id="tokenBar" class="token-bar" style="grid-row:5;"></div><div class="chat-input-row px-4 py-3 border-t border-[var(--border)] bg-[var(--surface)] flex gap-2 items-end" style="grid-row:6;"><span id="chatCommandPrompt" class="chat-command-prompt chat-command-prompt-hidden" title="Command prompt symbol" aria-hidden="true">$</span><textarea id="chatInput" placeholder="Type a message..." rows="1" enterkeyhint="send" class="flex-1 bg-[var(--surface2)] border border-[var(--border)] text-[var(--text)] px-3 py-2 rounded-lg text-sm resize-none min-h-[40px] max-h-[120px] leading-relaxed focus:outline-none focus:border-[var(--border-strong)] focus:ring-1 focus:ring-[var(--accent-subtle)] transition-colors font-[var(--font-body)]"></textarea><button id="micBtn" disabled title="Click to start recording" class="mic-btn min-h-[40px] px-3 bg-[var(--surface2)] border border-[var(--border)] rounded-lg text-[var(--muted)] cursor-pointer disabled:opacity-40 disabled:cursor-default transition-colors hover:border-[var(--border-strong)] hover:text-[var(--text)]"><span class="icon icon-lg icon-microphone"></span></button><button id="sendBtn" disabled class="provider-btn min-h-[40px] disabled:opacity-40 disabled:cursor-default">Send</button></div></div>';
+let chatScrollHandler = null;
 registerPrefix(
   routes.chats,
   function initChat(container, sessionKeyFromUrl) {
-    var _a2, _b2, _c;
+    var _a2, _b2, _c, _d;
     container.style.cssText = "position:relative";
     container.innerHTML = chatPageHTML;
     setChatMsgBox($("messages"));
@@ -6359,11 +6406,21 @@ registerPrefix(
     startInitialChatSession(sessionKey);
     bindChatComposer();
     (_b2 = chatMsgBox) == null ? void 0 : _b2.addEventListener("copy", handleChatCopy);
+    chatScrollHandler = () => {
+      if (isChatAtBottom()) hideNewContentIndicator();
+    };
+    (_c = chatMsgBox) == null ? void 0 : _c.addEventListener("scroll", chatScrollHandler, { passive: true });
     initVoiceInput($("micBtn"));
     initializeChatMediaDrop();
-    (_c = chatInput) == null ? void 0 : _c.focus();
+    (_d = chatInput) == null ? void 0 : _d.focus();
   },
   function teardownChat() {
+    var _a2, _b2;
+    if (chatScrollHandler) {
+      (_a2 = chatMsgBox) == null ? void 0 : _a2.removeEventListener("scroll", chatScrollHandler);
+      chatScrollHandler = null;
+    }
+    (_b2 = chatMsgBox) == null ? void 0 : _b2.removeEventListener("copy", handleChatCopy);
     teardownVoiceInput();
     teardownMediaDrop();
     unbindReasoningToggle();
@@ -7555,9 +7612,20 @@ function AddSignalModal() {
         /* @__PURE__ */ u("div", { className: "channel-card", children: /* @__PURE__ */ u("div", { children: [
           /* @__PURE__ */ u("span", { className: "text-xs font-medium text-[var(--text-strong)]", children: "Requires signal-cli" }),
           /* @__PURE__ */ u("div", { className: "text-xs text-[var(--muted)] channel-help", children: [
-            "Signal integration requires a running ",
-            /* @__PURE__ */ u("a", { href: "https://github.com/AsamK/signal-cli", target: "_blank", rel: "noopener noreferrer", className: "underline text-[var(--text-strong)]", children: "signal-cli" }),
-            " daemon with JSON-RPC HTTP enabled. Install it, register or link your Signal account, then start the daemon:"
+            "Signal integration requires a running",
+            " ",
+            /* @__PURE__ */ u(
+              "a",
+              {
+                href: "https://github.com/AsamK/signal-cli",
+                target: "_blank",
+                rel: "noopener noreferrer",
+                className: "underline text-[var(--text-strong)]",
+                children: "signal-cli"
+              }
+            ),
+            " ",
+            "daemon with JSON-RPC HTTP enabled. Install it, register or link your Signal account, then start the daemon:"
           ] }),
           /* @__PURE__ */ u("code", { className: "text-[10px] bg-[var(--surface1)] px-1.5 py-0.5 rounded mt-1 block", children: "signal-cli daemon --http localhost:8080" })
         ] }) }),
@@ -12230,7 +12298,7 @@ function handleToolCallStartDom(p, eventSession) {
     pendingToolCallEnds.delete(endKey);
     completeToolCard(card, pendingEnd, eventSession);
   }
-  if (chatMsgBox) chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  smartScrollToBottom();
 }
 function renderChannelUserMessage(p, _eventSession) {
   var _a2;
@@ -12360,7 +12428,7 @@ function renderAbortedPartialInDom(eventSession, p, partialState) {
     },
     eventSession
   );
-  if (chatMsgBox) chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  smartScrollToBottom();
 }
 function handleChatThinking(p, isActive, isChatPage, eventSession) {
   var _a2;
@@ -12375,7 +12443,7 @@ function handleChatThinking(p, isActive, isChatPage, eventSession) {
   thinkEl.appendChild(makeThinkingDots());
   thinkEl.appendChild(makeThinkingStopBtn(eventSession));
   (_a2 = chatMsgBox) == null ? void 0 : _a2.appendChild(thinkEl);
-  if (chatMsgBox) chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  smartScrollToBottom();
 }
 function handleChatThinkingText(p, isActive, isChatPage, eventSession) {
   updateSessionRunId(eventSession, p.runId);
@@ -12390,7 +12458,7 @@ function handleChatThinkingText(p, isActive, isChatPage, eventSession) {
     textEl.textContent = p.text || "";
     indicator.appendChild(textEl);
     indicator.appendChild(existingBtn || makeThinkingStopBtn(eventSession));
-    if (chatMsgBox) chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+    smartScrollToBottom();
   }
 }
 function handleChatThinkingDone(_p, isActive, isChatPage) {
@@ -12506,7 +12574,7 @@ function handleChatDelta(p, isActive, isChatPage, eventSession) {
   }
   setStreamText(streamText + p.text);
   setSafeMarkdownHtml(streamEl, streamText);
-  if (chatMsgBox) chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  smartScrollToBottom();
 }
 function handleChatFinal(p, isActive, isChatPage, eventSession) {
   var _a2, _b2, _c;
@@ -12584,7 +12652,7 @@ function handleChatFinal(p, isActive, isChatPage, eventSession) {
       appendReasoningDisclosure(msgEl, p.reasoning);
     }
     appendFinalFooter(msgEl, p, eventSession);
-    if (chatMsgBox) chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+    smartScrollToBottom();
   } else {
     let resolvedEl = resolveFinalMessageEl(p);
     const skipReasoning = p.reasoning && isReasoningAlreadyShown(p.reasoning);
@@ -12734,7 +12802,7 @@ function handleChatRetrying(p, isActive, isChatPage, eventSession) {
   textEl.className = "thinking-text";
   textEl.textContent = retryStatusText(p);
   indicator.appendChild(textEl);
-  if (chatMsgBox) chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+  smartScrollToBottom();
 }
 function handleChatError(p, isActive, isChatPage, eventSession) {
   var _a2, _b2, _c;
@@ -13052,7 +13120,7 @@ function handleLocalLlmDownload(payload) {
     if (chatMsgBox) {
       clearChatEmptyState();
       chatMsgBox.appendChild(downloadIndicatorEl);
-      chatMsgBox.scrollTop = chatMsgBox.scrollHeight;
+      smartScrollToBottom();
     }
   }
   const barEl = downloadIndicatorEl.querySelector(".download-progress-bar");
