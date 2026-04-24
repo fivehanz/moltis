@@ -474,8 +474,8 @@ export function DiscordForm({ onConnected, error, setError }: ChannelFormProps):
 					style="resize:vertical;font-family:var(--font-body);"
 				/>
 				<div className="text-xs text-[var(--muted)] mt-1">
-					One glob pattern per line. When set, the bot only responds in matching guild channels (no @mention
-					needed). Supports * wildcards. E.g., ticket-*, support-*.
+					One glob pattern per line. When set, the bot only responds in matching guild channels (no @mention needed).
+					Supports * wildcards. E.g., ticket-*, support-*.
 				</div>
 			</div>
 			<AdvancedConfigPatchField value={advancedConfig} onInput={setAdvancedConfig} />

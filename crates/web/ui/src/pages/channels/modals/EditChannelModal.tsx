@@ -338,8 +338,8 @@ export function EditChannelModal(): VNode | null {
 							placeholder="e.g. ticket-* (glob patterns, Enter to add)"
 						/>
 						<div className="text-xs text-[var(--muted)] -mt-1">
-							When set, the bot only responds in guild channels whose name matches a pattern. Matched channels
-							do not require @mention. Supports * wildcards.
+							When set, the bot only responds in guild channels whose name matches a pattern. Matched channels do not
+							require @mention. Supports * wildcards.
 						</div>
 						<label className="text-xs text-[var(--muted)]">Category IDs (optional)</label>
 						<AllowlistInput

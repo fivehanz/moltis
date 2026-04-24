@@ -135,7 +135,7 @@ export function AllowlistInput({ value, onChange, preserveAt, placeholder }: All
 					input.value = targetValue(e);
 				}}
 				onKeyDown={onKeyDown}
-				placeholder={value.length === 0 ? (placeholder || "Type a username and press Enter") : ""}
+				placeholder={value.length === 0 ? placeholder || "Type a username and press Enter" : ""}
 				className="flex-1 bg-transparent text-[var(--text)] text-sm outline-none border-none"
 				style={{ minWidth: "80px", padding: "2px 0", fontFamily: "var(--font-body)" }}
 			/>

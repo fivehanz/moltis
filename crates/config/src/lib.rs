@@ -51,8 +51,9 @@ pub use {
         MessageQueueMode, ModePreset, ModesConfig, MoltisConfig, NgrokConfig, PresetMemoryConfig,
         PresetToolPolicy, PromptMemoryMode, ResolvedIdentity, SessionAccessPolicyConfig,
         SessionExportMode, Timezone, ToolMode, ToolPolicyConfig, ToolRegistryMode, UserProfile,
-        UserProfileWriteMode, VoiceConfig, VoiceElevenLabsConfig, VoiceOpenAiConfig, VoiceSttConfig,
-        VoiceSttProvider, VoiceTtsConfig, VoiceWhisperConfig, WireApi, parse_byte_size,
+        UserProfileWriteMode, VoiceConfig, VoiceElevenLabsConfig, VoiceOpenAiConfig,
+        VoiceSttConfig, VoiceSttProvider, VoiceTtsConfig, VoiceWhisperConfig, WireApi,
+        parse_byte_size,
     },
     validate::{Diagnostic, Severity, ValidationResult},
 };
