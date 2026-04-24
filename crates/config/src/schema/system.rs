@@ -364,7 +364,7 @@ fn default_caldav_timeout() -> u64 {
 /// url = "http://homeassistant.local:8123"
 /// token = "eyJ..."
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HomeAssistantConfig {
     /// Whether Home Assistant integration is enabled.
@@ -374,16 +374,6 @@ pub struct HomeAssistantConfig {
     /// Named HA instances.
     #[serde(default)]
     pub instances: HashMap<String, HomeAssistantAccountConfig>,
-}
-
-impl Default for HomeAssistantConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            default_instance: None,
-            instances: HashMap::new(),
-        }
-    }
 }
 
 impl HomeAssistantConfig {

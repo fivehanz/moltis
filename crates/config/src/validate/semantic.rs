@@ -612,15 +612,15 @@ pub(super) fn check_semantic_warnings(config: &MoltisConfig, diagnostics: &mut V
                 message: format!("HA instance '{name}' has no token configured"),
             });
         }
-        if let Some(ref url) = instance.url {
-            if !url.starts_with("http://") && !url.starts_with("https://") {
-                diagnostics.push(Diagnostic {
-                    severity: Severity::Warning,
-                    category: "invalid-value",
-                    path: format!("home_assistant.instances.{name}.url"),
-                    message: "HA url should start with http:// or https://".into(),
-                });
-            }
+        if let Some(ref url) = instance.url
+            && !url.starts_with("http://") && !url.starts_with("https://")
+        {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                category: "invalid-value",
+                path: format!("home_assistant.instances.{name}.url"),
+                message: "HA url should start with http:// or https://".into(),
+            });
         }
     }
 
