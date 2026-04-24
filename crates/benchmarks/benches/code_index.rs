@@ -135,8 +135,10 @@ fn discover_and_filter_rust_only() {
     let project_dir = Path::new(MOLTIS_PROJECT_PATH);
 
     let tracked = moltis_code_index::discover::discover_tracked_files(project_dir).unwrap();
-    let mut config = moltis_code_index::CodeIndexConfig::default();
-    config.extensions = vec!["rs".to_string()];
+    let config = moltis_code_index::CodeIndexConfig {
+        extensions: vec!["rs".to_string()],
+        ..Default::default()
+    };
     let filtered =
         moltis_code_index::filter::filter_tracked_files(project_dir, &tracked, &config).unwrap();
 
@@ -271,7 +273,7 @@ fn full_delta_computation_with_snapshot() {
     let project_dir = Path::new(MOLTIS_PROJECT_PATH);
     let config = moltis_code_index::CodeIndexConfig::default();
 
-    let mut previous: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut previous: moltis_code_index::delta::HashSnapshot = std::collections::HashMap::new();
     let tracked = moltis_code_index::discover::discover_tracked_files(project_dir).unwrap();
     let filtered =
         moltis_code_index::filter::filter_tracked_files(project_dir, &tracked, &config).unwrap();
@@ -463,8 +465,10 @@ fn ripgrep_subprocess_all_queries() {
 // search (BM25 + vector + optional LLM reranking) via a sidecar process.
 // These benchmarks are skipped entirely if QMD is not installed.
 
+#[cfg(feature = "qmd")]
 static QMD_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
+#[cfg(feature = "qmd")]
 fn qmd_available() -> bool {
     *QMD_AVAILABLE.get_or_init(|| {
         std::process::Command::new("qmd")

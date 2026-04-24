@@ -62,19 +62,20 @@ impl AgentTool for ProjectAwareCodeIndexTool {
     }
 
     async fn execute(&self, params: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-        if let Some(ref pid) = Self::project_id(&params) {
-            if !self.is_enabled(pid).await {
-                return Ok(json!({
-                    "disabled": true,
-                    "message": format!("Code indexing is disabled for project '{pid}'. Enable it in project settings."),
-                }));
-            }
+        if let Some(ref pid) = Self::project_id(&params)
+            && !self.is_enabled(pid).await
+        {
+            return Ok(json!({
+                "disabled": true,
+                "message": format!("Code indexing is disabled for project '{pid}'. Enable it in project settings."),
+            }));
         }
 
         self.inner.execute(params).await
     }
 }
 
+#[allow(clippy::unwrap_used)]
 #[cfg(test)]
 mod tests {
     use {

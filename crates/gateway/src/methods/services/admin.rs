@@ -153,47 +153,47 @@ pub(super) fn register(reg: &mut MethodRegistry) {
                         .get("code_index_enabled")
                         .and_then(|v| v.as_bool());
 
-                    if new_enabled == Some(true) {
-                        if let Some(ref pid) = project_id {
-                            // Fetch old project to check previous state
-                            if let Ok(old) = ctx
-                                .state
-                                .services
-                                .project
-                                .get(serde_json::json!({ "id": pid }))
-                                .await
-                            {
-                                let old_enabled = old
-                                    .get("code_index_enabled")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(true);
+                    if new_enabled == Some(true)
+                        && let Some(ref pid) = project_id
+                    {
+                        // Fetch old project to check previous state
+                        if let Ok(old) = ctx
+                            .state
+                            .services
+                            .project
+                            .get(serde_json::json!({ "id": pid }))
+                            .await
+                        {
+                            let old_enabled = old
+                                .get("code_index_enabled")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true);
 
-                                if !old_enabled {
-                                    let dir = old
-                                        .get("directory")
-                                        .and_then(|v| v.as_str())
-                                        .map(PathBuf::from);
+                            if !old_enabled {
+                                let dir = old
+                                    .get("directory")
+                                    .and_then(|v| v.as_str())
+                                    .map(PathBuf::from);
 
-                                    if let Some(project_dir) = dir {
-                                        info!(
-                                            project_id = %pid,
-                                            "code-index: re-indexing project (enabled by user)"
-                                        );
-                                        let code_index = Arc::clone(&ctx.state.code_index);
-                                        let pid_owned = pid.clone();
-                                        tokio::spawn(async move {
-                                            if let Err(e) = code_index
-                                                .index_project(&pid_owned, true, &project_dir)
-                                                .await
-                                            {
-                                                tracing::warn!(
-                                                    project_id = %pid_owned,
-                                                    error = %e,
-                                                    "code-index: background re-index failed"
-                                                );
-                                            }
-                                        });
-                                    }
+                                if let Some(project_dir) = dir {
+                                    info!(
+                                        project_id = %pid,
+                                        "code-index: re-indexing project (enabled by user)"
+                                    );
+                                    let code_index = Arc::clone(&ctx.state.code_index);
+                                    let pid_owned = pid.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = code_index
+                                            .index_project(&pid_owned, true, &project_dir)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                project_id = %pid_owned,
+                                                error = %e,
+                                                "code-index: background re-index failed"
+                                            );
+                                        }
+                                    });
                                 }
                             }
                         }
