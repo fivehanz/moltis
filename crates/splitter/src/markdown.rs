@@ -115,7 +115,10 @@ mod tests {
         }
 
         assert_eq!(chunks[0].start_line, 1);
-        assert_eq!(chunks.last().unwrap().end_line, 10);
+        assert_eq!(
+            chunks.last().expect("chunks must not be empty").end_line,
+            10
+        );
     }
 
     #[test]
