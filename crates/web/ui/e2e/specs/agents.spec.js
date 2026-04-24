@@ -150,7 +150,11 @@ test.describe("Agents settings page", () => {
 			timeout: 10_000,
 		});
 		await expect(page.getByText("already usable by spawn_agent", { exact: false })).toBeVisible();
-		const presetCard = page.locator(".backend-card").filter({ hasText: "Coder" }).filter({ hasText: "Built-in" }).first();
+		const presetCard = page
+			.locator(".backend-card")
+			.filter({ hasText: "Coder" })
+			.filter({ hasText: "Built-in" })
+			.first();
 		await expect(presetCard).toBeVisible({ timeout: 10_000 });
 		await presetCard.getByRole("button", { name: "Add to Chat", exact: true }).click();
 		await expect(presetCard).toHaveCount(0, { timeout: 10_000 });

@@ -150,6 +150,10 @@ mod tests {
             "expected ~50 chunks for 1000 lines at 200-token/40-overlap, got {}",
             chunks.len()
         );
-        assert!(chunks.len() > 20, "expected at least 20 chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 20,
+            "expected at least 20 chunks, got {}",
+            chunks.len()
+        );
     }
 }
