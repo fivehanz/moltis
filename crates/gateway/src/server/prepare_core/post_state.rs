@@ -9,7 +9,6 @@ use {
     tracing::{debug, info, warn},
 };
 
-#[cfg(feature = "wasm")]
 use secrecy::ExposeSecret;
 
 use {
@@ -108,21 +107,75 @@ pub(super) struct PostStateInputs {
 
 struct CredentialEnvVarProvider {
     store: Arc<auth::CredentialStore>,
+    /// Gateway URL for sandbox-to-gateway communication via `moltis-ctl`.
+    gateway_url: Option<String>,
+    /// Auto-generated API key for sandbox use (scoped to operator.read + operator.write).
+    sandbox_api_key: Option<Secret<String>>,
 }
 
 #[async_trait]
 impl moltis_tools::exec::EnvVarProvider for CredentialEnvVarProvider {
     async fn get_env_vars(&self) -> Vec<(String, Secret<String>)> {
-        match self.store.get_all_env_values().await {
+        let mut vars = match self.store.get_all_env_values().await {
             Ok(values) => values
                 .into_iter()
+                // Filter out internal keys that should not leak into sandbox env.
+                .filter(|(key, _)| !key.starts_with("__MOLTIS_"))
                 .map(|(key, value)| (key, Secret::new(value)))
                 .collect(),
             Err(error) => {
                 warn!(error = %error, "failed to load runtime env overrides for tools");
                 Vec::new()
             },
+        };
+
+        // Inject gateway connection details for moltis-ctl inside sandboxes.
+        // Only injected when the gateway URL is set (skipped for blocked network).
+        if let Some(ref url) = self.gateway_url {
+            vars.push(("MOLTIS_GATEWAY_URL".into(), Secret::new(url.clone())));
         }
+        if let Some(ref key) = self.sandbox_api_key {
+            vars.push((
+                "MOLTIS_API_KEY".into(),
+                Secret::new(key.expose_secret().clone()),
+            ));
+        }
+
+        vars
+    }
+}
+
+/// Create (or reuse) a scoped API key for sandbox-to-gateway communication.
+///
+/// Looks for an existing key labelled `"sandbox-ctl"`. If none exists, creates
+/// one with `operator.read` + `operator.write` scopes. Returns the raw key.
+async fn ensure_sandbox_api_key(store: &auth::CredentialStore) -> Option<String> {
+    // Check if we already have a sandbox-ctl key stored in env vars.
+    if let Ok(vals) = store.get_all_env_values().await {
+        if let Some((_, key)) = vals.iter().find(|(k, _)| k == "__MOLTIS_SANDBOX_API_KEY") {
+            return Some(key.clone());
+        }
+    }
+
+    // Create a new API key scoped for sandbox use.
+    let scopes = vec!["operator.read".to_string(), "operator.write".to_string()];
+    match store.create_api_key("sandbox-ctl", Some(&scopes)).await {
+        Ok((_id, raw_key)) => {
+            // Persist the raw key so we can retrieve it on restart without
+            // creating a new one each time.
+            if let Err(e) = store
+                .set_env_var("__MOLTIS_SANDBOX_API_KEY", &raw_key)
+                .await
+            {
+                warn!(error = %e, "failed to persist sandbox API key");
+            }
+            info!("created sandbox-ctl API key for moltis-ctl");
+            Some(raw_key)
+        },
+        Err(e) => {
+            warn!(error = %e, "failed to create sandbox API key");
+            None
+        },
     }
 }
 
@@ -617,9 +670,35 @@ pub(super) async fn complete_startup(
     {
         let broadcaster: Arc<dyn moltis_tools::exec::ApprovalBroadcaster> =
             Arc::new(GatewayApprovalBroadcaster::new(Arc::clone(&state)));
+        // Build gateway URL for sandbox-to-gateway communication.
+        // Only inject when the sandbox network policy allows host access
+        // (Trusted or Bypass). With NetworkPolicy::Blocked the container
+        // has --network=none and host.docker.internal won't resolve.
+        let sandbox_network_allows_host = !matches!(
+            sandbox_router.config().network,
+            moltis_tools::sandbox::NetworkPolicy::Blocked
+        );
+        let sandbox_gateway_url = if sandbox_network_allows_host {
+            let scheme = if tls_enabled_for_gateway {
+                "https"
+            } else {
+                "http"
+            };
+            Some(format!("{scheme}://host.docker.internal:{port}"))
+        } else {
+            None
+        };
+        let sandbox_api_key = if sandbox_network_allows_host {
+            ensure_sandbox_api_key(&credential_store).await
+        } else {
+            None
+        };
+
         let env_provider: Arc<dyn moltis_tools::exec::EnvVarProvider> =
             Arc::new(CredentialEnvVarProvider {
                 store: Arc::clone(&credential_store),
+                gateway_url: sandbox_gateway_url,
+                sandbox_api_key: sandbox_api_key.map(Secret::new),
             });
         let eq = cron_service.events_queue().clone();
         let cs = Arc::clone(&cron_service);
@@ -767,6 +846,25 @@ pub(super) async fn complete_startup(
         tool_registry.register(Box::new(crate::channel_agent_tools::SendMessageTool::new(
             Arc::clone(&state.services.channel),
         )));
+        // MCP management tools — let agents add/remove/restart MCP servers directly.
+        {
+            let mcp = Arc::clone(&state.services.mcp);
+            tool_registry.register(Box::new(crate::mcp_agent_tools::McpListTool::new(
+                Arc::clone(&mcp),
+            )));
+            tool_registry.register(Box::new(crate::mcp_agent_tools::McpAddTool::new(
+                Arc::clone(&mcp),
+            )));
+            tool_registry.register(Box::new(crate::mcp_agent_tools::McpRemoveTool::new(
+                Arc::clone(&mcp),
+            )));
+            tool_registry.register(Box::new(crate::mcp_agent_tools::McpStatusTool::new(
+                Arc::clone(&mcp),
+            )));
+            tool_registry.register(Box::new(crate::mcp_agent_tools::McpRestartTool::new(
+                Arc::clone(&mcp),
+            )));
+        }
         {
             let tp = Arc::clone(&msteams_webhook_plugin);
             tool_registry.register(Box::new(

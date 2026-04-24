@@ -294,6 +294,9 @@
   .my-3 {
     margin-block: calc(var(--spacing) * 3);
   }
+  .-mt-1 {
+    margin-top: calc(var(--spacing) * -1);
+  }
   .mt-0\.5 {
     margin-top: calc(var(--spacing) * 0.5);
   }
@@ -434,6 +437,9 @@
   }
   .max-h-\[120px\] {
     max-height: 120px;
+  }
+  .max-h-\[200px\] {
+    max-height: 200px;
   }
   .max-h-\[360px\] {
     max-height: 360px;
@@ -836,6 +842,9 @@
   }
   .bg-\[var\(--bg\)\] {
     background-color: var(--bg);
+  }
+  .bg-\[var\(--bg-offset\)\] {
+    background-color: var(--bg-offset);
   }
   .bg-\[var\(--border\)\] {
     background-color: var(--border);

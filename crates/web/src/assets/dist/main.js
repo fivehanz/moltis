@@ -15400,6 +15400,450 @@ function teardownProjects() {
   _projectsContainer = null;
 }
 registerPage(routes.projects, initProjects, teardownProjects);
+let searchTimer$1 = null;
+function relativeTime(ms) {
+  const diff = Date.now() - ms;
+  const mins = Math.floor(diff / 6e4);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days2 = Math.floor(hours / 24);
+  if (days2 < 30) return `${days2}d ago`;
+  const months2 = Math.floor(days2 / 30);
+  if (months2 < 12) return `${months2}mo ago`;
+  return `${Math.floor(months2 / 12)}y ago`;
+}
+function fmtNumber(n) {
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return n.toString();
+}
+function SecurityScanPanel({ scan }) {
+  var _a2, _b2;
+  if (!scan) return null;
+  const isClean = scan.status === "clean";
+  const bg = isClean ? "var(--success-bg, rgba(34,197,94,.08))" : "var(--warning-bg, rgba(234,179,8,.12))";
+  const vt = (_a2 = scan.scanners) == null ? void 0 : _a2.vt;
+  const llm = (_b2 = scan.scanners) == null ? void 0 : _b2.llm;
+  return /* @__PURE__ */ u(
+    "div",
+    {
+      style: {
+        marginTop: "8px",
+        padding: "8px 10px",
+        borderRadius: "var(--radius-sm)",
+        background: bg,
+        fontSize: ".72rem"
+      },
+      children: [
+        /* @__PURE__ */ u("div", { style: { fontWeight: 600, marginBottom: "4px" }, children: [
+          "Security Scan: ",
+          isClean ? "Benign" : scan.status || "Unknown",
+          !isClean && scan.hasWarnings && /* @__PURE__ */ u("span", { style: { color: "var(--warning, #eab308)", marginLeft: "6px" }, children: "(has warnings)" })
+        ] }),
+        vt && /* @__PURE__ */ u("div", { style: { display: "flex", alignItems: "center", gap: "6px", marginBottom: "2px" }, children: [
+          /* @__PURE__ */ u("span", { style: { fontWeight: 500 }, children: "VirusTotal:" }),
+          /* @__PURE__ */ u("span", { style: { color: vt.verdict === "benign" ? "var(--success, #22c55e)" : "var(--warning, #eab308)" }, children: vt.verdict || "unknown" }),
+          scan.virustotalUrl && /* @__PURE__ */ u(
+            "a",
+            {
+              href: scan.virustotalUrl,
+              target: "_blank",
+              rel: "noopener noreferrer",
+              style: { color: "var(--accent)", fontSize: ".68rem" },
+              children: "view report"
+            }
+          )
+        ] }),
+        llm && /* @__PURE__ */ u("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+          /* @__PURE__ */ u("span", { style: { fontWeight: 500 }, children: "AI Analysis:" }),
+          /* @__PURE__ */ u("span", { style: { color: llm.verdict === "benign" ? "var(--success, #22c55e)" : "var(--warning, #eab308)" }, children: llm.verdict || "unknown" })
+        ] })
+      ]
+    }
+  );
+}
+function DetailPanel({
+  slug,
+  onClose,
+  onInstalled
+}) {
+  const info = useSignal(null);
+  const scan = useSignal(null);
+  const loading2 = useSignal(true);
+  const error2 = useSignal(null);
+  const installing = useSignal(false);
+  const installed = useSignal(false);
+  const fetched = A(false);
+  y$1(() => {
+    if (fetched.current) return;
+    fetched.current = true;
+    Promise.all([sendRpc("skills.clawhub.info", { slug }), sendRpc("skills.clawhub.scan", { slug })]).then(([infoRes, scanRes]) => {
+      loading2.value = false;
+      if (infoRes == null ? void 0 : infoRes.ok) info.value = infoRes.payload;
+      else error2.value = String((infoRes == null ? void 0 : infoRes.error) || "Failed to load skill info");
+      if (scanRes == null ? void 0 : scanRes.ok) {
+        const p = scanRes.payload;
+        if (p == null ? void 0 : p.security) scan.value = p.security;
+      }
+    }).catch(() => {
+      loading2.value = false;
+      error2.value = "Failed to load skill info";
+    });
+  }, [slug]);
+  async function doInstall2() {
+    installing.value = true;
+    try {
+      const res = await sendRpc("skills.clawhub.install", { slug });
+      if (res == null ? void 0 : res.ok) {
+        installed.value = true;
+        const payload = res.payload;
+        const skills = (payload == null ? void 0 : payload.installed) || [];
+        const source = `clawhub:${slug}`;
+        let trustFailed = 0;
+        for (const skill of skills) {
+          if (!skill.name) continue;
+          const trustRes = await sendRpc("skills.skill.trust", { source, skill: skill.name, trusted: true });
+          const enableRes = await sendRpc("skills.skill.enable", { source, skill: skill.name, enabled: true });
+          if (!((trustRes == null ? void 0 : trustRes.ok) && (enableRes == null ? void 0 : enableRes.ok))) trustFailed++;
+        }
+        if (trustFailed > 0) {
+          error2.value = `${trustFailed} skill(s) could not be auto-trusted. Enable manually in Skills tab.`;
+        }
+        onInstalled();
+      } else {
+        error2.value = String((res == null ? void 0 : res.error) || "Install failed");
+      }
+    } finally {
+      installing.value = false;
+    }
+  }
+  const d2 = info.value;
+  const s = d2 == null ? void 0 : d2.skill;
+  const stats = s == null ? void 0 : s.stats;
+  const owner = d2 == null ? void 0 : d2.owner;
+  const ver = d2 == null ? void 0 : d2.latestVersion;
+  return /* @__PURE__ */ u(
+    "div",
+    {
+      style: {
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius-sm)",
+        background: "var(--surface)",
+        padding: "12px 14px",
+        marginTop: "8px"
+      },
+      children: /* @__PURE__ */ u("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start" }, children: [
+        /* @__PURE__ */ u("div", { style: { flex: 1, minWidth: 0 }, children: [
+          loading2.value && /* @__PURE__ */ u("div", { style: { color: "var(--muted)", fontSize: ".78rem" }, children: "Loading..." }),
+          error2.value && /* @__PURE__ */ u("div", { style: { color: "var(--danger, #ef4444)", fontSize: ".78rem" }, children: error2.value }),
+          s && /* @__PURE__ */ u(S, { children: [
+            /* @__PURE__ */ u("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }, children: [
+              (owner == null ? void 0 : owner.image) && /* @__PURE__ */ u("img", { src: owner.image, alt: "", style: { width: "28px", height: "28px", borderRadius: "50%" } }),
+              /* @__PURE__ */ u("div", { children: [
+                (owner == null ? void 0 : owner.handle) && /* @__PURE__ */ u("span", { style: { fontSize: ".72rem", color: "var(--muted)" }, children: [
+                  "@",
+                  owner.handle,
+                  " / "
+                ] }),
+                /* @__PURE__ */ u(
+                  "span",
+                  {
+                    style: {
+                      fontSize: ".92rem",
+                      fontWeight: 600,
+                      color: "var(--text-strong)"
+                    },
+                    children: s.displayName || s.slug
+                  }
+                ),
+                ver && /* @__PURE__ */ u(
+                  "span",
+                  {
+                    style: {
+                      fontSize: ".68rem",
+                      padding: "1px 5px",
+                      marginLeft: "6px",
+                      borderRadius: "var(--radius-sm)",
+                      background: "var(--surface2)",
+                      color: "var(--muted)"
+                    },
+                    children: [
+                      "v",
+                      ver.version
+                    ]
+                  }
+                )
+              ] })
+            ] }),
+            s.summary && /* @__PURE__ */ u("p", { style: { fontSize: ".78rem", color: "var(--muted)", margin: "6px 0" }, children: s.summary }),
+            /* @__PURE__ */ u(
+              "div",
+              {
+                style: { display: "flex", gap: "10px", fontSize: ".72rem", color: "var(--muted)", marginTop: "6px" },
+                children: [
+                  (stats == null ? void 0 : stats.stars) != null && stats.stars > 0 && /* @__PURE__ */ u("span", { children: [
+                    "⭐ ",
+                    stats.stars
+                  ] }),
+                  (stats == null ? void 0 : stats.downloads) != null && stats.downloads > 0 && /* @__PURE__ */ u("span", { children: [
+                    fmtNumber(stats.downloads),
+                    " downloads"
+                  ] }),
+                  (stats == null ? void 0 : stats.installsAllTime) != null && stats.installsAllTime > 0 && /* @__PURE__ */ u("span", { children: [
+                    stats.installsAllTime,
+                    " installs"
+                  ] })
+                ]
+              }
+            ),
+            /* @__PURE__ */ u(SecurityScanPanel, { scan: scan.value }),
+            (ver == null ? void 0 : ver.changelog) && /* @__PURE__ */ u("div", { style: { marginTop: "8px" }, children: [
+              /* @__PURE__ */ u(
+                "div",
+                {
+                  style: { fontSize: ".72rem", fontWeight: 600, color: "var(--text-strong)", marginBottom: "2px" },
+                  children: [
+                    "Changelog (v",
+                    ver.version,
+                    ")"
+                  ]
+                }
+              ),
+              /* @__PURE__ */ u(
+                "div",
+                {
+                  style: {
+                    fontSize: ".72rem",
+                    color: "var(--muted)",
+                    whiteSpace: "pre-wrap",
+                    maxHeight: "100px",
+                    overflow: "auto"
+                  },
+                  children: ver.changelog
+                }
+              )
+            ] }),
+            (ver == null ? void 0 : ver.license) && /* @__PURE__ */ u("div", { style: { marginTop: "4px", fontSize: ".68rem", color: "var(--muted)" }, children: [
+              "License: ",
+              ver.license
+            ] })
+          ] })
+        ] }),
+        /* @__PURE__ */ u("div", { style: { display: "flex", flexDirection: "column", gap: "4px", marginLeft: "12px", flexShrink: 0 }, children: [
+          /* @__PURE__ */ u(
+            "button",
+            {
+              onClick: () => {
+                if (!(installed.value || installing.value)) doInstall2().catch(console.error);
+              },
+              disabled: installed.value || installing.value || loading2.value,
+              className: "provider-btn provider-btn-sm",
+              style: { minWidth: "80px" },
+              children: installed.value ? "Installed" : installing.value ? "Installing…" : "Install"
+            }
+          ),
+          /* @__PURE__ */ u(
+            "button",
+            {
+              onClick: onClose,
+              className: "provider-btn provider-btn-sm provider-btn-secondary",
+              style: { minWidth: "80px" },
+              children: "Close"
+            }
+          ),
+          /* @__PURE__ */ u(
+            "a",
+            {
+              href: `https://clawhub.ai/${(owner == null ? void 0 : owner.handle) || "_"}/${slug}`,
+              target: "_blank",
+              rel: "noopener noreferrer",
+              className: "provider-btn provider-btn-sm provider-btn-secondary",
+              style: { minWidth: "80px", textAlign: "center", textDecoration: "none", display: "block" },
+              children: "ClawHub"
+            }
+          )
+        ] })
+      ] })
+    }
+  );
+}
+function ResultCard({ result, onInstalled }) {
+  const expanded = useSignal(false);
+  return /* @__PURE__ */ u("div", { children: [
+    /* @__PURE__ */ u(
+      "div",
+      {
+        className: "skills-featured-card",
+        onClick: () => {
+          expanded.value = !expanded.value;
+        },
+        style: { cursor: "pointer" },
+        children: [
+          /* @__PURE__ */ u("div", { style: { flex: 1, minWidth: 0 }, children: [
+            /* @__PURE__ */ u("div", { style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }, children: [
+              result.ownerHandle && /* @__PURE__ */ u("span", { style: { fontSize: ".68rem", color: "var(--muted)" }, children: [
+                "@",
+                result.ownerHandle,
+                " /"
+              ] }),
+              /* @__PURE__ */ u(
+                "span",
+                {
+                  style: {
+                    fontFamily: "var(--font-mono)",
+                    fontSize: ".82rem",
+                    fontWeight: 500,
+                    color: "var(--text-strong)"
+                  },
+                  children: result.displayName || result.slug
+                }
+              ),
+              result.updatedAt && /* @__PURE__ */ u("span", { style: { fontSize: ".65rem", color: "var(--muted)" }, children: relativeTime(result.updatedAt) }),
+              result.stars != null && result.stars > 0 && /* @__PURE__ */ u("span", { style: { fontSize: ".65rem", color: "var(--muted)" }, children: [
+                "⭐ ",
+                result.stars
+              ] }),
+              result.downloads != null && result.downloads > 0 && /* @__PURE__ */ u("span", { style: { fontSize: ".65rem", color: "var(--muted)" }, children: fmtNumber(result.downloads) })
+            ] }),
+            result.summary && /* @__PURE__ */ u(
+              "div",
+              {
+                style: {
+                  fontSize: ".75rem",
+                  color: "var(--muted)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap"
+                },
+                children: result.summary
+              }
+            )
+          ] }),
+          /* @__PURE__ */ u(
+            "span",
+            {
+              style: {
+                fontSize: ".68rem",
+                color: "var(--accent)",
+                whiteSpace: "nowrap"
+              },
+              children: expanded.value ? "Close" : "View"
+            }
+          )
+        ]
+      }
+    ),
+    expanded.value && /* @__PURE__ */ u(
+      DetailPanel,
+      {
+        slug: result.slug,
+        onInstalled,
+        onClose: () => {
+          expanded.value = false;
+        }
+      }
+    )
+  ] });
+}
+function ClawHubSection({ onChanged }) {
+  const query2 = useSignal("");
+  const results = useSignal([]);
+  const searching = useSignal(false);
+  const searched = useSignal(false);
+  const inputRef = A(null);
+  function doSearch2(q2) {
+    if (!q2.trim()) {
+      results.value = [];
+      searched.value = false;
+      return;
+    }
+    searching.value = true;
+    sendRpc("skills.clawhub.search", { query: q2.trim() }).then((res) => {
+      searching.value = false;
+      searched.value = true;
+      if (res == null ? void 0 : res.ok) {
+        const payload = res.payload;
+        results.value = (payload == null ? void 0 : payload.results) || [];
+      }
+    }).catch(() => {
+      searching.value = false;
+    });
+  }
+  function onInput(e) {
+    const v = e.target.value;
+    query2.value = v;
+    if (searchTimer$1) clearTimeout(searchTimer$1);
+    if (!v.trim()) {
+      results.value = [];
+      searched.value = false;
+      return;
+    }
+    searchTimer$1 = setTimeout(() => doSearch2(v), 300);
+  }
+  function onKeyDown(e) {
+    if (e.key === "Enter") {
+      if (searchTimer$1) clearTimeout(searchTimer$1);
+      doSearch2(query2.value);
+    }
+  }
+  return /* @__PURE__ */ u("div", { className: "skills-section", children: [
+    /* @__PURE__ */ u("h3", { className: "skills-section-title", children: [
+      "ClawHub",
+      /* @__PURE__ */ u(
+        "span",
+        {
+          style: {
+            fontSize: ".72rem",
+            color: "var(--muted)",
+            fontWeight: 400,
+            marginLeft: "8px"
+          },
+          children: [
+            "52k+ community skills from",
+            " ",
+            /* @__PURE__ */ u("a", { href: "https://clawhub.ai", target: "_blank", rel: "noopener noreferrer", style: { color: "var(--accent)" }, children: "clawhub.ai" })
+          ]
+        }
+      )
+    ] }),
+    /* @__PURE__ */ u("div", { className: "skills-install-box", children: [
+      /* @__PURE__ */ u(
+        "input",
+        {
+          ref: inputRef,
+          type: "text",
+          placeholder: "Search ClawHub skills (e.g. csv, weather, github)...",
+          className: "skills-install-input",
+          value: query2.value,
+          onInput,
+          onKeyDown
+        }
+      ),
+      /* @__PURE__ */ u(
+        "button",
+        {
+          className: "provider-btn",
+          disabled: searching.value || !query2.value.trim(),
+          onClick: () => doSearch2(query2.value),
+          children: searching.value ? "Searching…" : "Search"
+        }
+      )
+    ] }),
+    results.value.length > 0 && /* @__PURE__ */ u("div", { style: { display: "flex", flexDirection: "column", gap: "4px", marginTop: "8px" }, children: results.value.map((r2) => /* @__PURE__ */ u(ResultCard, { result: r2, onInstalled: onChanged }, r2.slug)) }),
+    searched.value && results.value.length === 0 && !searching.value && /* @__PURE__ */ u(
+      "div",
+      {
+        style: {
+          fontSize: ".78rem",
+          color: "var(--muted)",
+          padding: "12px 0",
+          textAlign: "center"
+        },
+        children: "No skills found. Try a different search term."
+      }
+    )
+  ] });
+}
 const repos = y([]);
 const enabledSkills = y([]);
 const loading$7 = y(false);
@@ -15468,36 +15912,36 @@ function fetchAll() {
     loading$7.value = false;
   });
 }
-function doInstall(source) {
+function doInstall(source, autoTrust = false) {
   if (!(source && connected)) {
     if (!connected) showToast$3("Not connected to gateway.", "error");
     return Promise.resolve();
   }
   const opId = `skills-install-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const pid = startInstallProgress(source, opId);
-  return sendRpc("skills.install", { source, op_id: opId }).then((res) => {
+  return sendRpc("skills.install", { source, op_id: opId }).then(async (res) => {
     if (res == null ? void 0 : res.ok) {
       const p = res.payload || {};
-      showToast$3(`Installed ${source} (${(p.installed || []).length} skills)`, "success");
+      const installed = p.installed || [];
+      showToast$3(`Installed ${source} (${installed.length} skills)`, "success");
+      if (autoTrust && installed.length > 0) {
+        let trustFailed = 0;
+        for (const skill of installed) {
+          if (!skill.name) continue;
+          const trustRes = await sendRpc("skills.skill.trust", { source, skill: skill.name, trusted: true });
+          const enableRes = await sendRpc("skills.skill.enable", { source, skill: skill.name, enabled: true });
+          if (!((trustRes == null ? void 0 : trustRes.ok) && (enableRes == null ? void 0 : enableRes.ok))) trustFailed++;
+        }
+        if (trustFailed > 0) {
+          showToast$3(`${trustFailed} skill(s) could not be auto-trusted. Enable them manually in Skills.`, "error");
+        }
+      }
       fetchAll();
       stopInstallProgress(pid);
     } else {
       showToast$3(`Failed: ${(res == null ? void 0 : res.error) || "unknown error"}`, "error");
       stopInstallProgress(pid);
     }
-  });
-}
-function doImportBundle(path) {
-  if (!(path && connected)) {
-    if (!connected) showToast$3("Not connected.", "error");
-    return Promise.resolve();
-  }
-  return sendRpc("skills.repos.import", { path }).then((res) => {
-    if (res == null ? void 0 : res.ok) {
-      const p = res.payload || {};
-      showToast$3(`Imported ${p.repo_name || "bundle"} (${p.skill_count || 0} skills)`, "success");
-      fetchAll();
-    } else showToast$3(`Failed: ${(res == null ? void 0 : res.error) || "unknown"}`, "error");
   });
 }
 function doExportBundle(source, path) {
@@ -15598,45 +16042,63 @@ function InstallBox$1() {
     /* @__PURE__ */ u("button", { className: "provider-btn", onClick: go, disabled: installing.value, children: installing.value ? "Installing…" : "Install" })
   ] });
 }
-function BundleTransferBox() {
-  const ref = A(null);
-  const importing = useSignal(false);
-  function go() {
-    var _a2;
-    const p = (_a2 = ref.current) == null ? void 0 : _a2.value.trim();
-    if (!p) return;
-    importing.value = true;
-    doImportBundle(p).finally(() => {
-      importing.value = false;
-    });
-  }
-  return /* @__PURE__ */ u("div", { className: "skills-install-box", children: [
-    /* @__PURE__ */ u(
-      "input",
-      {
-        ref,
-        type: "text",
-        placeholder: "/path/to/skill-bundle.tar.gz",
-        className: "skills-install-input",
-        onKeyDown: (e) => {
-          if (e.key === "Enter") go();
-        }
-      }
-    ),
-    /* @__PURE__ */ u("button", { className: "provider-btn provider-btn-secondary", onClick: go, disabled: importing.value, children: importing.value ? "Importing…" : "Import Bundle" })
-  ] });
-}
 const featuredSkills = [
-  { repo: "openclaw/skills", desc: "Community skills from ClawdHub" },
-  { repo: "anthropics/skills", desc: "Official Anthropic agent skills" },
-  { repo: "vercel-labs/agent-skills", desc: "Vercel agent skills collection" },
-  { repo: "vercel-labs/skills", desc: "Vercel skills toolkit" }
+  { repo: "anthropics/skills", desc: "Official Anthropic agent skills", autoTrust: true },
+  { repo: "vercel-labs/agent-skills", desc: "Vercel agent skills collection", autoTrust: true },
+  { repo: "vercel-labs/skills", desc: "Vercel skills toolkit", autoTrust: true },
+  {
+    repo: "garrytan/gbrain",
+    desc: "Knowledge graph with hybrid search for agent memory",
+    hasRecipe: true,
+    autoTrust: true
+  }
 ];
+async function checkPostInstallRecipe(source) {
+  const res = await sendRpc("skills.recipe", { source });
+  if (!(res == null ? void 0 : res.ok)) return;
+  const payload = res.payload;
+  if (!(payload == null ? void 0 : payload.found)) return;
+  const recipe = payload.recipe;
+  if (!(recipe == null ? void 0 : recipe.instructions)) return;
+  showToast$3(
+    `${recipe.title || "Setup available"} — ask the agent: “run the ${source.split("/").pop() || source} setup recipe”`,
+    "success"
+  );
+}
+function orgAvatarUrl(repo) {
+  if (repo.startsWith("clawhub:")) {
+    return "https://clawhub.ai/favicon.ico";
+  }
+  const owner = repo.split("/")[0];
+  return `https://github.com/${owner}.png?size=40`;
+}
+function repoHref(source) {
+  if (source.startsWith("clawhub:")) {
+    const slug = source.slice("clawhub:".length);
+    return `https://clawhub.ai/skills/${slug}`;
+  }
+  if (/^https?:\/\//.test(source)) return source;
+  return `https://github.com/${source}`;
+}
 function FeaturedCard$1({ skill: f }) {
   const installing = useSignal(false);
   const href = /^https?:\/\//.test(f.repo) ? f.repo : `https://github.com/${f.repo}`;
+  const isInstalled = repos.value.some((r2) => r2.source === f.repo);
   return /* @__PURE__ */ u("div", { className: "skills-featured-card", children: [
-    /* @__PURE__ */ u("div", { children: [
+    /* @__PURE__ */ u(
+      "img",
+      {
+        src: orgAvatarUrl(f.repo),
+        alt: "",
+        style: {
+          width: "24px",
+          height: "24px",
+          borderRadius: "var(--radius-sm)",
+          flexShrink: 0
+        }
+      }
+    ),
+    /* @__PURE__ */ u("div", { style: { flex: 1, minWidth: 0 }, children: [
       /* @__PURE__ */ u(
         "a",
         {
@@ -15659,23 +16121,27 @@ function FeaturedCard$1({ skill: f }) {
       "button",
       {
         onClick: () => {
+          if (isInstalled) return;
           installing.value = true;
-          doInstall(f.repo).then(() => {
+          doInstall(f.repo, f.autoTrust).then(() => {
+            if (f.hasRecipe) checkPostInstallRecipe(f.repo).catch(console.error);
+          }).catch((err) => console.error("install failed", err)).finally(() => {
             installing.value = false;
           });
         },
-        disabled: installing.value,
+        disabled: isInstalled || installing.value,
         style: {
           background: "var(--surface2)",
           border: "1px solid var(--border)",
-          color: "var(--text)",
+          color: isInstalled ? "var(--success, #22c55e)" : "var(--text)",
           borderRadius: "var(--radius-sm)",
           fontSize: ".72rem",
           padding: "4px 10px",
-          cursor: "pointer",
-          whiteSpace: "nowrap"
+          cursor: isInstalled ? "default" : "pointer",
+          whiteSpace: "nowrap",
+          opacity: isInstalled ? 0.8 : 1
         },
-        children: installing.value ? "Installing…" : "Install"
+        children: isInstalled ? "Installed" : installing.value ? "Installing…" : "Install"
       }
     )
   ] });
@@ -15886,7 +16352,7 @@ function RepoCard({ repo }) {
   const unquarantiningRepo = useSignal(false);
   const isOrphan = repo.orphaned === true;
   const sourceLabel = isOrphan ? repo.repo_name : repo.source;
-  const href = isOrphan ? null : /^https?:\/\//.test(repo.source) ? repo.source : `https://github.com/${repo.source}`;
+  const href = isOrphan ? null : repoHref(repo.source);
   function toggle() {
     const w = !expanded.value;
     expanded.value = w;
@@ -15929,6 +16395,14 @@ function RepoCard({ repo }) {
     /* @__PURE__ */ u("div", { className: "skills-repo-header", onClick: toggle, children: [
       /* @__PURE__ */ u("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
         /* @__PURE__ */ u("span", { style: { fontSize: ".65rem", color: "var(--muted)", transform: expanded.value ? "rotate(90deg)" : "" }, children: "▶" }),
+        !isOrphan && /* @__PURE__ */ u(
+          "img",
+          {
+            src: orgAvatarUrl(repo.source),
+            alt: "",
+            style: { width: "20px", height: "20px", borderRadius: "var(--radius-sm)" }
+          }
+        ),
         href ? /* @__PURE__ */ u(
           "a",
           {
@@ -15962,7 +16436,20 @@ function RepoCard({ repo }) {
           "/",
           repo.skill_count,
           " enabled"
-        ] })
+        ] }),
+        repo.trusted_count != null && repo.skill_count > 0 && /* @__PURE__ */ u(
+          "span",
+          {
+            style: {
+              fontSize: ".68rem",
+              padding: "1px 5px",
+              borderRadius: "var(--radius-sm)",
+              background: repo.trusted_count === repo.skill_count ? "var(--success-bg, rgba(34,197,94,.12))" : "var(--warning-bg, rgba(234,179,8,.12))",
+              color: repo.trusted_count === repo.skill_count ? "var(--success, #22c55e)" : "var(--warning, #eab308)"
+            },
+            children: repo.trusted_count === repo.skill_count ? "trusted" : `${repo.trusted_count}/${repo.skill_count} trusted`
+          }
+        )
       ] }),
       /* @__PURE__ */ u("div", { style: { display: "flex", gap: "6px" }, children: [
         !isOrphan && /* @__PURE__ */ u(
@@ -16417,6 +16904,7 @@ const skillsTabs = g(() => {
   return [
     { id: "skills", label: "Skills", badge: enabledSkills.value.length || void 0 },
     { id: "categories", label: "Categories", badge: totalCats ? `${enabledCats}/${totalCats}` : void 0 },
+    { id: "clawhub", label: "ClawHub" },
     { id: "repositories", label: "Repositories", badge: repos.value.length || void 0 }
   ];
 });
@@ -16468,9 +16956,9 @@ function SkillsPageComponent() {
       /* @__PURE__ */ u(EnabledSkillsTable, {})
     ] }),
     activeTab$1.value === "categories" && /* @__PURE__ */ u(BundledCategoriesSection, {}),
+    activeTab$1.value === "clawhub" && /* @__PURE__ */ u(ClawHubSection, { onChanged: fetchAll }),
     activeTab$1.value === "repositories" && /* @__PURE__ */ u(S, { children: [
       /* @__PURE__ */ u(InstallBox$1, {}),
-      /* @__PURE__ */ u(BundleTransferBox, {}),
       /* @__PURE__ */ u(InstallProgressBar, {}),
       /* @__PURE__ */ u(FeaturedSection$1, {}),
       /* @__PURE__ */ u(ReposSection, {})

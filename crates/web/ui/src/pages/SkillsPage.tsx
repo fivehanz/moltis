@@ -23,6 +23,7 @@ import {
 	SkillSource,
 } from "../types/skill-source";
 import { ConfirmDialog, requestConfirm } from "../ui";
+import { ClawHubSection } from "./skills/ClawHubSection";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -63,6 +64,7 @@ interface RepoSummary {
 	source: string;
 	skill_count: number;
 	enabled_count: number;
+	trusted_count?: number;
 	commit_sha?: string;
 	quarantined?: boolean;
 	drifted?: boolean;
@@ -161,36 +163,38 @@ function fetchAll(): void {
 		});
 }
 
-function doInstall(source: string): Promise<void> {
+function doInstall(source: string, autoTrust = false): Promise<void> {
 	if (!(source && S.connected)) {
 		if (!S.connected) showToast("Not connected to gateway.", "error");
 		return Promise.resolve();
 	}
 	const opId = `skills-install-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 	const pid = startInstallProgress(source, opId);
-	return sendRpc("skills.install", { source, op_id: opId }).then((res) => {
+	return sendRpc("skills.install", { source, op_id: opId }).then(async (res) => {
 		if (res?.ok) {
 			const p = (res.payload || {}) as Record<string, unknown[]>;
-			showToast(`Installed ${source} (${(p.installed || []).length} skills)`, "success");
+			const installed = (p.installed || []) as Array<{ name?: string }>;
+			showToast(`Installed ${source} (${installed.length} skills)`, "success");
+
+			if (autoTrust && installed.length > 0) {
+				let trustFailed = 0;
+				for (const skill of installed) {
+					if (!skill.name) continue;
+					const trustRes = await sendRpc("skills.skill.trust", { source, skill: skill.name, trusted: true });
+					const enableRes = await sendRpc("skills.skill.enable", { source, skill: skill.name, enabled: true });
+					if (!(trustRes?.ok && enableRes?.ok)) trustFailed++;
+				}
+				if (trustFailed > 0) {
+					showToast(`${trustFailed} skill(s) could not be auto-trusted. Enable them manually in Skills.`, "error");
+				}
+			}
+
 			fetchAll();
 			stopInstallProgress(pid, true);
 		} else {
 			showToast(`Failed: ${res?.error || "unknown error"}`, "error");
 			stopInstallProgress(pid, false);
 		}
-	});
-}
-function doImportBundle(path: string): Promise<void> {
-	if (!(path && S.connected)) {
-		if (!S.connected) showToast("Not connected.", "error");
-		return Promise.resolve();
-	}
-	return sendRpc("skills.repos.import", { path }).then((res) => {
-		if (res?.ok) {
-			const p = (res.payload || {}) as Record<string, unknown>;
-			showToast(`Imported ${p.repo_name || "bundle"} (${p.skill_count || 0} skills)`, "success");
-			fetchAll();
-		} else showToast(`Failed: ${res?.error || "unknown"}`, "error");
 	});
 }
 function doExportBundle(source: string, path: string | null): Promise<void> {
@@ -298,47 +302,77 @@ function InstallBox(): VNode {
 		</div>
 	);
 }
-function BundleTransferBox(): VNode {
-	const ref = useRef<HTMLInputElement>(null);
-	const importing = useSignal(false);
-	function go(): void {
-		const p = ref.current?.value.trim();
-		if (!p) return;
-		importing.value = true;
-		doImportBundle(p).finally(() => {
-			importing.value = false;
-		});
-	}
-	return (
-		<div className="skills-install-box">
-			<input
-				ref={ref}
-				type="text"
-				placeholder="/path/to/skill-bundle.tar.gz"
-				className="skills-install-input"
-				onKeyDown={(e) => {
-					if ((e as KeyboardEvent).key === "Enter") go();
-				}}
-			/>
-			<button className="provider-btn provider-btn-secondary" onClick={go} disabled={importing.value}>
-				{importing.value ? "Importing\u2026" : "Import Bundle"}
-			</button>
-		</div>
+interface FeaturedSkill {
+	repo: string;
+	desc: string;
+	hasRecipe?: boolean;
+	/** When true, all skills in this repo are auto-trusted and enabled on install. */
+	autoTrust?: boolean;
+}
+const featuredSkills: FeaturedSkill[] = [
+	{ repo: "anthropics/skills", desc: "Official Anthropic agent skills", autoTrust: true },
+	{ repo: "vercel-labs/agent-skills", desc: "Vercel agent skills collection", autoTrust: true },
+	{ repo: "vercel-labs/skills", desc: "Vercel skills toolkit", autoTrust: true },
+	{
+		repo: "garrytan/gbrain",
+		desc: "Knowledge graph with hybrid search for agent memory",
+		hasRecipe: true,
+		autoTrust: true,
+	},
+];
+
+/** After installing a repo with a recipe, fetch and display the post-install instructions. */
+async function checkPostInstallRecipe(source: string): Promise<void> {
+	const res = await sendRpc("skills.recipe", { source });
+	if (!res?.ok) return;
+	const payload = res.payload as Record<string, unknown> | undefined;
+	if (!payload?.found) return;
+	const recipe = payload.recipe as { title?: string; instructions?: string } | undefined;
+	if (!recipe?.instructions) return;
+	showToast(
+		`${recipe.title || "Setup available"} \u2014 ask the agent: \u201Crun the ${source.split("/").pop() || source} setup recipe\u201D`,
+		"success",
 	);
 }
 
-const featuredSkills = [
-	{ repo: "openclaw/skills", desc: "Community skills from ClawdHub" },
-	{ repo: "anthropics/skills", desc: "Official Anthropic agent skills" },
-	{ repo: "vercel-labs/agent-skills", desc: "Vercel agent skills collection" },
-	{ repo: "vercel-labs/skills", desc: "Vercel skills toolkit" },
-];
-function FeaturedCard({ skill: f }: { skill: { repo: string; desc: string } }): VNode {
+/** Derive the GitHub avatar URL for an org/user from the repo identifier. */
+/** GitHub avatar URL — github.com/{owner}.png redirects to the correct avatar
+ *  for both users and organizations. CSP img-src allows both domains. */
+function orgAvatarUrl(repo: string): string {
+	if (repo.startsWith("clawhub:")) {
+		return "https://clawhub.ai/favicon.ico";
+	}
+	const owner = repo.split("/")[0];
+	return `https://github.com/${owner}.png?size=40`;
+}
+
+/** Build the correct external link for a repo source. */
+function repoHref(source: string): string | null {
+	if (source.startsWith("clawhub:")) {
+		const slug = source.slice("clawhub:".length);
+		return `https://clawhub.ai/skills/${slug}`;
+	}
+	if (/^https?:\/\//.test(source)) return source;
+	return `https://github.com/${source}`;
+}
+
+function FeaturedCard({ skill: f }: { skill: FeaturedSkill }): VNode {
 	const installing = useSignal(false);
 	const href = /^https?:\/\//.test(f.repo) ? f.repo : `https://github.com/${f.repo}`;
+	const isInstalled = repos.value.some((r) => r.source === f.repo);
 	return (
 		<div className="skills-featured-card">
-			<div>
+			<img
+				src={orgAvatarUrl(f.repo)}
+				alt=""
+				style={{
+					width: "24px",
+					height: "24px",
+					borderRadius: "var(--radius-sm)",
+					flexShrink: 0,
+				}}
+			/>
+			<div style={{ flex: 1, minWidth: 0 }}>
 				<a
 					href={href}
 					target="_blank"
@@ -357,24 +391,31 @@ function FeaturedCard({ skill: f }: { skill: { repo: string; desc: string } }): 
 			</div>
 			<button
 				onClick={() => {
+					if (isInstalled) return;
 					installing.value = true;
-					doInstall(f.repo).then(() => {
-						installing.value = false;
-					});
+					doInstall(f.repo, f.autoTrust)
+						.then(() => {
+							if (f.hasRecipe) checkPostInstallRecipe(f.repo).catch(console.error);
+						})
+						.catch((err) => console.error("install failed", err))
+						.finally(() => {
+							installing.value = false;
+						});
 				}}
-				disabled={installing.value}
+				disabled={isInstalled || installing.value}
 				style={{
 					background: "var(--surface2)",
 					border: "1px solid var(--border)",
-					color: "var(--text)",
+					color: isInstalled ? "var(--success, #22c55e)" : "var(--text)",
 					borderRadius: "var(--radius-sm)",
 					fontSize: ".72rem",
 					padding: "4px 10px",
-					cursor: "pointer",
+					cursor: isInstalled ? "default" : "pointer",
 					whiteSpace: "nowrap",
+					opacity: isInstalled ? 0.8 : 1,
 				}}
 			>
-				{installing.value ? "Installing\u2026" : "Install"}
+				{isInstalled ? "Installed" : installing.value ? "Installing\u2026" : "Install"}
 			</button>
 		</div>
 	);
@@ -583,7 +624,7 @@ function RepoCard({ repo }: { repo: RepoSummary }): VNode {
 	const unquarantiningRepo = useSignal(false);
 	const isOrphan = repo.orphaned === true;
 	const sourceLabel = isOrphan ? repo.repo_name : repo.source;
-	const href = isOrphan ? null : /^https?:\/\//.test(repo.source) ? repo.source : `https://github.com/${repo.source}`;
+	const href = isOrphan ? null : repoHref(repo.source);
 	function toggle(): void {
 		const w = !expanded.value;
 		expanded.value = w;
@@ -629,6 +670,13 @@ function RepoCard({ repo }: { repo: RepoSummary }): VNode {
 					<span style={{ fontSize: ".65rem", color: "var(--muted)", transform: expanded.value ? "rotate(90deg)" : "" }}>
 						{"\u25B6"}
 					</span>
+					{!isOrphan && (
+						<img
+							src={orgAvatarUrl(repo.source)}
+							alt=""
+							style={{ width: "20px", height: "20px", borderRadius: "var(--radius-sm)" }}
+						/>
+					)}
 					{href ? (
 						<a
 							href={href}
@@ -660,6 +708,24 @@ function RepoCard({ repo }: { repo: RepoSummary }): VNode {
 					<span style={{ fontSize: ".72rem", color: "var(--muted)" }}>
 						{repo.enabled_count}/{repo.skill_count} enabled
 					</span>
+					{repo.trusted_count != null && repo.skill_count > 0 && (
+						<span
+							style={{
+								fontSize: ".68rem",
+								padding: "1px 5px",
+								borderRadius: "var(--radius-sm)",
+								background:
+									repo.trusted_count === repo.skill_count
+										? "var(--success-bg, rgba(34,197,94,.12))"
+										: "var(--warning-bg, rgba(234,179,8,.12))",
+								color: repo.trusted_count === repo.skill_count ? "var(--success, #22c55e)" : "var(--warning, #eab308)",
+							}}
+						>
+							{repo.trusted_count === repo.skill_count
+								? "trusted"
+								: `${repo.trusted_count}/${repo.skill_count} trusted`}
+						</span>
+					)}
 				</div>
 				<div style={{ display: "flex", gap: "6px" }}>
 					{!isOrphan && (
@@ -1145,6 +1211,7 @@ const skillsTabs = computed(() => {
 	return [
 		{ id: "skills", label: "Skills", badge: enabledSkills.value.length || undefined },
 		{ id: "categories", label: "Categories", badge: totalCats ? `${enabledCats}/${totalCats}` : undefined },
+		{ id: "clawhub", label: "ClawHub" },
 		{ id: "repositories", label: "Repositories", badge: repos.value.length || undefined },
 	];
 });
@@ -1200,10 +1267,10 @@ function SkillsPageComponent(): VNode {
 				</>
 			)}
 			{activeTab.value === "categories" && <BundledCategoriesSection />}
+			{activeTab.value === "clawhub" && <ClawHubSection onChanged={fetchAll} />}
 			{activeTab.value === "repositories" && (
 				<>
 					<InstallBox />
-					<BundleTransferBox />
 					<InstallProgressBar />
 					<FeaturedSection />
 					<ReposSection />
