@@ -1,36 +1,53 @@
+# fly.toml app configuration file generated for rozine-jsmx on 2026-04-26T01:41:54+05:30
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'rozine-jsmx'
+primary_region = 'sin'
+swap_size_mb = 512
+
 [build]
-image = 'ghcr.io/moltis-org/moltis:20260424.02'
+  image = 'ghcr.io/moltis-org/moltis:20260424.02'
 
 [env]
-MOLTIS_BEHIND_PROXY    = 'true'
-MOLTIS_CONFIG_DIR      = '/data/config'
-MOLTIS_DATA_DIR        = '/data'
-MOLTIS_DEPLOY_PLATFORM = 'flyio'
-MOLTIS_NO_TLS          = 'true'
+  MOLTIS_BEHIND_PROXY = 'true'
+  MOLTIS_CONFIG_DIR = '/data/config'
+  MOLTIS_DATA_DIR = '/data'
+  MOLTIS_DEPLOY_PLATFORM = 'flyio'
+  MOLTIS_NO_TLS = 'true'
 
 [processes]
-app = '--bind 0.0.0.0 --port 8080 --no-tls'
+  app = '--bind 0.0.0.0 --port 8080 --no-tls'
 
 [[mounts]]
-destination = '/data'
-source      = 'moltis_data'
+  source = 'moltis_data'
+  destination = '/data'
 
 [http_service]
-auto_start_machines  = true
-auto_stop_machines   = 'stop'
-force_https          = true
-internal_port        = 8080
-min_machines_running = 0
-processes            = ['app']
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
 
-[http_service.concurrency]
-hard_limit = 250
-soft_limit = 200
-type       = 'connections'
+  [http_service.concurrency]
+    type = 'connections'
+    hard_limit = 250
+    soft_limit = 200
 
-[[http_service.checks]]
-grace_period = '10s'
-interval     = '30s'
-method       = 'GET'
-path         = '/health'
-timeout      = '5s'
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/health'
+
+[[vm]]
+  size = 'shared-cpu-2x'
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 2
+  memory_mb = 512
+  processes = ['app']
