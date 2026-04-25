@@ -66,21 +66,13 @@ install_vulkan_sdk() {
 }
 
 install_nccl() {
-  # The CUDA container ships libnccl2 pre-installed, but NVIDIA's apt repo
-  # may no longer carry that exact version.  Install the -dev headers for
-  # whatever runtime is already present so the linker can find NCCL symbols.
-  local installed_ver
-  installed_ver="$(dpkg-query -W -f='${Version}' libnccl2 2>/dev/null || true)"
-
-  if [ -n "$installed_ver" ]; then
-    echo "libnccl2 already installed at ${installed_ver}, installing matching -dev headers"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --allow-change-held-packages \
-      "libnccl-dev=${installed_ver}"
-  else
-    echo "libnccl2 not pre-installed, installing latest libnccl-dev + libnccl2"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --allow-change-held-packages \
-      libnccl-dev libnccl2
-  fi
+  # Do NOT install libnccl-dev here.  llama-cpp-sys-2's CMake build
+  # auto-detects NCCL headers and compiles with GGML_USE_NCCL, but its
+  # Rust build.rs never emits `cargo:rustc-link-lib=nccl`, causing
+  # undefined-symbol linker errors.  Omitting the -dev package prevents
+  # CMake from finding NCCL, sidestepping the issue.  Multi-GPU NCCL
+  # is not needed for CI.
+  echo "Skipping libnccl-dev install (upstream llama-cpp-sys-2 linking bug)"
 }
 
 retry 5 15 apt_update
