@@ -79,10 +79,17 @@ test.describe("Smart auto-scroll", () => {
 		const afterFill = await getScrollState(page);
 		expect(afterFill.scrollHeight).toBeGreaterThan(afterFill.clientHeight);
 
+		// scrollChatToBottom() installs a ResizeObserver that force-scrolls to
+		// bottom for 500ms.  Wait for it to expire so the upcoming chatAddMsg
+		// doesn't get yanked back to the bottom.
+		await page.waitForTimeout(600);
+
 		// Scroll to the top to simulate a user reading earlier messages
 		await page.evaluate(() => {
 			document.getElementById("messages").scrollTop = 0;
 		});
+		// Let the scroll position settle before injecting a message
+		await page.waitForTimeout(200);
 
 		// Add a new assistant message via the smart scroll path
 		await page.evaluate(async () => {

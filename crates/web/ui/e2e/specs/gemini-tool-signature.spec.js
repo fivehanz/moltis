@@ -244,12 +244,27 @@ test.describe("Gemini tool-call thought signatures", () => {
 			const model = (modelsResponse.payload || []).find((entry) => entry?.id === `${providerName}::${MODEL_ID}`);
 			expect(model, "expected the custom Gemini mock model to be registered").toBeTruthy();
 
+			// Abort any stale run so the session semaphore is free.
+			// There is a brief race between abort returning and the
+			// spawned task dropping the permit, so we poll chat.send
+			// until we get a runId (cancelling queued messages between
+			// attempts to avoid duplicates).
+			await sendRpcFromPage(page, "chat.abort", { sessionKey: "main" });
 			await expectRpcOk(page, "chat.clear", { sessionKey: "main" });
-			const sendResponse = await expectRpcOk(page, "chat.send", {
-				sessionKey: "main",
-				model: model.id,
-				text: "Use the exec tool to print the sentinel.",
-			});
+
+			let sendResponse;
+			for (let attempt = 0; attempt < 10; attempt++) {
+				sendResponse = await sendRpcFromPage(page, "chat.send", {
+					sessionKey: "main",
+					model: model.id,
+					text: "Use the exec tool to print the sentinel.",
+				});
+				if (sendResponse?.ok && sendResponse.payload?.runId) break;
+				// Message was queued — cancel it and retry after a short wait.
+				await sendRpcFromPage(page, "chat.cancel_queued", { sessionKey: "main" });
+				await page.waitForTimeout(200);
+			}
+			expect(sendResponse?.ok, "chat.send should succeed").toBeTruthy();
 			expect(String(sendResponse.payload?.runId || "")).not.toBe("");
 
 			await expect

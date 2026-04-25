@@ -30,12 +30,14 @@ function graphqlHttpStatus(page) {
 	});
 }
 
-function isRetryableNavigationError(error) {
+function isRetryableMockError(error) {
 	const message = error?.message || String(error || "");
 	return (
 		message.includes("net::ERR_ABORTED") ||
 		message.includes("Execution context was destroyed") ||
-		message.includes("Target page, context or browser has been closed")
+		message.includes("Target page, context or browser has been closed") ||
+		message.includes("Timeout") ||
+		message.includes("exceeded while waiting")
 	);
 }
 
@@ -117,7 +119,7 @@ async function mockChannelsStatus(page, { channels, senders = [], allowRetryOwne
 			return;
 		} catch (error) {
 			lastError = error;
-			if (!isRetryableNavigationError(error) || attempt === 2) break;
+			if (!isRetryableMockError(error) || attempt === 2) break;
 		}
 	}
 	if (lastError) throw lastError;
@@ -1244,68 +1246,32 @@ test.describe("Settings navigation", () => {
 		const pageErrors = watchPageErrors(page);
 		await navigateAndWait(page, "/settings/channels");
 
-		await page.evaluate(async () => {
-			const appScript = document.querySelector('script[type="module"][src*="js/app.js"]');
-			if (!appScript) throw new Error("app.js script not found");
-			const appUrl = new URL(appScript.src, window.location.origin).href;
-			const marker = "js/app.js";
-			const markerIdx = appUrl.indexOf(marker);
-			if (markerIdx < 0) throw new Error("app.js marker not found in script URL");
-			const prefix = appUrl.slice(0, markerIdx);
-			const state = await import(`${prefix}js/state.js`);
-			const channelsPage = await import(`${prefix}js/page-channels.js`);
-			const wsOpen = typeof WebSocket !== "undefined" ? WebSocket.OPEN : 1;
-			state.setWs({
-				readyState: wsOpen,
-				send(raw) {
-					const req = JSON.parse(raw || "{}");
-					const resolver = state.pending[req.id];
-					if (!resolver) return;
-					if (req.method === "channels.status") {
-						resolver({
-							ok: true,
-							payload: {
-								channels: [
-									{
-										type: "matrix",
-										account_id: "moltis-testbot",
-										name: "Matrix (moltis-testbot)",
-										status: "connected",
-										details: "@moltis-testbot:matrix.org on https://matrix.org",
-										sessions: [],
-									},
-								],
-							},
-						});
-					} else if (req.method === "channels.senders.list") {
-						resolver({
-							ok: true,
-							payload: {
-								senders: [
-									{
-										peer_id: "@alice:matrix.org",
-										username: "@alice:matrix.org",
-										sender_name: "Alice",
-										message_count: 1,
-										last_seen: 1700000000,
-										allowed: false,
-										otp_pending: {
-											code: "954502",
-											expires_at: 1700000300,
-										},
-									},
-								],
-							},
-						});
-					} else {
-						resolver({ ok: false, error: { message: `unexpected rpc in matrix senders test: ${req.method}` } });
-					}
-					delete state.pending[req.id];
+		await mockChannelsStatus(page, {
+			label: "matrix senders test",
+			channels: [
+				{
+					type: "matrix",
+					account_id: "moltis-testbot",
+					name: "Matrix (moltis-testbot)",
+					status: "connected",
+					details: "@moltis-testbot:matrix.org on https://matrix.org",
+					sessions: [],
 				},
-			});
-			state.setConnected(true);
-			await channelsPage.prefetchChannels();
-			await new Promise((resolve) => setTimeout(resolve, 100));
+			],
+			senders: [
+				{
+					peer_id: "@alice:matrix.org",
+					username: "@alice:matrix.org",
+					sender_name: "Alice",
+					message_count: 1,
+					last_seen: 1700000000,
+					allowed: false,
+					otp_pending: {
+						code: "954502",
+						expires_at: 1700000300,
+					},
+				},
+			],
 		});
 
 		await expect(page.getByText("Matrix (moltis-testbot)", { exact: true })).toBeVisible({ timeout: 10_000 });
