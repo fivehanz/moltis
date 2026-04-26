@@ -108,7 +108,9 @@ mod tests {
         )
         .unwrap();
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+        // The debouncer has a 5-second window; macOS FSEvents can add further
+        // latency, so allow generous headroom.
+        let event = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv())
             .await
             .expect("timed out waiting for watcher event")
             .expect("channel closed");
