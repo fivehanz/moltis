@@ -11790,6 +11790,30 @@ function showCustomProviderForm() {
   urlInp.focus();
 }
 let selectedBackend = null;
+const modelStates = {};
+function initModelLifecycleTracking() {
+  onEvent("local-llm.lifecycle", (payload) => {
+    const p = payload;
+    if (!p.modelId) return;
+    const existing = modelStates[p.modelId];
+    if (existing) {
+      existing.is_loaded = p.state === "loaded";
+      existing.memory_bytes = p.modelSizeBytes ?? existing.memory_bytes;
+    }
+  });
+  refreshModelStates();
+}
+async function refreshModelStates() {
+  const res = await sendRpc("providers.local.model_states", {});
+  if ((res == null ? void 0 : res.ok) && Array.isArray(res.payload)) {
+    for (const entry of res.payload) {
+      modelStates[entry.model_id] = entry;
+    }
+  }
+}
+function getModelState(modelId) {
+  return modelStates[modelId];
+}
 function showLocalModelFlow(provider) {
   const m = els();
   m.title.textContent = provider.displayName;
@@ -12373,7 +12397,9 @@ function pollLocalStatus(model, _provider, statusEl2, progressEl, offEvent) {
 const _providers = /* @__PURE__ */ Object.freeze(/* @__PURE__ */ Object.defineProperty({
   __proto__: null,
   closeProviderModal,
+  getModelState,
   getProviderModal,
+  initModelLifecycleTracking,
   openModelSelectorForProvider,
   openProviderModal,
   showApiKeyForm,
@@ -13688,6 +13714,29 @@ function handleLocalLlmDownload(payload) {
     }
   }
 }
+let lifecycleIndicatorEl = null;
+function handleLocalLlmLifecycle(raw) {
+  const isChatPage = currentPrefix === "/chats";
+  if (!isChatPage) return;
+  const payload = raw;
+  const modelName = payload.modelId || "model";
+  if (payload.state === "loading") {
+    if (lifecycleIndicatorEl) {
+      lifecycleIndicatorEl.remove();
+    }
+    lifecycleIndicatorEl = chatAddMsg("system", `Loading model ${modelName} into memory…`);
+  } else if (payload.state === "loaded") {
+    if (lifecycleIndicatorEl) {
+      lifecycleIndicatorEl.remove();
+      lifecycleIndicatorEl = null;
+    }
+    const sizeStr = payload.modelSizeBytes ? ` (${(payload.modelSizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB)` : "";
+    chatAddMsg("system", `Model ${modelName} loaded${sizeStr}`);
+  } else if (payload.state === "unloaded") {
+    const msg = payload.reason === "idle" ? `Model ${modelName} unloaded after inactivity` : `Model ${modelName} unloaded`;
+    chatAddMsg("system", msg);
+  }
+}
 function handleApprovalEvent(payload) {
   renderApprovalCard(payload.requestId, payload.command);
 }
@@ -13776,6 +13825,7 @@ const eventHandlers = {
   "sandbox.host.provision": handleSandboxHostProvision,
   "browser.image.pull": handleBrowserImagePull,
   "local-llm.download": handleLocalLlmDownload,
+  "local-llm.lifecycle": handleLocalLlmLifecycle,
   "models.updated": handleModelsUpdated,
   "location.request": handleLocationRequest,
   "network.audit.entry": handleNetworkAuditEntry
@@ -34086,6 +34136,7 @@ function startApp() {
   }
   mount(path);
   connect();
+  initModelLifecycleTracking();
   fetchBootstrap();
   initInstallBanner();
 }
