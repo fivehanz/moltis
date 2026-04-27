@@ -314,6 +314,10 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 Struct(HashMap::from([("scope", Leaf), ("max_lines", Leaf)])),
             ),
             ("reasoning_effort", Leaf),
+            (
+                "mcp",
+                Struct(HashMap::from([("deny_servers", Leaf)])),
+            ),
         ]))
     };
 
