@@ -3,7 +3,7 @@
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
-app = 'rozine-jsmx'
+app = 'rozine'
 primary_region = 'sin'
 swap_size_mb = 512
 
@@ -46,8 +46,7 @@ swap_size_mb = 512
 
 [[vm]]
   size = 'shared-cpu-2x'
-  memory = '512mb'
+  memory = '1gb'
   cpu_kind = 'shared'
   cpus = 2
-  memory_mb = 512
   processes = ['app']
