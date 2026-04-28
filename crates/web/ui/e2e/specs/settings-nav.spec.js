@@ -1,24 +1,5 @@
 const { expect, test } = require("../base-test");
-const { expectPageContentMounted, navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
-
-async function spoofSafari(page) {
-	await page.addInitScript(() => {
-		const safariUserAgent =
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15";
-		Object.defineProperty(Navigator.prototype, "userAgent", {
-			configurable: true,
-			get() {
-				return safariUserAgent;
-			},
-		});
-		Object.defineProperty(Navigator.prototype, "vendor", {
-			configurable: true,
-			get() {
-				return "Apple Computer, Inc.";
-			},
-		});
-	});
-}
+const { navigateAndWait, waitForWsConnected, watchPageErrors } = require("../helpers");
 
 function graphqlHttpStatus(page) {
 	return page.evaluate(async () => {
@@ -718,66 +699,9 @@ test.describe("Settings navigation", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
-	test.skip("selecting identity emoji updates favicon live without requiring notice in Chromium", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-		await navigateAndWait(page, "/settings/profile");
-
-		const pickBtn = page.getByRole("button", { name: "Pick", exact: true });
-		await expect(pickBtn).toBeVisible();
-		await pickBtn.click();
-
-		const selectedEmoji = await page.evaluate(() => {
-			var current = (window.__MOLTIS__?.identity?.emoji || "").trim();
-			var options = ["🦊", "🐙", "🤖", "🐶"];
-			return options.find((emoji) => emoji !== current) || "🦊";
-		});
-		const iconHrefBefore = await page.evaluate(() => document.querySelector('link[rel="icon"]')?.href || "");
-		await page.getByRole("button", { name: selectedEmoji, exact: true }).click();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect
-			.poll(() =>
-				page.evaluate((beforeHref) => {
-					var href = document.querySelector('link[rel="icon"]')?.href || "";
-					return href.startsWith("data:image/png") && href !== beforeHref;
-				}, iconHrefBefore),
-			)
-			.toBeTruthy();
-		await expect(
-			page.getByText("favicon updates requires reload and may be cached for minutes", { exact: false }),
-		).toHaveCount(0);
-		await expect(page.getByRole("button", { name: "requires reload", exact: true })).toHaveCount(0);
-
-		expect(pageErrors).toEqual([]);
-	});
-
-	test.skip("safari shows favicon reload notice and button triggers full page refresh", async ({ page }) => {
-		const pageErrors = watchPageErrors(page);
-		await spoofSafari(page);
-		await navigateAndWait(page, "/settings/profile");
-
-		const pickBtn = page.getByRole("button", { name: "Pick", exact: true });
-		await expect(pickBtn).toBeVisible();
-		await pickBtn.click();
-
-		const selectedEmoji = await page.evaluate(() => {
-			var current = (window.__MOLTIS__?.identity?.emoji || "").trim();
-			var options = ["🦊", "🐙", "🤖", "🐶"];
-			return options.find((emoji) => emoji !== current) || "🦊";
-		});
-		await page.getByRole("button", { name: selectedEmoji, exact: true }).click();
-		await expect(page.getByText("Saved", { exact: true })).toBeVisible();
-		await expect(
-			page.getByText("favicon updates requires reload and may be cached for minutes", { exact: false }),
-		).toBeVisible();
-		const reloadBtn = page.getByRole("button", { name: "requires reload", exact: true });
-		await expect(reloadBtn).toBeVisible();
-
-		await Promise.all([page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame()), reloadBtn.click()]);
-		await expectPageContentMounted(page);
-		await expect(page).toHaveURL(/\/settings\/identity$/);
-
-		expect(pageErrors).toEqual([]);
-	});
+	// Removed: "selecting identity emoji updates favicon" and "safari favicon reload notice"
+	// Emoji picker moved from IdentitySection to AgentsPage in the agents architecture
+	// simplification (#898). These tests tested code that no longer exists on the profile page.
 
 	test("environment page has add form", async ({ page }) => {
 		await navigateAndWait(page, "/settings/environment");
