@@ -746,9 +746,13 @@ test.describe("Session management", () => {
 		await expect(renameInput).toBeVisible({ timeout: 5_000 });
 
 		// Use a short name (under 20 chars) so truncation doesn't affect assertion.
+		// Use keyboard API to avoid fill()/press() race with the onBlur handler
+		// that removes the input from the DOM between the two calls.
 		const newName = "My Chat";
-		await renameInput.fill(newName);
-		await renameInput.press("Enter");
+		await renameInput.focus();
+		await page.keyboard.press("Control+A");
+		await page.keyboard.type(newName);
+		await page.keyboard.press("Enter");
 
 		// The display name should update in the toolbar.
 		await expect(nameMount.getByTitle("Click to rename")).toHaveText(newName, { timeout: 5_000 });
