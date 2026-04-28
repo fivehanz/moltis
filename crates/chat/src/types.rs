@@ -526,9 +526,11 @@ pub(crate) fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
 /// Extract preview text from a single message JSON value.
 pub(crate) fn extract_preview_from_value(msg: &Value) -> Option<String> {
     fn message_text(msg: &Value) -> Option<String> {
-        let text = if let Some(s) = msg.get("content").and_then(|v| v.as_str()) {
+        let content = msg.get("content")?;
+        let text = if let Some(s) = content.as_str() {
             s.to_string()
-        } else if let Some(blocks) = msg.get("content").and_then(|v| v.as_array()) {
+        } else {
+            let blocks = content.as_array()?;
             blocks
                 .iter()
                 .filter_map(|b| {
@@ -540,8 +542,6 @@ pub(crate) fn extract_preview_from_value(msg: &Value) -> Option<String> {
                 })
                 .collect::<Vec<_>>()
                 .join(" ")
-        } else {
-            return None;
         };
         let trimmed = text.trim();
         if trimmed.is_empty() {

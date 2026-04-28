@@ -224,13 +224,13 @@ fn collect_shadowed_keys(
             (toml_edit::Item::Table(u), toml_edit::Item::Table(d)) => {
                 collect_shadowed_keys(u, d, &mut path.clone(), out);
             },
-            (toml_edit::Item::Value(u_val), toml_edit::Item::Value(d_val)) => {
+            (toml_edit::Item::Value(u_val), toml_edit::Item::Value(d_val))
                 // Only flag when the user value matches the default — that's
                 // a true shadow (frozen default).  Differing values are
                 // intentional overrides and should not be reported.
-                if u_val.to_string().trim() == d_val.to_string().trim() {
-                    out.push(path);
-                }
+                if u_val.to_string().trim() == d_val.to_string().trim() =>
+            {
+                out.push(path);
             },
             _ => {},
         }

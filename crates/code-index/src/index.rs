@@ -657,7 +657,7 @@ impl CodeIndex {
                         } else {
                             raw_chunks
                                 .into_iter()
-                                .zip(embeddings.into_iter())
+                                .zip(embeddings)
                                 .enumerate()
                                 .map(|(idx, (chunk, embedding))| StoreChunk {
                                     file_path: chunk.file_path.clone(),

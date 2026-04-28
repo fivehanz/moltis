@@ -139,7 +139,7 @@ function emergencyDisableAllSkills(): void {
 		if (!yes) return;
 		sendRpc("skills.emergency_disable", {}).then((res) => {
 			if (!res?.ok) {
-				showToast(`Emergency disable failed: ${res?.error || "unknown"}`, "error");
+				showToast(`Emergency disable failed: ${res?.error?.message || "unknown"}`, "error");
 				return;
 			}
 			showToast(`Disabled ${(res.payload as Record<string, number>)?.skills_disabled || 0} skills`, "success");
@@ -149,8 +149,11 @@ function emergencyDisableAllSkills(): void {
 }
 
 function fetchAll(): void {
+	fetchAllAsync().catch(console.error);
+}
+function fetchAllAsync(): Promise<void> {
 	loading.value = true;
-	fetch("/api/skills")
+	return fetch("/api/skills")
 		.then((r) => r.json())
 		.then((data) => {
 			if (data.skills) enabledSkills.value = data.skills;
@@ -163,7 +166,7 @@ function fetchAll(): void {
 		});
 }
 
-function doInstall(source: string, autoTrust = false): Promise<void> {
+function doInstall(source: string): Promise<void> {
 	if (!(source && S.connected)) {
 		if (!S.connected) showToast("Not connected to gateway.", "error");
 		return Promise.resolve();
@@ -174,25 +177,11 @@ function doInstall(source: string, autoTrust = false): Promise<void> {
 		if (res?.ok) {
 			const p = (res.payload || {}) as Record<string, unknown[]>;
 			const installed = (p.installed || []) as Array<{ name?: string }>;
-			showToast(`Installed ${source} (${installed.length} skills)`, "success");
-
-			if (autoTrust && installed.length > 0) {
-				let trustFailed = 0;
-				for (const skill of installed) {
-					if (!skill.name) continue;
-					const trustRes = await sendRpc("skills.skill.trust", { source, skill: skill.name, trusted: true });
-					const enableRes = await sendRpc("skills.skill.enable", { source, skill: skill.name, enabled: true });
-					if (!(trustRes?.ok && enableRes?.ok)) trustFailed++;
-				}
-				if (trustFailed > 0) {
-					showToast(`${trustFailed} skill(s) could not be auto-trusted. Enable them manually in Skills.`, "error");
-				}
-			}
-
+			showToast(`Installed ${source} (${installed.length} skills) — review and enable the skills you need.`, "success");
 			fetchAll();
 			stopInstallProgress(pid, true);
 		} else {
-			showToast(`Failed: ${res?.error || "unknown error"}`, "error");
+			showToast(`Failed: ${res?.error?.message || "unknown error"}`, "error");
 			stopInstallProgress(pid, false);
 		}
 	});
@@ -203,7 +192,7 @@ function doExportBundle(source: string, path: string | null): Promise<void> {
 	if (path) params.path = path;
 	return sendRpc("skills.repos.export", params).then((res) => {
 		if (res?.ok) showToast(`Exported ${source}`, "success");
-		else showToast(`Failed: ${res?.error || "unknown"}`, "error");
+		else showToast(`Failed: ${res?.error?.message || "unknown"}`, "error");
 	});
 }
 export function doUnquarantine(source: string): Promise<void> {
@@ -212,7 +201,7 @@ export function doUnquarantine(source: string): Promise<void> {
 		if (res?.ok) {
 			showToast(`Cleared quarantine for ${source}`, "success");
 			fetchAll();
-		} else showToast(`Failed: ${res?.error || "unknown"}`, "error");
+		} else showToast(`Failed: ${res?.error?.message || "unknown"}`, "error");
 	});
 }
 function searchSkills(source: string, query: string): Promise<SkillSummary[]> {
@@ -306,18 +295,15 @@ interface FeaturedSkill {
 	repo: string;
 	desc: string;
 	hasRecipe?: boolean;
-	/** When true, all skills in this repo are auto-trusted and enabled on install. */
-	autoTrust?: boolean;
 }
 const featuredSkills: FeaturedSkill[] = [
-	{ repo: "anthropics/skills", desc: "Official Anthropic agent skills", autoTrust: true },
-	{ repo: "vercel-labs/agent-skills", desc: "Vercel agent skills collection", autoTrust: true },
-	{ repo: "vercel-labs/skills", desc: "Vercel skills toolkit", autoTrust: true },
+	{ repo: "anthropics/skills", desc: "Official Anthropic agent skills" },
+	{ repo: "vercel-labs/agent-skills", desc: "Vercel agent skills collection" },
+	{ repo: "vercel-labs/skills", desc: "Vercel skills toolkit" },
 	{
 		repo: "garrytan/gbrain",
 		desc: "Knowledge graph with hybrid search for agent memory",
 		hasRecipe: true,
-		autoTrust: true,
 	},
 ];
 
@@ -393,7 +379,7 @@ function FeaturedCard({ skill: f }: { skill: FeaturedSkill }): VNode {
 				onClick={() => {
 					if (isInstalled) return;
 					installing.value = true;
-					doInstall(f.repo, f.autoTrust)
+					doInstall(f.repo)
 						.then(() => {
 							if (f.hasRecipe) checkPostInstallRecipe(f.repo).catch(console.error);
 						})
@@ -505,7 +491,7 @@ function SkillDetailPanel({
 					if (isDisc) onClose();
 					fetchAll();
 					onReload?.();
-				} else showToast(`Failed: ${r?.error || "unknown"}`, "error");
+				} else showToast(`Failed: ${r?.error?.message || "unknown"}`, "error");
 			},
 		);
 	}
@@ -538,10 +524,12 @@ function SkillDetailPanel({
 						className={
 							isDisc && d.enabled
 								? "provider-btn provider-btn-sm provider-btn-danger"
-								: "provider-btn provider-btn-sm provider-btn-secondary"
+								: d.enabled
+									? "provider-btn provider-btn-sm provider-btn-secondary"
+									: "provider-btn provider-btn-sm"
 						}
 					>
-						{actionBusy.value ? "..." : isDisc && d.enabled ? "Delete" : d.enabled ? "Disable" : "Enable"}
+						{actionBusy.value ? "..." : isDisc && d.enabled ? "Delete" : d.enabled ? "Disable" : "Install"}
 					</button>
 					<button
 						onClick={onClose}
@@ -659,10 +647,61 @@ function RepoCard({ repo }: { repo: RepoSummary }): VNode {
 		sendRpc("skills.skill.detail", { source: repo.source, skill: s.name }).then((r) => {
 			detailLoading.value = false;
 			if (r?.ok) activeDetail.value = r.payload as SkillDetail;
-			else showToast(`Failed: ${r?.error || "unknown"}`, "error");
+			else showToast(`Failed: ${r?.error?.message || "unknown"}`, "error");
 		});
 	}
+	const installingSkill = useSignal<string | null>(null);
+	function quickInstall(sk: SkillSummary): void {
+		if (installingSkill.value) {
+			showToast("Another install is in progress, please wait\u2026", "error");
+			return;
+		}
+		installingSkill.value = sk.name;
+		sendRpc("skills.skill.enable", { source: repo.source, skill: sk.name }).then((r) => {
+			installingSkill.value = null;
+			if (r?.ok) {
+				allSkills.value = allSkills.value.map((s) => (s.name === sk.name ? { ...s, enabled: true } : s));
+				fetchAll();
+			} else showToast(`Failed: ${r?.error?.message || "unknown"}`, "error");
+		});
+	}
+	const installingAll = useSignal(false);
+	async function installAllSkills(): Promise<void> {
+		let skills = allSkills.value;
+		if (!skills.length) {
+			skills = await searchSkills(repo.source, "");
+			allSkills.value = skills;
+		}
+		const unenabled = skills.filter((sk) => !sk.enabled);
+		if (!unenabled.length) return;
+		const yes = await requestConfirm(`You are about to enable ${unenabled.length} skills, are you sure?`, {
+			confirmLabel: "Install All",
+		});
+		if (!yes) return;
+		installingAll.value = true;
+		const succeeded = new Set<string>();
+		for (const sk of unenabled) {
+			const r = await sendRpc("skills.skill.enable", { source: repo.source, skill: sk.name });
+			if (r?.ok) {
+				succeeded.add(sk.name);
+			} else {
+				showToast(`Failed to install ${sk.name}: ${r?.error?.message || "unknown"}`, "error");
+			}
+		}
+		installingAll.value = false;
+		if (succeeded.size > 0) {
+			showToast(`Installed ${succeeded.size} skill${succeeded.size > 1 ? "s" : ""}`, "success");
+		}
+		// Re-fetch both the skill list and repo summary from the server
+		// so counts are accurate (no optimistic update).
+		const [freshSkills] = await Promise.all([searchSkills(repo.source, ""), fetchAllAsync()]);
+		allSkills.value = freshSkills;
+	}
 	const displayed = searchQuery.value.trim() ? searchResults.value : allSkills.value;
+	const unenabledCount =
+		allSkills.value.length > 0
+			? allSkills.value.filter((sk) => !sk.enabled).length
+			: repo.skill_count - repo.enabled_count;
 	return (
 		<div className="skills-repo-card">
 			<div className="skills-repo-header" onClick={toggle}>
@@ -728,6 +767,19 @@ function RepoCard({ repo }: { repo: RepoSummary }): VNode {
 					)}
 				</div>
 				<div style={{ display: "flex", gap: "6px" }}>
+					{!isOrphan && unenabledCount > 0 && (
+						<button
+							type="button"
+							className="provider-btn provider-btn-sm"
+							disabled={installingAll.value}
+							onClick={(e) => {
+								e.stopPropagation();
+								installAllSkills().catch(console.error);
+							}}
+						>
+							{installingAll.value ? "Installing\u2026" : "Install All"}
+						</button>
+					)}
 					{!isOrphan && (
 						<button
 							className="provider-btn provider-btn-sm provider-btn-secondary"
@@ -773,7 +825,7 @@ function RepoCard({ repo }: { repo: RepoSummary }): VNode {
 							sendRpc("skills.repos.remove", { source: repo.source }).then((r) => {
 								removingRepo.value = false;
 								if (r?.ok) fetchAll();
-								else showToast(`Failed: ${r?.error || "unknown"}`, "error");
+								else showToast(`Failed: ${r?.error?.message || "unknown"}`, "error");
 							});
 						}}
 					>
@@ -830,15 +882,64 @@ function RepoCard({ repo }: { repo: RepoSummary }): VNode {
 					{!activeDetail.value && displayed.length > 0 && (
 						<div className="skills-browse-list">
 							{displayed.map((sk) => (
-								<div key={sk.name} className="skills-ac-item" onClick={() => loadDetail(sk)}>
-									<span style={{ fontFamily: "var(--font-mono)", fontWeight: 500, color: "var(--text-strong)" }}>
-										{sk.display_name || sk.name}
-									</span>
-									{sk.description && (
-										<span style={{ color: "var(--muted)", fontSize: ".72rem", marginLeft: "6px" }}>
-											{sk.description}
+								<div
+									key={sk.name}
+									className="skills-ac-item"
+									style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}
+								>
+									{/* biome-ignore lint/a11y/useSemanticElements: complex layout requires div wrapper */}
+									<div
+										role="button"
+										tabIndex={0}
+										style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+										onClick={() => loadDetail(sk)}
+										onKeyDown={(e) => {
+											if (e.key === "Enter" || e.key === " ") loadDetail(sk);
+										}}
+									>
+										<span style={{ fontFamily: "var(--font-mono)", fontWeight: 500, color: "var(--text-strong)" }}>
+											{sk.display_name || sk.name}
 										</span>
-									)}
+										{sk.description && (
+											<span style={{ color: "var(--muted)", fontSize: ".72rem", marginLeft: "6px" }}>
+												{sk.description}
+											</span>
+										)}
+									</div>
+									<div style={{ display: "flex", gap: "4px", flexShrink: 0, marginLeft: "8px" }}>
+										<button
+											type="button"
+											className="provider-btn provider-btn-sm provider-btn-secondary"
+											onClick={() => loadDetail(sk)}
+										>
+											View
+										</button>
+										{!sk.enabled && (
+											<button
+												type="button"
+												className="provider-btn provider-btn-sm"
+												disabled={installingSkill.value === sk.name}
+												onClick={(e) => {
+													e.stopPropagation();
+													quickInstall(sk);
+												}}
+											>
+												{installingSkill.value === sk.name ? "Installing\u2026" : "Install"}
+											</button>
+										)}
+										{sk.enabled && (
+											<span
+												style={{
+													fontSize: ".72rem",
+													padding: "4px 8px",
+													color: "var(--success, #22c55e)",
+													fontWeight: 500,
+												}}
+											>
+												Installed
+											</span>
+										)}
+									</div>
 								</div>
 							))}
 						</div>
@@ -897,7 +998,7 @@ function BundledCategoriesSection(): VNode {
 				);
 				fetchAll();
 			} else {
-				showToast(`Failed: ${res?.error || "unknown"}`, "error");
+				showToast(`Failed: ${res?.error?.message || "unknown"}`, "error");
 			}
 		});
 	}
@@ -1006,7 +1107,7 @@ function EnabledSkillsTable(): VNode | null {
 				activeDetail.value = null;
 				showToast(isDisc(sk) ? `Deleted ${sk.name}` : `Disabled ${sk.name}`, "success");
 				fetchAll();
-			} else showToast(`Failed: ${r?.error || "unknown"}`, "error");
+			} else showToast(`Failed: ${r?.error?.message || "unknown"}`, "error");
 		});
 	}
 	function onDisable(sk: SkillSummary): void {

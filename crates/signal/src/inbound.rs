@@ -265,7 +265,7 @@ fn render_mentions(mut text: String, mentions: Option<&Value>) -> String {
             Some((byte_start, byte_end - byte_start, format!("@{identifier}")))
         })
         .collect();
-    replacements.sort_by(|a, b| b.0.cmp(&a.0));
+    replacements.sort_by_key(|item| std::cmp::Reverse(item.0));
 
     for (start, length, replacement) in replacements {
         if start + length <= text.len() {

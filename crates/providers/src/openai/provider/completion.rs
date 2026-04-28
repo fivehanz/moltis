@@ -396,12 +396,12 @@ impl OpenAiProvider {
                         text_buf.push_str(delta);
                     }
                 },
-                "response.output_item.added" => {
-                    if evt["item"]["type"].as_str() == Some("function_call") {
-                        fn_call_ids.push(evt["item"]["call_id"].as_str().unwrap_or("").to_string());
-                        fn_call_names.push(evt["item"]["name"].as_str().unwrap_or("").to_string());
-                        fn_call_args.push(String::new());
-                    }
+                "response.output_item.added"
+                    if evt["item"]["type"].as_str() == Some("function_call") =>
+                {
+                    fn_call_ids.push(evt["item"]["call_id"].as_str().unwrap_or("").to_string());
+                    fn_call_names.push(evt["item"]["name"].as_str().unwrap_or("").to_string());
+                    fn_call_args.push(String::new());
                 },
                 "response.function_call_arguments.delta" => {
                     if let Some(delta) = evt["delta"].as_str()

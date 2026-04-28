@@ -143,9 +143,9 @@ pub fn is_within_active_hours(start: &str, end: &str, timezone: &str) -> bool {
     let end_minutes = if end == "24:00" {
         24 * 60
     } else {
-        end_time.hour() as u32 * 60 + end_time.minute() as u32
+        end_time.hour() * 60 + end_time.minute()
     };
-    let start_minutes = start_time.hour() as u32 * 60 + start_time.minute() as u32;
+    let start_minutes = start_time.hour() * 60 + start_time.minute();
 
     let now_minutes = current_minutes(timezone);
 

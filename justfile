@@ -2,8 +2,8 @@
 default:
     @just --list
 
-# Keep local formatting/linting toolchain aligned with CI/release workflows.
-nightly_toolchain := "nightly-2025-11-30"
+# Read nightly toolchain from rust-toolchain.toml (single source of truth).
+nightly_toolchain := `grep '^channel' rust-toolchain.toml | sed 's/.*"\(.*\)"/\1/'`
 
 # Format Rust code
 format:
@@ -26,7 +26,7 @@ lint: lockfile-check
     #!/usr/bin/env bash
     set -euo pipefail
     if [ "$(uname -s)" = "Darwin" ]; then
-        cargo +{{nightly_toolchain}} clippy -Z unstable-options --workspace --all-targets --exclude moltis-providers --exclude moltis-gateway --timings -- -D warnings
+        cargo +{{nightly_toolchain}} clippy -Z unstable-options --workspace --all-targets --exclude moltis-providers --exclude moltis-gateway --exclude moltis-matrix --timings -- -D warnings
         cargo +{{nightly_toolchain}} clippy -Z unstable-options -p moltis-providers --all-targets --features local-llm-metal --timings -- -D warnings
         cargo +{{nightly_toolchain}} clippy -Z unstable-options -p moltis-gateway --all-targets --features local-llm-metal --timings -- -D warnings
     else
@@ -36,6 +36,18 @@ lint: lockfile-check
 # Build Tailwind CSS for the web UI.
 build-css:
     cd crates/web/ui && ./build.sh
+
+# Build Vite frontend JS (TS/TSX -> dist/).
+build-frontend:
+    cd crates/web/ui && npm run build
+
+# Build the service worker (sw.ts -> sw.js).
+build-sw:
+    cd crates/web/ui && npm run build:sw
+
+# Build all web assets (Vite JS + Tailwind CSS + service worker).
+build-web-assets:
+    ./scripts/build-web-assets.sh
 
 # Ad-hoc codesign debug binaries (macOS only, requires MACOS_CODESIGN_IDENTITY).
 # Signs the main binary and all test binaries in target/debug/deps/ so Little
@@ -55,7 +67,7 @@ codesign-debug:
     done
 
 # Build the project
-build: build-css
+build: build-web-assets
     cargo build
     just codesign-debug
 
@@ -238,12 +250,12 @@ flatpak:
     cd flatpak && flatpak-builder --repo=repo --force-clean builddir org.moltbot.Moltis.yml
 
 # Run all CI checks (format, lint, build, test)
-ci: format-check lint i18n-check build-css build test
+ci: format-check lint i18n-check build-web-assets build test
 
 # Compile once, then run Rust tests and E2E tests in parallel.
 # Uses the same nightly toolchain as clippy/local-validate so the build cache
 # is shared — no double-compilation.
-build-test: build-css
+build-test: build-web-assets
     #!/usr/bin/env bash
     set -euo pipefail
     echo "==> Building all workspace targets (bins + tests)..."

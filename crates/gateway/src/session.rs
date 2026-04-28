@@ -118,9 +118,11 @@ fn filter_ui_history(messages: Vec<Value>) -> Vec<Value> {
 
 /// Extract text content from a single message Value.
 fn message_text(msg: &Value) -> Option<String> {
-    let text = if let Some(s) = msg.get("content").and_then(|v| v.as_str()) {
+    let content = msg.get("content")?;
+    let text = if let Some(s) = content.as_str() {
         s.to_string()
-    } else if let Some(blocks) = msg.get("content").and_then(|v| v.as_array()) {
+    } else {
+        let blocks = content.as_array()?;
         blocks
             .iter()
             .filter_map(|b| {
@@ -132,8 +134,6 @@ fn message_text(msg: &Value) -> Option<String> {
             })
             .collect::<Vec<_>>()
             .join(" ")
-    } else {
-        return None;
     };
     let trimmed = text.trim();
     if trimmed.is_empty() {

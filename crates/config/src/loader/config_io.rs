@@ -460,10 +460,10 @@ pub fn strip_default_values(effective: &mut toml_edit::Table, defaults: &toml_ed
                     }
                 }
             },
-            (toml_edit::Item::Value(eff_val), toml_edit::Item::Value(def_val)) => {
-                if values_equal(eff_val, def_val) {
-                    effective.remove(&key);
-                }
+            (toml_edit::Item::Value(eff_val), toml_edit::Item::Value(def_val))
+                if values_equal(eff_val, def_val) =>
+            {
+                effective.remove(&key);
             },
             _ => {
                 // Type mismatch (e.g. table vs value) → user override, keep it.
@@ -523,10 +523,10 @@ fn strip_new_default_values(
                     }
                 }
             },
-            (toml_edit::Item::Value(eff_val), toml_edit::Item::Value(def_val)) => {
-                if values_equal(eff_val, def_val) {
-                    effective.remove(&key);
-                }
+            (toml_edit::Item::Value(eff_val), toml_edit::Item::Value(def_val))
+                if values_equal(eff_val, def_val) =>
+            {
+                effective.remove(&key);
             },
             _ => {},
         }

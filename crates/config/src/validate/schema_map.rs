@@ -48,6 +48,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
             ("strict_tools", Leaf),
             ("policy", tool_policy_entry()),
             ("model_overrides", Map(Box::new(model_override()))),
+            ("idle_timeout_secs", Leaf),
         ]))
     };
 
@@ -313,6 +314,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 Struct(HashMap::from([("scope", Leaf), ("max_lines", Leaf)])),
             ),
             ("reasoning_effort", Leaf),
+            ("mcp", Struct(HashMap::from([("deny_servers", Leaf)]))),
         ]))
     };
 
@@ -527,6 +529,7 @@ pub(super) fn build_schema_map() -> KnownKeys {
                 ("enabled", Leaf),
                 ("every", Leaf),
                 ("model", Leaf),
+                ("agent_id", Leaf),
                 ("prompt", Leaf),
                 ("ack_max_chars", Leaf),
                 ("active_hours", active_hours()),
