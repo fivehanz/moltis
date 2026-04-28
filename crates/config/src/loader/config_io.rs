@@ -14,9 +14,11 @@ use {
 /// the config concurrently — `rename` is atomic on POSIX filesystems so
 /// readers always see either the old or new content, never a partial mix.
 fn atomic_write(path: &Path, content: impl AsRef<[u8]>) -> std::io::Result<()> {
-    let temp = path.with_extension("toml.tmp");
-    std::fs::write(&temp, content)?;
-    std::fs::rename(&temp, path)?;
+    use std::io::Write;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(content.as_ref())?;
+    tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 
