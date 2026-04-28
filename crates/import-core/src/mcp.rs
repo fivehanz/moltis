@@ -88,13 +88,13 @@ pub fn merge_mcp_servers(
     }
 
     if imported > 0 {
-        if let Some(parent) = dest_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return CategoryReport::failed(
-                    ImportCategory::McpServers,
-                    format!("failed to create directory: {e}"),
-                );
-            }
+        if let Some(parent) = dest_path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return CategoryReport::failed(
+                ImportCategory::McpServers,
+                format!("failed to create directory: {e}"),
+            );
         }
         let json = match serde_json::to_string_pretty(&existing) {
             Ok(j) => j,
