@@ -10,6 +10,9 @@ requires:
       formula: steipete/tap/birdclaw
       bins: [birdclaw]
       os: [darwin]
+origin:
+  source: moltis
+  url: https://github.com/moltis-org/moltis
 ---
 
 # birdclaw — Twitter/X Local Workspace

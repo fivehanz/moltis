@@ -1,6 +1,9 @@
 ---
 name: data-sync
 description: Sync and archive data from messaging platforms (WhatsApp, Discord, Slack, Twitter/X, Google) into Moltis memory as daily digest summaries. Orchestrates crawl tools and writes structured markdown to the memory system.
+origin:
+  source: moltis
+  url: https://github.com/moltis-org/moltis
 ---
 
 # data-sync — Crawl-to-Memory Pipeline

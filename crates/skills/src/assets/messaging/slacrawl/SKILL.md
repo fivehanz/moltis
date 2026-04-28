@@ -13,6 +13,9 @@ requires:
     - kind: go
       module: "github.com/vincentkoc/slacrawl/cmd/slacrawl@latest"
       bins: [slacrawl]
+origin:
+  source: moltis
+  url: https://github.com/moltis-org/moltis
 ---
 
 # slacrawl — Slack Workspace Archive

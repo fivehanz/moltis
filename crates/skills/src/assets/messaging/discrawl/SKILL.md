@@ -13,6 +13,9 @@ requires:
     - kind: go
       module: "github.com/steipete/discrawl/cmd/discrawl@latest"
       bins: [discrawl]
+origin:
+  source: moltis
+  url: https://github.com/moltis-org/moltis
 ---
 
 # discrawl — Discord Guild Archive

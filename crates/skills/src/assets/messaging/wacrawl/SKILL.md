@@ -13,6 +13,9 @@ requires:
     - kind: go
       module: "github.com/steipete/wacrawl/cmd/wacrawl@latest"
       bins: [wacrawl]
+origin:
+  source: moltis
+  url: https://github.com/moltis-org/moltis
 ---
 
 # wacrawl — WhatsApp Desktop Archive (Read-Only)
