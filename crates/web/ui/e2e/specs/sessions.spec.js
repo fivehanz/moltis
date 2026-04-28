@@ -381,11 +381,39 @@ test.describe("Session management", () => {
 		expect(pageErrors).toEqual([]);
 	});
 
-	// Removed: "stop action appears for active run and clears after abort"
-	// The stop button moved from the session header to the thinking indicator
-	// bubble (makeThinkingStopBtn in ws/shared.ts). The thinking indicator
-	// lifecycle is tightly coupled to WebSocket chat events and cannot be
-	// reliably tested via the system-event RPC.
+	test("stop action appears for active run and clears after abort", async ({ page }) => {
+		const pageErrors = watchPageErrors(page);
+		await page.goto("/");
+		await waitForWsConnected(page);
+		await expectPageContentMounted(page);
+		await createSession(page);
+
+		const sessionPath = new URL(page.url()).pathname;
+		const sessionKey = sessionPath.replace(/^\/chats\//, "").replace(/\//g, ":");
+
+		// No thinking indicator initially
+		await expect(page.locator("#thinkingIndicator")).toHaveCount(0);
+
+		// Trigger thinking state via system-event
+		await expectRpcOk(page, "system-event", {
+			event: "chat",
+			payload: {
+				sessionKey,
+				state: "thinking",
+				runId: "run-stop-e2e",
+			},
+		});
+
+		// Thinking indicator with stop button should appear
+		const stopBtn = page.locator("#thinkingIndicator .thinking-stop-btn");
+		await expect(stopBtn).toBeVisible({ timeout: 5_000 });
+
+		// Click stop — button text changes to "Stopping…"
+		await stopBtn.click();
+		await expect(stopBtn).toHaveText("Stopping\u2026");
+
+		expect(pageErrors).toEqual([]);
+	});
 
 	test("share button creates cutoff notice and copyable link", async ({ page }) => {
 		const pageErrors = await navigateAndWait(page, "/");
