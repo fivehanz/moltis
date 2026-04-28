@@ -8,6 +8,18 @@ use {
     tracing::{debug, info, warn},
 };
 
+/// Write content to a file atomically via write-to-temp + rename.
+///
+/// This prevents corruption when two processes (e.g. CLI + server) write
+/// the config concurrently — `rename` is atomic on POSIX filesystems so
+/// readers always see either the old or new content, never a partial mix.
+fn atomic_write(path: &Path, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let temp = path.with_extension("toml.tmp");
+    std::fs::write(&temp, content)?;
+    std::fs::rename(&temp, path)?;
+    Ok(())
+}
+
 /// Load config from the given path (any supported format).
 ///
 /// After parsing, `MOLTIS_*` env vars are applied as overrides.
@@ -333,7 +345,7 @@ pub fn save_raw_config(toml_str: &str) -> crate::Result<PathBuf> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, toml_str)?;
+    atomic_write(&path, toml_str)?;
     debug!(path = %path.display(), "saved raw config");
     Ok(path)
 }
@@ -343,6 +355,8 @@ pub fn save_raw_config(toml_str: &str) -> crate::Result<PathBuf> {
 /// For existing TOML files, this preserves user comments by merging the new
 /// serialized values into the current document structure before writing.
 pub fn save_config_to_path(path: &Path, config: &MoltisConfig) -> crate::Result<PathBuf> {
+    let mut guard = CONFIG_SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    guard.target_path = Some(path.to_path_buf());
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -361,10 +375,10 @@ pub fn save_config_to_path(path: &Path, config: &MoltisConfig) -> crate::Result<
                 error = %error,
                 "failed to preserve TOML comments, rewriting config without comments"
             );
-            std::fs::write(path, toml_str)?;
+            atomic_write(path, toml_str)?;
         }
     } else {
-        std::fs::write(path, toml_str)?;
+        atomic_write(path, toml_str)?;
     }
 
     debug!(path = %path.display(), "saved config");
@@ -424,12 +438,12 @@ pub fn save_user_config_to_path(path: &Path, config: &MoltisConfig) -> crate::Re
 
         let mut result_doc = current_doc;
         merge_toml_tables(result_doc.as_table_mut(), override_doc.as_table());
-        std::fs::write(path, result_doc.to_string())?;
+        atomic_write(path, result_doc.to_string())?;
     } else {
         // New TOML file: strip all default values.
         let mut override_doc = effective_doc;
         strip_default_values(override_doc.as_table_mut(), defaults_doc.as_table());
-        std::fs::write(path, override_doc.to_string())?;
+        atomic_write(path, override_doc.to_string())?;
     }
 
     debug!(path = %path.display(), "saved user config (override layer only)");
@@ -550,7 +564,7 @@ fn merge_toml_preserving_comments(path: &Path, updated_toml: &str) -> crate::Res
         .map_err(|source| crate::Error::external("parse updated TOML", source))?;
 
     merge_toml_tables(current_doc.as_table_mut(), updated_doc.as_table());
-    std::fs::write(path, current_doc.to_string())?;
+    atomic_write(path, current_doc.to_string())?;
     Ok(())
 }
 
@@ -633,7 +647,9 @@ fn merge_toml_items(current: &mut toml_edit::Item, updated: &toml_edit::Item) {
 /// Returns `(keys_before, keys_after)` so callers can report the reduction.
 /// Does nothing if the config file doesn't exist or isn't TOML.
 pub fn compact_config() -> crate::Result<(usize, usize)> {
+    let mut guard = CONFIG_SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = find_or_default_config_path();
+    guard.target_path = Some(path.clone());
     if !path.exists() {
         return Ok((0, 0));
     }
@@ -657,7 +673,7 @@ pub fn compact_config() -> crate::Result<(usize, usize)> {
     strip_default_values(user_doc.as_table_mut(), defaults_doc.as_table());
     let keys_after = count_leaf_keys(user_doc.as_table());
 
-    std::fs::write(&path, user_doc.to_string())?;
+    atomic_write(&path, user_doc.to_string())?;
     debug!(
         path = %path.display(),
         before = keys_before,
@@ -692,7 +708,7 @@ pub(super) fn write_default_config(path: &Path, config: &MoltisConfig) -> crate:
     }
     // Use the documented template instead of plain serialization
     let toml_str = crate::template::default_config_template(config.server.port);
-    std::fs::write(path, &toml_str)?;
+    atomic_write(path, &toml_str)?;
     debug!(path = %path.display(), "wrote default config file with template");
     Ok(())
 }
