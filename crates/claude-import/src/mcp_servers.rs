@@ -25,20 +25,20 @@ pub fn import_mcp_servers(detection: &ClaudeDetection, dest_path: &Path) -> Cate
     let mut all_servers: HashMap<String, ImportMcpServer> = HashMap::new();
 
     // Source 1: ~/.claude.json mcpServers
-    if let Some(ref path) = detection.user_claude_json_path {
-        if let Some(servers) = extract_mcp_from_claude_json(path) {
-            for (name, server) in servers {
-                all_servers.entry(name).or_insert(server);
-            }
+    if let Some(ref path) = detection.user_claude_json_path
+        && let Some(servers) = extract_mcp_from_claude_json(path)
+    {
+        for (name, server) in servers {
+            all_servers.entry(name).or_insert(server);
         }
     }
 
     // Source 2: Claude Desktop config
-    if let Some(ref path) = detection.desktop_config_path {
-        if let Some(servers) = extract_mcp_from_claude_json(path) {
-            for (name, server) in servers {
-                all_servers.entry(name).or_insert(server);
-            }
+    if let Some(ref path) = detection.desktop_config_path
+        && let Some(servers) = extract_mcp_from_claude_json(path)
+    {
+        for (name, server) in servers {
+            all_servers.entry(name).or_insert(server);
         }
     }
 
