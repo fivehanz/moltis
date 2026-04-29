@@ -39,11 +39,15 @@ import {
 	updateChatSessionHeader,
 } from "./session-render";
 
-/** Focus the chat input only when the user isn't actively editing
- *  something else (e.g. rename input, search field). */
+/** Focus the chat input unless the user is actively editing a text field
+ *  (e.g. rename input, search field). Buttons and other non-text elements
+ *  are fine to steal focus from. */
 function focusChatInputIfIdle(): void {
-	const active = document.activeElement;
-	if (active && active !== document.body && active !== S.chatInput) return;
+	const el = document.activeElement;
+	if (el && el !== document.body && el !== S.chatInput) {
+		const tag = el.tagName;
+		if (tag === "INPUT" || tag === "TEXTAREA" || (el as HTMLElement).isContentEditable) return;
+	}
 	S.chatInput?.focus();
 }
 
