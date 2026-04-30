@@ -787,6 +787,7 @@ fn default_sandbox_packages() -> Vec<String> {
         "shellcheck",
         "patchelf",
         "git-lfs",
+        "gh", // GitHub CLI
         "gettext",
         "lsb-release",
         "software-properties-common",
