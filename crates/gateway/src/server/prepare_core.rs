@@ -991,7 +991,10 @@ pub async fn prepare_gateway_core(
                     broadcast(
                         state,
                         "sandbox.image.build",
-                        serde_json::json!({ "phase": "start", "packages": packages }),
+                        serde_json::json!({
+                            "phase": "start",
+                            "package_count": packages.len(),
+                        }),
                         BroadcastOpts {
                             drop_if_slow: true,
                             ..Default::default()
