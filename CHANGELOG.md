@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [20260430.01] - 2026-04-30
+### Added
+- Add /btw, /fast, /insights, /steer, /queue commands and auxiliary model config (#926)
+
+
+### Fixed
+- [mcp] Preserve auth_state on expired OAuth token so re-auth button shows (#930)
+- [web-ui] Remove scroll-hijacking ResizeObserver in chat (#922) (#925)
+
 ## [20260429.02] - 2026-04-29
 ### Added
 - [voice] Add voice personas for deterministic TTS identity (#916)
