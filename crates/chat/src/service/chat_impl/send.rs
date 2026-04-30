@@ -1086,6 +1086,7 @@ impl LiveChatService {
             // Capture config values before persona is moved into the agent future.
             let auto_extract_interval = persona.config.memory.auto_extract_interval;
             let extraction_write_mode = persona.config.memory.agent_write_mode;
+            let auto_title_enabled = persona.config.chat.auto_title;
             let agent_fut = async {
                 if stream_only {
                     run_streaming(
@@ -1271,6 +1272,19 @@ impl LiveChatService {
                         }
                     }
                 }
+            }
+
+            // ── Auto-title generation ──────────────────────────────
+            // After the first completed turn, trigger background title
+            // generation. We check >= 2 (not == 2) because agentic turns
+            // with tool calls produce more than 2 stored messages.
+            // `generate_title_if_needed` guards against duplicate titles.
+            if auto_title_enabled
+                && let Ok(count) = session_store.count(&session_key_clone).await
+                && count >= 2
+                && !queued_replay
+            {
+                state.trigger_auto_title(&session_key_clone).await;
             }
 
             let _ = LiveChatService::wait_for_event_forwarder(
